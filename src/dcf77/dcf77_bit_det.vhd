@@ -54,7 +54,7 @@ entity dcf77_bit_det is
         bit_value   : out std_logic;
         bit_valid   : out std_logic;          -- one-cycle strobe
         minute_mark : out std_logic;          -- one-cycle strobe
-        sync_state  : out std_logic_vector(1 downto 0);
+        sync_state  : out sync_state_t;
         env_max     : out env_word_t;
         threshold   : out env_word_t
     );
@@ -96,7 +96,7 @@ architecture rtl of dcf77_bit_det is
         bit_value   : std_logic;
         bit_valid   : std_logic;
         minute_mark : std_logic;
-        sync_state  : std_logic_vector(1 downto 0);
+        sync_state  : sync_state_t;
     end record;
 
     constant ZERO_ENV : env_word_t := (others => '0');
@@ -112,7 +112,7 @@ architecture rtl of dcf77_bit_det is
         bit_value   => '0',
         bit_valid   => '0',
         minute_mark => '0',
-        sync_state  => DCF77_SYNC_SEARCH
+        sync_state  => sync_search
     );
 
     signal r, rin : reg_type;
@@ -234,7 +234,7 @@ begin
             -- Sync state transitions: SEARCH -> LOCK on first minute mark.
             -----------------------------------------------------------------
             if v.minute_mark = '1' then
-                v.sync_state := DCF77_SYNC_LOCK;
+                v.sync_state := sync_lock;
             end if;
 
         end if;

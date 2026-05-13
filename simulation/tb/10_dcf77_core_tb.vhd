@@ -55,7 +55,6 @@ architecture tb of dcf77_core_tb is
     signal in_sample  : adc_sample_t := (others => '0');
     signal in_valid   : std_logic := '0';
 
-    signal time_out   : dcf77_time_type;
     signal status_out : dcf77_status_type;
     signal iq_tap_out : dcf77_iq_tap_type;
 
@@ -84,7 +83,6 @@ begin
             rst        => rst,
             in_sample  => in_sample,
             in_valid   => in_valid,
-            time_out   => time_out,
             status_out => status_out,
             iq_tap_out => iq_tap_out
         );
@@ -234,7 +232,7 @@ begin
                 -- We cannot peek inside the core to grab bit_valid here, so
                 -- this test only asserts that the chain remained alive
                 -- (status sync_state still in SEARCH because no minute mark).
-                check_equal(status_out.sync_state, DCF77_SYNC_SEARCH,
+                check(status_out.sync_state = sync_search,
                             "sync_state stays in SEARCH without minute mark");
 
             end if;

@@ -47,7 +47,8 @@ entity dcf77_core is
         in_sample : in  adc_sample_t;
         in_valid  : in  std_logic;
 
-        time_out  : out dcf77_time_type;
+        -- Comprehensive decoder status: time, validity, last frame, RSSI,
+        -- sync state, current bit index.  See dcf77_pkg.dcf77_status_type.
         status_out: out dcf77_status_type;
         iq_tap_out: out dcf77_iq_tap_type
     );
@@ -76,7 +77,7 @@ architecture rtl of dcf77_core is
     signal bit_val   : std_logic;
     signal bit_v     : std_logic;
     signal minute_mk : std_logic;
-    signal sync_st   : std_logic_vector(1 downto 0);
+    signal sync_st   : sync_state_t;
     signal env_max_s : env_word_t;
     signal thresh_s  : env_word_t;
 
@@ -236,11 +237,16 @@ begin
         );
 
     -- ------------------------------------------------------------------ --
-    -- Outputs                                                              --
+    -- Aggregate the comprehensive status record from the sub-blocks.      --
     -- ------------------------------------------------------------------ --
-    time_out             <= time_d;
+    status_out.time       <= time_d;
     status_out.time_valid <= time_v_d;
     status_out.sync_state <= sync_st;
+    status_out.last_frame <= last_frm;
+    -- bit_index is not yet surfaced by dcf77_frame_dec; held at zero until
+    -- that port is added.
+    status_out.bit_index  <= (others => '0');
+
     -- RSSI = top 16 bits of the sfixed env_max value (always non-negative,
     -- so reinterpreting the raw bits as ufixed is safe).  The MSB of env_max
     -- is the sign bit and is always '0' for a sum of squares.
@@ -252,8 +258,5 @@ begin
         slv <= to_slv(env_max_s);
         status_out.rssi <= ufixed(slv(TOP - env_max_s'low downto BOT - env_max_s'low));
     end block;
-    -- bit_index would be exposed by frame_dec; held at 0 until the AXI
-    -- wrapper wires it.
-    status_out.bit_index <= (others => '0');
 
 end architecture rtl;

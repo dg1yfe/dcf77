@@ -1,24 +1,20 @@
 -- =========================================================================
 -- dcf77_axi_lite.vhd
 --
--- AXI4-Lite slave wrapper for the DCF77 receiver core.  This is a
--- placeholder skeleton: the user will supply a project AXI4-Lite reference
--- implementation; the entity and register layout below match the plan and
--- will be wired up once that example is available.
+-- Top-level wrapper: dcf77_core plus the AXI4-Lite slave (axi_readmux /
+-- axi_writemux).  Exposes the conventional flat std_logic AXI4-Lite ports
+-- at the entity boundary; internally re-aggregates them into the record
+-- types defined by axi4lite_interface_pkg.
 --
--- Register map (offsets are byte addresses; all registers are 32 b):
---   0x00 RW  CTRL         enable, soft-reset, threshold-mode bits
---   0x04 R   STATUS       time_valid, sync_state, parity flags, bit_index
---   0x08 R   TIME_HMS     hour | minute | seconds
---   0x0C R   DATE         year | month | day | weekday
---   0x10 R   FLAGS        dst_active, dst_announce, leap_announce, call_bit
---   0x14 R   RSSI         adaptive max / min / threshold
---   0x18 R   LAST_FRAME0  bits 0..31 of last 59-b frame
---   0x1C R   LAST_FRAME1  bits 32..58
---
--- The combinational read-mux + write-decoder + handshakes will be filled in
--- against the user's AXI4-Lite stencil.  The entity port list below is
--- the conventional AXI4-Lite slave subset.
+-- Register map (per dcf77_pkg):
+--   0x00 RW  CTRL         enable, soft_reset
+--   0x04 R   STATUS       sync_state, time_valid, bit_index, RSSI
+--   0x08 R   TIME_HMS     minute, hour
+--   0x0C R   DATE         year, month, day, weekday
+--   0x10 R   FLAGS        dst_active, dst_announce, leap_announce
+--   0x14 R   RSSI         16-b magnitude (mirrors STATUS bits 31..16)
+--   0x18 R   LAST_FRAME0  frame bits 0..31
+--   0x1C R   LAST_FRAME1  frame bits 32..58
 -- =========================================================================
 
 library ieee;
@@ -26,58 +22,173 @@ use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;
 
 use work.dcf77_pkg.all;
+use work.axi4lite_interface_pkg.all;
 
 entity dcf77_axi_lite is
     generic (
-        ADDR_WIDTH : positive := 5;    -- 32 B address space -> 5 bits
-        DATA_WIDTH : positive := 32
+        -- Forward the bit_det timing into the embedded core so the host can
+        -- override them at integration time for fast simulation.  Defaults
+        -- match the real 244.140 kS/s tick rate.
+        K_ATK         : positive := 6;
+        K_DEC         : positive := 20;
+        T_LOW_MIN     : positive := 21_973;
+        T_BIT0_MAX    : positive := 26_855;
+        T_BIT1_MIN    : positive := 46_387;
+        T_BIT1_MAX    : positive := 51_269;
+        T_GAP_MINUTE  : positive := 366_211;
+        NCO_PHASE_INCR: natural  := 5_326_192
     );
     port (
+        -- AXI4-Lite slave (system clock = ACLK; matches dcf77_core's clk).
         s_axi_aclk    : in  std_logic;
         s_axi_aresetn : in  std_logic;
 
-        -- Write address channel
-        s_axi_awaddr  : in  std_logic_vector(ADDR_WIDTH - 1 downto 0);
+        s_axi_awaddr  : in  std_logic_vector(AXILITE_AXI_ADDR_WIDTH - 1 downto 0);
+        s_axi_awprot  : in  std_logic_vector(2 downto 0);
         s_axi_awvalid : in  std_logic;
         s_axi_awready : out std_logic;
-        -- Write data channel
-        s_axi_wdata   : in  std_logic_vector(DATA_WIDTH - 1 downto 0);
-        s_axi_wstrb   : in  std_logic_vector((DATA_WIDTH / 8) - 1 downto 0);
+
+        s_axi_wdata   : in  std_logic_vector(AXILITE_AXI_DATA_WIDTH - 1 downto 0);
+        s_axi_wstrb   : in  std_logic_vector((AXILITE_AXI_DATA_WIDTH / 8) - 1 downto 0);
         s_axi_wvalid  : in  std_logic;
         s_axi_wready  : out std_logic;
-        -- Write response channel
+
         s_axi_bresp   : out std_logic_vector(1 downto 0);
         s_axi_bvalid  : out std_logic;
         s_axi_bready  : in  std_logic;
-        -- Read address channel
-        s_axi_araddr  : in  std_logic_vector(ADDR_WIDTH - 1 downto 0);
+
+        s_axi_araddr  : in  std_logic_vector(AXILITE_AXI_ADDR_WIDTH - 1 downto 0);
+        s_axi_arprot  : in  std_logic_vector(2 downto 0);
         s_axi_arvalid : in  std_logic;
         s_axi_arready : out std_logic;
-        -- Read data channel
-        s_axi_rdata   : out std_logic_vector(DATA_WIDTH - 1 downto 0);
+
+        s_axi_rdata   : out std_logic_vector(AXILITE_AXI_DATA_WIDTH - 1 downto 0);
         s_axi_rresp   : out std_logic_vector(1 downto 0);
         s_axi_rvalid  : out std_logic;
         s_axi_rready  : in  std_logic;
 
-        -- Connections to the dcf77_core instance
-        core_time   : in  dcf77_time_type;
-        core_status : in  dcf77_status_type;
-        core_last_frame : in  std_logic_vector(0 to 58)
+        -- ADC stream (separate from the AXI clock domain by convention; the
+        -- core assumes they're synchronous to s_axi_aclk).
+        adc_sample    : in  adc_sample_t;
+        adc_valid     : in  std_logic
     );
 end entity dcf77_axi_lite;
 
-architecture stub of dcf77_axi_lite is
+architecture rtl of dcf77_axi_lite is
+
+    -- Record-typed AXI channel wires for the readmux / writemux.
+    signal ar_in   : axi4lite_address_channel_input_type;
+    signal ar_out  : axi4lite_address_channel_output_type;
+    signal r_in    : axi4lite_read_data_channel_input_type;
+    signal r_out   : axi4lite_read_data_channel_output_type;
+
+    signal aw_in   : axi4lite_address_channel_input_type;
+    signal aw_out  : axi4lite_address_channel_output_type;
+    signal w_in    : axi4lite_write_data_channel_input_type;
+    signal w_out   : axi4lite_write_data_channel_output_type;
+    signal b_in    : axi4lite_write_response_channel_input_type;
+    signal b_out   : axi4lite_write_response_channel_output_type;
+
+    -- Core <-> AXI signals.
+    signal control     : dcf77_control_type;
+    signal status      : dcf77_status_type;
+    signal core_iq_tap : dcf77_iq_tap_type;
+
+    -- Combined active-high reset for the core: external !aresetn OR the
+    -- host-controllable soft_reset bit.
+    signal core_rst    : std_logic;
+
 begin
 
-    -- Skeleton tie-offs.  The real AXI4-Lite handshake + register decode
-    -- will replace this once the user's example wrapper is wired up.
-    s_axi_awready <= '0';
-    s_axi_wready  <= '0';
-    s_axi_bresp   <= "00";
-    s_axi_bvalid  <= '0';
-    s_axi_arready <= '0';
-    s_axi_rdata   <= (others => '0');
-    s_axi_rresp   <= "00";
-    s_axi_rvalid  <= '0';
+    ------------------------------------------------------------------ --
+    -- Flatten the AXI ports into the record types.                       --
+    ------------------------------------------------------------------ --
+    ar_in.valid <= s_axi_arvalid;
+    ar_in.addr  <= s_axi_araddr;
+    ar_in.prot  <= s_axi_arprot;
+    s_axi_arready <= ar_out.ready;
 
-end architecture stub;
+    r_in.ready    <= s_axi_rready;
+    s_axi_rvalid  <= r_out.valid;
+    s_axi_rdata   <= r_out.data;
+    s_axi_rresp   <= r_out.resp;
+
+    aw_in.valid <= s_axi_awvalid;
+    aw_in.addr  <= s_axi_awaddr;
+    aw_in.prot  <= s_axi_awprot;
+    s_axi_awready <= aw_out.ready;
+
+    w_in.valid <= s_axi_wvalid;
+    w_in.data  <= s_axi_wdata;
+    w_in.strb  <= s_axi_wstrb;
+    s_axi_wready <= w_out.ready;
+
+    b_in.ready  <= s_axi_bready;
+    s_axi_bvalid <= b_out.valid;
+    s_axi_bresp  <= b_out.resp;
+
+    ------------------------------------------------------------------ --
+    -- Read-side decoder                                                  --
+    ------------------------------------------------------------------ --
+    u_readmux : entity work.axi_readmux
+        port map (
+            ACLK    => s_axi_aclk,
+            ARESETN => s_axi_aresetn,
+
+            ARInput  => ar_in,
+            AROutput => ar_out,
+            RInput   => r_in,
+            ROutput  => r_out,
+
+            FromStatus  => status,
+            FromControl => control
+        );
+
+    ------------------------------------------------------------------ --
+    -- Write-side decoder                                                 --
+    ------------------------------------------------------------------ --
+    u_writemux : entity work.axi_writemux
+        port map (
+            ACLK    => s_axi_aclk,
+            ARESETN => s_axi_aresetn,
+
+            AWInput  => aw_in,
+            AWOutput => aw_out,
+            WInput   => w_in,
+            WOutput  => w_out,
+            BInput   => b_in,
+            BOutput  => b_out,
+
+            ToControl => control
+        );
+
+    ------------------------------------------------------------------ --
+    -- Combined core reset: external !aresetn OR host-issued soft_reset.  --
+    -- (Both signals are already in the s_axi_aclk domain.)               --
+    ------------------------------------------------------------------ --
+    core_rst <= (not s_axi_aresetn) or control.soft_reset;
+
+    ------------------------------------------------------------------ --
+    -- DCF77 receiver core                                                --
+    ------------------------------------------------------------------ --
+    u_core : entity work.dcf77_core
+        generic map (
+            K_ATK          => K_ATK,
+            K_DEC          => K_DEC,
+            T_LOW_MIN      => T_LOW_MIN,
+            T_BIT0_MAX     => T_BIT0_MAX,
+            T_BIT1_MIN     => T_BIT1_MIN,
+            T_BIT1_MAX     => T_BIT1_MAX,
+            T_GAP_MINUTE   => T_GAP_MINUTE,
+            NCO_PHASE_INCR => NCO_PHASE_INCR
+        )
+        port map (
+            clk        => s_axi_aclk,
+            rst        => core_rst,
+            in_sample  => adc_sample,
+            in_valid   => adc_valid,
+            status_out => status,
+            iq_tap_out => core_iq_tap
+        );
+
+end architecture rtl;

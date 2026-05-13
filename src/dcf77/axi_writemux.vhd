@@ -1,0 +1,163 @@
+-- =========================================================================
+-- axi_writemux.vhd
+--
+-- AXI4-Lite write-channel arbiter and decoder for the DCF77 slave.  Adapted
+-- from doc/axi4lite_interface.md; bugs fixed and the memory-
+-- controller leftovers stripped.  Decodes writes to REG_CTRL into a
+-- dcf77_control_type record that drives the receiver core.  Writes to any
+-- other offset return SLVERR (no other registers are writable).
+--
+-- Byte-strobe support: write data is byte-merged into the registered word
+-- so partial-word writes (e.g. axi_wstrb = "0001") keep the other bytes
+-- intact.
+-- =========================================================================
+
+library ieee;
+use ieee.std_logic_1164.all;
+use ieee.numeric_std.all;
+
+use work.axi4lite_interface_pkg.all;
+use work.dcf77_pkg.all;
+
+entity axi_writemux is
+    port (
+        ACLK    : in  std_logic;
+        ARESETN : in  std_logic;
+
+        AWInput  : in  axi4lite_address_channel_input_type;
+        AWOutput : out axi4lite_address_channel_output_type;
+
+        WInput  : in  axi4lite_write_data_channel_input_type;
+        WOutput : out axi4lite_write_data_channel_output_type;
+
+        BInput  : in  axi4lite_write_response_channel_input_type;
+        BOutput : out axi4lite_write_response_channel_output_type;
+
+        ToControl : out dcf77_control_type
+    );
+end entity axi_writemux;
+
+architecture rtl of axi_writemux is
+
+    type wmux_reg_type is record
+        awi : axi4lite_address_channel_input_type;
+        awo : axi4lite_address_channel_output_type;
+        wi  : axi4lite_write_data_channel_input_type;
+        wo  : axi4lite_write_data_channel_output_type;
+        bi  : axi4lite_write_response_channel_input_type;
+        bo  : axi4lite_write_response_channel_output_type;
+        ctrl: dcf77_control_type;
+    end record;
+
+    constant AWI_RESET : axi4lite_address_channel_input_type := (
+        valid => '0',
+        addr  => (others => '0'),
+        prot  => (others => '0')
+    );
+    constant AWO_RESET : axi4lite_address_channel_output_type := (ready => '0');
+    constant WI_RESET  : axi4lite_write_data_channel_input_type := (
+        valid => '0',
+        data  => (others => '0'),
+        strb  => (others => '0')
+    );
+    constant WO_RESET  : axi4lite_write_data_channel_output_type := (ready => '0');
+    constant BI_RESET  : axi4lite_write_response_channel_input_type := (ready => '0');
+    constant BO_RESET  : axi4lite_write_response_channel_output_type := (
+        valid => '0',
+        resp  => AXI_RESPONSE_OKAY
+    );
+
+    constant R_RESET : wmux_reg_type := (
+        awi  => AWI_RESET,
+        awo  => AWO_RESET,
+        wi   => WI_RESET,
+        wo   => WO_RESET,
+        bi   => BI_RESET,
+        bo   => BO_RESET,
+        ctrl => DCF77_CONTROL_RESET
+    );
+
+    signal r, rin : wmux_reg_type;
+
+begin
+
+    AWOutput  <= r.awo;
+    WOutput   <= r.wo;
+    BOutput   <= r.bo;
+    ToControl <= r.ctrl;
+
+    comb : process (all)
+        variable v       : wmux_reg_type;
+        variable word_ix : integer range 0 to 63;
+        variable merged  : std_logic_vector(31 downto 0);
+    begin
+        v := r;
+
+        -- Register incoming AXI signals.
+        v.awi := AWInput;
+        v.bi  := BInput;
+
+        -- Byte-strobe merging of write data.
+        if WInput.valid = '1' then
+            merged := r.wi.data;
+            for byte in 0 to 3 loop
+                if WInput.strb(byte) = '1' then
+                    merged((byte * 8 + 7) downto byte * 8)
+                        := WInput.data((byte * 8 + 7) downto byte * 8);
+                end if;
+            end loop;
+            v.wi.data  := merged;
+            v.wi.strb  := WInput.strb;
+            v.wi.valid := '1';
+        else
+            v.wi.valid := '0';
+        end if;
+
+        -- AW handshake: wait for write address AND write data both valid.
+        v.awo.ready := '0';
+        if r.awi.valid = '1' and r.wi.valid = '1' then
+            v.awo.ready := '1';
+        end if;
+        if r.awi.valid = '1' and r.awo.ready = '1' then
+            v.awo.ready := '0';
+        end if;
+
+        -- W handshake: assert WREADY once we have an address.
+        v.wo.ready := '0';
+        if r.wi.valid = '1' and r.awi.valid = '1' then
+            v.wo.ready := '1';
+        end if;
+
+        -- Decode and apply the write on the cycle that closes the W handshake.
+        if r.wi.valid = '1' and r.awo.ready = '1' then
+            word_ix := to_integer(unsigned(r.awi.addr(7 downto 2)));
+            case word_ix is
+                when REG_CTRL =>
+                    v.ctrl := slv_to_ctrl(r.wi.data);
+                    v.bo.resp := AXI_RESPONSE_OKAY;
+                when others =>
+                    v.bo.resp := AXI_RESPONSE_SLVERR;
+            end case;
+            v.bo.valid := '1';
+        end if;
+
+        -- Hold BVALID until master accepts it.
+        if r.bo.valid = '1' and r.bi.ready = '1' then
+            v.bo.valid := '0';
+        end if;
+
+        if ARESETN = '0' then
+            v := R_RESET;
+        end if;
+
+        rin <= v;
+    end process;
+
+    seq : process (ACLK)
+    begin
+        if rising_edge(ACLK) then
+            r <= rin;
+        end if;
+    end process;
+
+end architecture rtl;

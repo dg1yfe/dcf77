@@ -62,7 +62,7 @@ architecture tb of dcf77_bit_det_tb is
     signal bit_value   : std_logic;
     signal bit_valid   : std_logic;
     signal minute_mark : std_logic;
-    signal sync_state  : std_logic_vector(1 downto 0);
+    signal sync_state  : sync_state_t;
     signal env_max_o   : env_word_t;
     signal threshold_o : env_word_t;
 
