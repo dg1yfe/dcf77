@@ -30,7 +30,10 @@ entity dcf77_frame_dec is
 
         time_out    : out dcf77_time_type;
         time_valid  : out std_logic;
-        last_frame  : out std_logic_vector(0 to 58)
+        last_frame  : out std_logic_vector(0 to 58);
+        -- Current second-in-minute counter (0..58, cleared on minute_mark).
+        -- Useful as a status indicator for the host.
+        bit_index   : out unsigned(5 downto 0)
     );
 end entity dcf77_frame_dec;
 
@@ -60,6 +63,7 @@ begin
     time_out   <= r.time_out;
     time_valid <= r.time_valid;
     last_frame <= r.last_frame;
+    bit_index  <= r.bit_index;
 
     comb : process (all)
         variable v       : reg_type;

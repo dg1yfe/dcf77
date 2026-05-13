@@ -84,6 +84,7 @@ architecture rtl of dcf77_core is
     signal time_d    : dcf77_time_type;
     signal time_v_d  : std_logic;
     signal last_frm  : std_logic_vector(0 to 58);
+    signal bit_ix    : unsigned(5 downto 0);
 
 begin
 
@@ -233,7 +234,8 @@ begin
             minute_mark => minute_mk,
             time_out    => time_d,
             time_valid  => time_v_d,
-            last_frame  => last_frm
+            last_frame  => last_frm,
+            bit_index   => bit_ix
         );
 
     -- ------------------------------------------------------------------ --
@@ -243,9 +245,7 @@ begin
     status_out.time_valid <= time_v_d;
     status_out.sync_state <= sync_st;
     status_out.last_frame <= last_frm;
-    -- bit_index is not yet surfaced by dcf77_frame_dec; held at zero until
-    -- that port is added.
-    status_out.bit_index  <= (others => '0');
+    status_out.bit_index  <= bit_ix;
 
     -- RSSI = top 16 bits of the sfixed env_max value (always non-negative,
     -- so reinterpreting the raw bits as ufixed is safe).  The MSB of env_max
