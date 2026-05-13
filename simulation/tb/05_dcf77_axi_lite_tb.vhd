@@ -13,6 +13,7 @@ context vunit_lib.vunit_context;
 library ieee;
 use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;
+use ieee.fixed_pkg.all;
 
 library dcf77;
 use dcf77.dcf77_pkg.all;
@@ -171,19 +172,23 @@ begin
                 check_equal(rd(0), '1', "CTRL.enable defaults to '1'");
                 check_equal(rd(1), '0', "CTRL.soft_reset defaults to '0'");
 
-                -- Write enable=0, soft_reset=1; read back.
+                -- enable is persistent; soft_reset is a one-cycle pulse, so
+                -- after a write of bit1='1', the read-back must show '0'
+                -- because by then the bit has self-cleared.
                 axi_write(x"00", x"00000003", AXI_RESPONSE_OKAY);
                 axi_read(x"00", rd, AXI_RESPONSE_OKAY);
-                check_equal(rd(0), '1',
-                            "enable bit reads back '1'");
-                check_equal(rd(1), '1',
-                            "soft_reset bit reads back '1'");
+                check_equal(rd(0), '1', "enable bit reads back '1'");
+                check_equal(rd(1), '0',
+                            "soft_reset cleared after one-cycle pulse");
 
-                -- Write enable=1, soft_reset=0.
-                axi_write(x"00", x"00000001", AXI_RESPONSE_OKAY);
+                -- Write enable=0 (no soft_reset bit).  Enable stays sticky.
+                axi_write(x"00", x"00000000", AXI_RESPONSE_OKAY);
                 axi_read(x"00", rd, AXI_RESPONSE_OKAY);
-                check_equal(rd(0), '1', "enable=1 reads back");
-                check_equal(rd(1), '0', "soft_reset=0 reads back");
+                check_equal(rd(0), '0', "enable=0 reads back sticky");
+                check_equal(rd(1), '0', "soft_reset stays cleared");
+
+                -- Re-enable for subsequent tests.
+                axi_write(x"00", x"00000001", AXI_RESPONSE_OKAY);
 
             -----------------------------------------------------------------
             elsif run("status_default") then
@@ -209,6 +214,67 @@ begin
             elsif run("read_unmapped_decerr") then
                 -- 0x20 is past the last mapped register -> DECERR.
                 axi_read(x"20", rd, AXI_RESPONSE_DECERR);
+
+            -----------------------------------------------------------------
+            elsif run("last_frame_reset") then
+                -- After reset, last_frame is all zeros throughout
+                -- dcf77_frame_dec, so both LAST_FRAME registers read 0.
+                -- This implicitly verifies the wire from frame_dec ->
+                -- dcf77_core.status_out.last_frame -> AXI register.
+                axi_read(x"18", rd, AXI_RESPONSE_OKAY);
+                check_equal(rd, std_logic_vector'(x"00000000"),
+                            "LAST_FRAME0 reads 0 at reset");
+                axi_read(x"1C", rd, AXI_RESPONSE_OKAY);
+                check_equal(rd, std_logic_vector'(x"00000000"),
+                            "LAST_FRAME1 reads 0 at reset");
+
+            -----------------------------------------------------------------
+            elsif run("soft_reset_pulse_resets_core") then
+                -- Drive ADC, let RSSI climb, fire soft_reset, verify RSSI
+                -- is zero again (i.e. the core saw a reset pulse).
+                adc_sample <= to_sfixed(6000, adc_sample_t'high,
+                                        adc_sample_t'low);
+                adc_valid  <= '1';
+                wait_clk(2000);
+                axi_read(x"04", rd, AXI_RESPONSE_OKAY);
+                check(rd(31 downto 16) /= std_logic_vector'(x"0000"),
+                      "RSSI rose before soft_reset");
+
+                -- Write CTRL with soft_reset=1, enable=1.  Pulse should be
+                -- one cycle wide; core resets synchronously.
+                axi_write(x"00", x"00000003", AXI_RESPONSE_OKAY);
+                wait_clk(8);
+                axi_read(x"04", rd, AXI_RESPONSE_OKAY);
+                check_equal(rd(31 downto 16),
+                            std_logic_vector'(x"0000"),
+                            "RSSI cleared after soft_reset pulse");
+
+                adc_valid <= '0';
+
+            -----------------------------------------------------------------
+            elsif run("enable_gates_adc") then
+                -- Drive a strong ADC level with enable=0 and verify the
+                -- decoder doesn't track: env_max (read via STATUS bits
+                -- 31..16) should stay at zero.  Then enable and confirm
+                -- env_max climbs above zero with the same input.
+                adc_sample <= to_sfixed(6000, adc_sample_t'high,
+                                        adc_sample_t'low);
+                adc_valid  <= '1';
+
+                axi_write(x"00", x"00000000", AXI_RESPONSE_OKAY);  -- enable=0
+                wait_clk(2000);
+                axi_read(x"04", rd, AXI_RESPONSE_OKAY);
+                check_equal(rd(31 downto 16),
+                            std_logic_vector'(x"0000"),
+                            "RSSI stays zero while CTRL.enable=0");
+
+                axi_write(x"00", x"00000001", AXI_RESPONSE_OKAY);  -- enable=1
+                wait_clk(2000);
+                axi_read(x"04", rd, AXI_RESPONSE_OKAY);
+                check(rd(31 downto 16) /= std_logic_vector'(x"0000"),
+                      "RSSI rises once CTRL.enable goes high");
+
+                adc_valid <= '0';
 
             end if;
         end loop;

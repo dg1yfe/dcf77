@@ -93,6 +93,14 @@ begin
     begin
         v := r;
 
+        -- Pulsed register-bit defaults.  Following the pattern from the
+        -- AXI example ("Reset pulsed signals to zero here"), default a
+        -- self-clearing bit to '0' at the top of the comb process.  The
+        -- write decoder below sets it to '1' only on the matching write
+        -- transaction, so the registered output is high for exactly one
+        -- clock.
+        v.ctrl.soft_reset := '0';
+
         -- Register incoming AXI signals.
         v.awi := AWInput;
         v.bi  := BInput;
@@ -133,7 +141,11 @@ begin
             word_ix := to_integer(unsigned(r.awi.addr(7 downto 2)));
             case word_ix is
                 when REG_CTRL =>
-                    v.ctrl := slv_to_ctrl(r.wi.data);
+                    -- Field-by-field update so persistent and pulsed bits
+                    -- can be handled differently.  enable is sticky; soft_reset
+                    -- is a one-cycle pulse cleared by the default above.
+                    v.ctrl.enable     := r.wi.data(0);
+                    v.ctrl.soft_reset := r.wi.data(1);
                     v.bo.resp := AXI_RESPONSE_OKAY;
                 when others =>
                     v.bo.resp := AXI_RESPONSE_SLVERR;
