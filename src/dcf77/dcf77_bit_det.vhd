@@ -36,13 +36,21 @@ use work.dcf77_pkg.all;
 
 entity dcf77_bit_det is
     generic (
-        K_ATK         : positive := 6;        -- attack shift (1/2^K_ATK per sample)
-        K_DEC         : positive := 20;       -- decay shift
-        T_LOW_MIN     : positive := 21_973;   -- min low-pulse for any bit (90 ms)
-        T_BIT0_MAX    : positive := 26_855;   -- bit 0 upper bound (110 ms)
-        T_BIT1_MIN    : positive := 46_387;   -- bit 1 lower bound (190 ms)
-        T_BIT1_MAX    : positive := 51_269;   -- bit 1 upper bound (210 ms)
-        T_GAP_MINUTE  : positive := 366_211   -- minute-mark gap (1500 ms)
+        K_ATK         : positive := 6;          -- attack shift (1/2^K_ATK per sample)
+        K_DEC         : positive := 20;         -- decay shift
+        -- Bit-pulse-width thresholds in env_valid ticks.  10 ms tolerance
+        -- at 244 kS/s -> tick-level numbers are natural here.
+        T_LOW_MIN     : positive := 21_973;     -- min low-pulse for any bit (90 ms)
+        T_BIT0_MAX    : positive := 26_855;     -- bit 0 upper bound (110 ms)
+        T_BIT1_MIN    : positive := 46_387;     -- bit 1 lower bound (190 ms)
+        T_BIT1_MAX    : positive := 51_269;     -- bit 1 upper bound (210 ms)
+        T_GAP_MINUTE  : positive := 366_211;    -- minute-mark gap (1500 ms)
+        -- Sync-state demotion is on minute-scale: defining the thresholds
+        -- in seconds keeps the numbers human-readable.  The actual tick
+        -- counts are SAMPLE_RATE_HZ * the relevant seconds value.
+        SAMPLE_RATE_HZ : positive := 244_140;   -- env_valid rate at the real Fs
+        T_HOLD_SEC     : positive := 120;       -- lock -> hold (~2 min)
+        T_SEARCH_SEC   : positive := 300        -- any -> search (~5 min)
     );
     port (
         clk         : in  std_logic;
@@ -62,9 +70,6 @@ end entity dcf77_bit_det;
 
 architecture rtl of dcf77_bit_det is
 
-    -- Counter must cover the longest expected duration (T_GAP_MINUTE)
-    -- plus headroom.
-    constant T_MAX_COUNT : natural := 2 * T_GAP_MINUTE;
     function clog2(n : natural) return natural is
         variable acc : natural := 0;
         variable v   : natural := n;
@@ -75,7 +80,16 @@ architecture rtl of dcf77_bit_det is
         end loop;
         return acc;
     end function;
-    constant CNT_W : natural := clog2(T_MAX_COUNT);
+
+    -- Counter must cover the longest expected pulse-width measurement,
+    -- (T_GAP_MINUTE) plus headroom.
+    constant T_MAX_COUNT : natural := 2 * T_GAP_MINUTE;
+    constant CNT_W       : natural := clog2(T_MAX_COUNT);
+
+    -- Derived tick counts for the sync-state thresholds.
+    constant T_HOLD_TICKS   : positive := T_HOLD_SEC   * SAMPLE_RATE_HZ;
+    constant T_SEARCH_TICKS : positive := T_SEARCH_SEC * SAMPLE_RATE_HZ;
+    constant SYNC_CNT_W     : natural  := clog2(T_SEARCH_TICKS + 1);
 
     type state_t is (S_HIGH, S_LOW);
 
@@ -91,6 +105,10 @@ architecture rtl of dcf77_bit_det is
         low_cnt     : unsigned(CNT_W - 1 downto 0);
         high_cnt    : unsigned(CNT_W - 1 downto 0);
         pending_mm  : std_logic;          -- minute mark pending on next low->high
+
+        -- Time since the last minute-mark, in env_valid ticks.  Saturating
+        -- counter driving the sync state machine.
+        sync_cnt    : unsigned(SYNC_CNT_W - 1 downto 0);
 
         -- Outputs (registered, one-cycle strobes)
         bit_value   : std_logic;
@@ -109,6 +127,7 @@ architecture rtl of dcf77_bit_det is
         low_cnt     => (others => '0'),
         high_cnt    => (others => '0'),
         pending_mm  => '0',
+        sync_cnt    => (others => '0'),
         bit_value   => '0',
         bit_valid   => '0',
         minute_mark => '0',
@@ -231,10 +250,26 @@ begin
             end case;
 
             -----------------------------------------------------------------
-            -- Sync state transitions: SEARCH -> LOCK on first minute mark.
+            -- Sync state machine.
+            --   * Every minute_mark resets sync_cnt to zero and pulls the
+            --     state into sync_lock.
+            --   * If sync_cnt exceeds T_HOLD_TICKS without a minute_mark,
+            --     drop from sync_lock to sync_hold (signal recently degraded).
+            --   * If it exceeds T_SEARCH_TICKS, drop to sync_search (lost).
             -----------------------------------------------------------------
             if v.minute_mark = '1' then
+                v.sync_cnt   := (others => '0');
                 v.sync_state := sync_lock;
+            else
+                if r.sync_cnt < to_unsigned(T_SEARCH_TICKS, SYNC_CNT_W) then
+                    v.sync_cnt := r.sync_cnt + 1;
+                end if;
+                if r.sync_cnt >= to_unsigned(T_SEARCH_TICKS, SYNC_CNT_W) then
+                    v.sync_state := sync_search;
+                elsif r.sync_cnt >= to_unsigned(T_HOLD_TICKS, SYNC_CNT_W)
+                      and r.sync_state = sync_lock then
+                    v.sync_state := sync_hold;
+                end if;
             end if;
 
         end if;

@@ -36,6 +36,9 @@ entity dcf77_axi_lite is
         T_BIT1_MIN    : positive := 46_387;
         T_BIT1_MAX    : positive := 51_269;
         T_GAP_MINUTE  : positive := 366_211;
+        SAMPLE_RATE_HZ: positive := 244_140;
+        T_HOLD_SEC    : positive := 120;
+        T_SEARCH_SEC  : positive := 300;
         NCO_PHASE_INCR: natural  := 5_326_192
     );
     port (
@@ -97,6 +100,11 @@ architecture rtl of dcf77_axi_lite is
     -- Combined active-high reset for the core: external !aresetn OR the
     -- host-controllable soft_reset bit.
     signal core_rst    : std_logic;
+
+    -- Host-gateable input-valid: drops to zero when CTRL.enable is cleared
+    -- so the decimation chain stops advancing.  The core's state freezes
+    -- but is not reset; the host can re-enable to resume.
+    signal core_valid  : std_logic;
 
 begin
 
@@ -166,7 +174,8 @@ begin
     -- Combined core reset: external !aresetn OR host-issued soft_reset.  --
     -- (Both signals are already in the s_axi_aclk domain.)               --
     ------------------------------------------------------------------ --
-    core_rst <= (not s_axi_aresetn) or control.soft_reset;
+    core_rst   <= (not s_axi_aresetn) or control.soft_reset;
+    core_valid <= adc_valid and control.enable;
 
     ------------------------------------------------------------------ --
     -- DCF77 receiver core                                                --
@@ -180,13 +189,16 @@ begin
             T_BIT1_MIN     => T_BIT1_MIN,
             T_BIT1_MAX     => T_BIT1_MAX,
             T_GAP_MINUTE   => T_GAP_MINUTE,
+            SAMPLE_RATE_HZ => SAMPLE_RATE_HZ,
+            T_HOLD_SEC     => T_HOLD_SEC,
+            T_SEARCH_SEC   => T_SEARCH_SEC,
             NCO_PHASE_INCR => NCO_PHASE_INCR
         )
         port map (
             clk        => s_axi_aclk,
             rst        => core_rst,
             in_sample  => adc_sample,
-            in_valid   => adc_valid,
+            in_valid   => core_valid,
             status_out => status,
             iq_tap_out => core_iq_tap
         );

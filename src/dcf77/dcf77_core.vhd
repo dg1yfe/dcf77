@@ -36,6 +36,9 @@ entity dcf77_core is
         T_BIT1_MIN    : positive := 46_387;
         T_BIT1_MAX    : positive := 51_269;
         T_GAP_MINUTE  : positive := 366_211;
+        SAMPLE_RATE_HZ : positive := 244_140;
+        T_HOLD_SEC     : positive := 120;
+        T_SEARCH_SEC   : positive := 300;
 
         -- NCO frequency increment (per 244 kS/s tick).
         NCO_PHASE_INCR : natural := 5_326_192
@@ -201,13 +204,16 @@ begin
 
     u_bit_det : entity work.dcf77_bit_det
         generic map (
-            K_ATK        => K_ATK,
-            K_DEC        => K_DEC,
-            T_LOW_MIN    => T_LOW_MIN,
-            T_BIT0_MAX   => T_BIT0_MAX,
-            T_BIT1_MIN   => T_BIT1_MIN,
-            T_BIT1_MAX   => T_BIT1_MAX,
-            T_GAP_MINUTE => T_GAP_MINUTE
+            K_ATK          => K_ATK,
+            K_DEC          => K_DEC,
+            T_LOW_MIN      => T_LOW_MIN,
+            T_BIT0_MAX     => T_BIT0_MAX,
+            T_BIT1_MIN     => T_BIT1_MIN,
+            T_BIT1_MAX     => T_BIT1_MAX,
+            T_GAP_MINUTE   => T_GAP_MINUTE,
+            SAMPLE_RATE_HZ => SAMPLE_RATE_HZ,
+            T_HOLD_SEC     => T_HOLD_SEC,
+            T_SEARCH_SEC   => T_SEARCH_SEC
         )
         port map (
             clk         => clk,
