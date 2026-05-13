@@ -87,7 +87,7 @@ architecture rtl of dcf77_core is
     signal time_d    : dcf77_time_type;
     signal time_v_d  : std_logic;
     signal last_frm  : std_logic_vector(0 to 58);
-    signal bit_ix    : unsigned(5 downto 0);
+    signal bit_ix    : bit_index_t;
 
 begin
 

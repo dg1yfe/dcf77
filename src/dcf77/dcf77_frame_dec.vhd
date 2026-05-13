@@ -31,9 +31,10 @@ entity dcf77_frame_dec is
         time_out    : out dcf77_time_type;
         time_valid  : out std_logic;
         last_frame  : out std_logic_vector(0 to 58);
-        -- Current second-in-minute counter (0..58, cleared on minute_mark).
-        -- Useful as a status indicator for the host.
-        bit_index   : out unsigned(5 downto 0)
+        -- Position of the next bit to receive within the minute, in the
+        -- range 0..58 (active) or 59 (frame full, awaiting minute_mark).
+        -- Range-limited so it can't overflow silently.
+        bit_index   : out bit_index_t
     );
 end entity dcf77_frame_dec;
 
@@ -41,7 +42,7 @@ architecture rtl of dcf77_frame_dec is
 
     type reg_type is record
         frame_buf  : std_logic_vector(0 to 58);
-        bit_index  : unsigned(5 downto 0);
+        bit_index  : bit_index_t;
         time_out   : dcf77_time_type;
         time_valid : std_logic;
         last_frame : std_logic_vector(0 to 58);
@@ -50,7 +51,7 @@ architecture rtl of dcf77_frame_dec is
     constant ZERO_FRAME : std_logic_vector(0 to 58) := (others => '0');
     constant R_RESET : reg_type := (
         frame_buf  => ZERO_FRAME,
-        bit_index  => (others => '0'),
+        bit_index  => 0,
         time_out   => DCF77_TIME_RESET,
         time_valid => '0',
         last_frame => ZERO_FRAME
@@ -140,14 +141,14 @@ begin
             v.frame_buf := ZERO_FRAME;
             if bit_valid = '1' then
                 v.frame_buf(0) := bit_value;
-                v.bit_index    := to_unsigned(1, 6);
+                v.bit_index    := 1;
             else
-                v.bit_index := (others => '0');
+                v.bit_index := 0;
             end if;
 
         elsif bit_valid = '1' then
-            if r.bit_index < to_unsigned(59, 6) then
-                v.frame_buf(to_integer(r.bit_index)) := bit_value;
+            if r.bit_index < 59 then
+                v.frame_buf(r.bit_index) := bit_value;
                 v.bit_index := r.bit_index + 1;
             end if;
         end if;

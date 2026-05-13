@@ -26,6 +26,11 @@ package dcf77_pkg is
     ---------------------------------------------------------------------------
     subtype adc_sample_t is sfixed(13 downto 0);   -- raw signed ADC sample
     subtype iq_word_t    is sfixed(21 downto 0);   -- 22 b signed I/Q at 244 kS/s
+
+    -- Position of the next bit to be received within the minute.  0..58 are
+    -- the valid received-bit slots; 59 is the "frame complete, awaiting
+    -- minute mark" sentinel.  Range-limited so it can't silently overflow.
+    subtype bit_index_t  is natural range 0 to 59;
     -- Envelope power = top18(I)*top18(I) + top18(Q)*top18(Q).  The mixer
     -- operands have LSB position 4 after the top-18 truncation, so the
     -- product has LSB position 8 and natural full range sfixed(43 downto 8).
@@ -116,7 +121,7 @@ package dcf77_pkg is
         time_valid : std_logic;                       -- last frame fully parity-OK
         sync_state : sync_state_t;
         rssi       : rssi_word_t;
-        bit_index  : unsigned(5 downto 0);            -- current second 0..58
+        bit_index  : bit_index_t;                     -- current second 0..58 (59 = frame full)
         last_frame : std_logic_vector(0 to 58);       -- raw bits of last minute
     end record;
 
@@ -125,7 +130,7 @@ package dcf77_pkg is
         time_valid => '0',
         sync_state => sync_search,
         rssi       => (others => '0'),
-        bit_index  => (others => '0'),
+        bit_index  => 0,
         last_frame => (others => '0')
     );
 
@@ -305,7 +310,7 @@ package body dcf77_pkg is
     begin
         r(1 downto 0)   := sync_state_to_slv(s.sync_state);
         r(2)            := s.time_valid;
-        r(13 downto 8)  := std_logic_vector(s.bit_index);
+        r(13 downto 8)  := std_logic_vector(to_unsigned(s.bit_index, 6));
         r(31 downto 16) := std_logic_vector(s.rssi);
         return r;
     end function;
