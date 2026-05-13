@@ -1,0 +1,8 @@
+## VUnit / GHDL build artefacts
+vunit_out/
+simulation/derived/
+
+## Editor / OS junk
+*.swp
+*~
+.DS_Store
