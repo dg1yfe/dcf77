@@ -148,72 +148,91 @@ read-only offset return SLVERR.
 
 ## Replay test — decoding a real recording
 
-The receiver back end can be exercised against a real DCF77 reception
-(or a synthetic one for CI).  Because the recording stack typically
-samples at audio rates with a frequency-translated baseband, the
-recording is spliced into the chain **post-CIC** — at the 250 kS/s
-real-valued sample point that feeds the mixer.
+The receiver back end can be exercised against real DCF77 recordings.
+The replay testbench injects pre-decimated complex baseband **at the
+1 kS/s I/Q boundary**, directly feeding `dcf77_env` — the NCO, mixer
+and post-mixer CIC stages are bypassed, so the same back-end logic
+runs ~250× faster than feeding the full signal chain.  A 4-minute
+clip decodes in seconds.
 
-Three artefacts are involved:
-
-1. A **WAV file** (`*.wav`, mono real-valued, any sample rate ≥ 12 kHz).
-   The recording must be USB-demodulated with the receiver tuned to
-   **72.5 kHz**, so DCF77 (77.5 kHz) appears at +5 kHz in baseband.
-2. A binary post-CIC stream (`*.s16`, little-endian int16 at 250 kHz)
-   produced by the Python preprocessor.
-3. A metadata sidecar (`*.meta`) recording the expected decoded time.
-
-Workflow:
+Drop a WAV into `samples/`, run the preprocessor, run the regression:
 
 ```sh
-# Either: generate a synthetic recording for self-testing
-python3 simulation/scripts/synth_dcf77_wav.py \
-    --out simulation/derived/synth.wav --duration 65 \
-    --year 26 --month 5 --day 13 --weekday 3 \
-    --hour 11 --minute 42 --dst 1
+# Drop in your own WAV (mono real-valued, ≥ 12 kHz, DCF77 at 5 kHz IF).
+cp my_dcf77_recording.wav samples/
 
-# Or: drop in your own WAV under simulation/derived/
+# (Optional) synthetic recording for self-testing.
+python3 simulation/scripts/synth_dcf77_wav.py    # writes samples/synth.wav
 
-# Preprocess WAV -> .s16 + .meta
-python3 simulation/scripts/wav_to_postcic.py \
-    --in   simulation/derived/synth.wav \
-    --out  simulation/derived/synth.s16 \
-    --meta simulation/derived/synth.meta \
-    --year 26 --month 5 --day 13 --weekday 3 \
-    --hour 11 --minute 42 --dst 1
+# Preprocess every WAV in samples/ into simulation/derived/<stem>.{s16,meta}.
+# Idempotent: skips WAVs whose outputs are newer.  Use --force to re-run.
+python3 simulation/scripts/wav_to_iq.py --all
 
-# Run the replay tests
+# Run the replay testbench (registered once per prepared WAV).
 python3 simulation/scripts/run.py "*rx_replay*"
 ```
 
-Two test cases are available when both `synth.s16` and `synth.meta` are
-present in `simulation/derived/`:
+The preprocessor:
 
-* `smoke` — feeds the first ~5 s and asserts at least one `bit_valid`
-  fires.  Registered by default.
-* `full_decode` — feeds the entire recording, asserts the decoded
-  fields match the metadata.  **Opt-in** via the
-  `DCF77_FULL_REPLAY=1` environment variable; it takes ~30 min and is
-  typically run on demand, not as part of every `run.py` invocation.
+1. Mixes the WAV down with a complex LO at `--if-hz` (default 5000 Hz)
+   so the DCF77 carrier lands at DC.
+2. Low-passes (60 Hz) and decimates to **1 kS/s**.
+3. Writes interleaved little-endian int16 I/Q pairs to `*.s16`.
+4. Runs its **own software DCF77 decoder** (`dcf77_soft_decode.py`)
+   on the same I/Q stream, requiring two consecutive frames in
+   agreement (minute n → n+1) before declaring the recovered
+   timestamp.  The result is cached in `*.meta`.
+
+Two replay tests are registered per WAV when its `.s16`/`.meta` exist:
+
+* **`smoke`** — feeds the first 60 s of the recording, asserts that
+  `bit_valid` fired at least once.  Runs by default; ~1 s wall time.
+* **`full_decode`** — feeds the entire recording, asserts the decoded
+  fields match the reference time the Python decoder recovered from
+  the same audio.  Only registered when the preprocessor locked
+  (`expect_full_decode=1` in the meta) **and** the
+  `DCF77_FULL_REPLAY=1` environment variable is set.
 
   ```sh
   DCF77_FULL_REPLAY=1 python3 simulation/scripts/run.py "*rx_replay*full*"
   ```
 
-The default `CLOCKS_PER_TICK` is **8** (one sample every 8 clocks), about
-62× faster than silicon timing (125 MHz / 250 kHz = 500) while still
-leaving the env block enough clocks to complete its time-shared MAC.
-Smoke runs in ~3 min, full decode in ~30 min.  The decoder back end only
-counts `env_valid` pulses (not wall-clock gap between them), so results
-are independent of the chosen rate.  Silicon-faithful 500-clocks-per-
-sample timing is available by overriding both `CLOCKS_PER_TICK` and
-`NCO_PHASE_INCR` generics in `run.py` — see the
-`_configure_replay_testbench` block — at the cost of ~4 h sim runtime
-for a 65 s clip.
+WAVs that the Python decoder couldn't decode (weak / noisy recordings)
+still get a smoke config — only the full-decode validation is skipped
+for them.
 
-The replay tests are silently skipped if the `.s16` / `.meta` artefacts
-are absent, so the core suite (32 tests, ~30 s) remains runnable without
-them.
+### Verbose decode logging
+
+Pass `-v` to `run.py` (forwarded to VUnit) to surface the per-bit /
+per-minute info() log lines the testbench emits:
+
+```sh
+python3 simulation/scripts/run.py -v "*rx_replay*smoke*"
+```
+
+Sample (truncated):
+
+```
+INFO - sync_state SEARCH -> LOCK at 1234567 ns
+INFO - bit 0 = '0' sync=LOCK (#1)
+INFO - bit 1 = '1' sync=LOCK (#2)
+...
+INFO - minute_mark (#1, bits_seen=59)
+INFO - time_valid: 26-5-13 (Wed) 11:42 dst='1'
+```
+
+### Synthetic test signal
+
+`synth_dcf77_wav.py` writes to `samples/synth.wav` by default and
+also drops a `samples/synth.expect` sidecar carrying the
+ground-truth time fields.  `wav_to_iq.py --all` picks the sidecar up
+automatically and cross-checks its Python decoder against the truth,
+surfacing a loud warning if they ever disagree — a regression alarm
+for the soft-decoder logic.
+
+The replay tests are silently skipped if `samples/` is empty or no
+`.s16`/`.meta` artefacts exist for the WAVs found there, so the core
+suite remains runnable without them.
 
 ## Tools — `cic_pruning.py`
 

@@ -7,8 +7,9 @@ Usage:
     python3 simulation/scripts/run.py --list      # list tests only
 
 Env vars:
-    DCF77_FULL_REPLAY=1     also register the slow full-minute replay test
-                            (~30 min wall time).  Off by default.
+    DCF77_FULL_REPLAY=1     also register the full_decode replay test for
+                            every WAV whose Python soft-decoder locked.
+                            Off by default.
 """
 
 import os
@@ -22,6 +23,7 @@ ROOT = Path(__file__).resolve().parent.parent.parent
 INC_DIR = ROOT / "inc"
 SRC_DIR = ROOT / "src" / "dcf77"
 TB_DIR = ROOT / "simulation" / "tb"
+SAMPLES_DIR = ROOT / "samples"
 DERIVED_DIR = ROOT / "simulation" / "derived"
 
 
@@ -117,63 +119,70 @@ def _configure_testbenches(lib) -> None:
 
 
 def _configure_replay_testbench(lib) -> None:
-    """Register the binary-file replay testbench if its inputs are available.
+    """Register one replay-TB configuration per WAV in samples/.
 
-    The replay test reads `simulation/derived/synth.s16` (or any user-supplied
-    .s16) plus a sidecar `simulation/derived/synth.meta` describing the
-    expected decoded time.  The .s16 and .meta files are produced by:
-        python3 simulation/scripts/synth_dcf77_wav.py --out simulation/derived/synth.wav --duration 65
-        python3 simulation/scripts/wav_to_postcic.py  --in simulation/derived/synth.wav --out simulation/derived/synth.s16 --meta simulation/derived/synth.meta \\
-            --year 26 --month 5 --day 13 --weekday 3 --hour 11 --minute 42 --dst 1
-    If either file is missing, the replay testbench is silently skipped so
-    the rest of the suite remains runnable without those artefacts.
+    For each samples/<stem>.wav the runner looks for matching artefacts
+    derived/<stem>.s16 + .meta produced by wav_to_iq.py.  If the .meta
+    has expect_full_decode=1 (i.e. the Python soft decoder locked onto
+    two consecutive frames), a full_decode config is also registered
+    -- gated on DCF77_FULL_REPLAY=1 so the slower test is opt-in.
+
+    Run `python3 simulation/scripts/wav_to_iq.py --all` once to populate
+    derived/ after dropping new WAVs into samples/.
     """
     try:
         tb = lib.test_bench("dcf77_rx_replay_tb")
     except KeyError:
         return
 
-    s16  = DERIVED_DIR / "synth.s16"
-    meta = DERIVED_DIR / "synth.meta"
-    if not (s16.exists() and meta.exists()):
+    if not SAMPLES_DIR.is_dir():
         return
 
-    meta_kv = _read_meta(meta)
+    want_full = os.environ.get("DCF77_FULL_REPLAY") == "1"
 
-    sample_rate = int(meta_kv.get("sample_rate_hz", 250000))
-    total_samples = int(meta_kv["sample_count"])
+    for wav in sorted(SAMPLES_DIR.glob("*.wav")):
+        stem = wav.stem
+        s16  = DERIVED_DIR / f"{stem}.s16"
+        meta = DERIVED_DIR / f"{stem}.meta"
+        if not (s16.exists() and meta.exists()):
+            print(f"[replay] {wav.name}: no derived/.s16/.meta -- run "
+                  f"`python3 simulation/scripts/wav_to_iq.py --all`")
+            continue
 
-    common = dict(
-        REPLAY_FILE  = str(s16),
-        SAMPLE_COUNT = total_samples,
-        EXPECT_YEAR    = int(meta_kv["year"]),
-        EXPECT_MONTH   = int(meta_kv["month"]),
-        EXPECT_DAY     = int(meta_kv["day"]),
-        EXPECT_WEEKDAY = int(meta_kv["weekday"]),
-        EXPECT_HOUR    = int(meta_kv["hour"]),
-        EXPECT_MINUTE  = int(meta_kv["minute"]),
-        EXPECT_DST     = int(meta_kv["dst_active"]),
-    )
+        kv         = _read_meta(meta)
+        rate       = int(kv.get("sample_rate_hz", 1000))
+        pairs      = int(kv["sample_count"])
+        has_signal = int(kv.get("signal_present", 1)) == 1
+        has_exp    = int(kv.get("expect_full_decode", 0)) == 1
 
-    # Smoke: feed only the first ~5 s of the recording (enough to detect
-    # carrier and at least one bit pulse) so the test stays fast.
-    smoke_generics = dict(common,
-                          MAX_SAMPLES = 5 * sample_rate,
-                          EXPECT_FULL_FRAME = False)
+        if not has_signal:
+            print(f"[replay] {wav.name}: signal_present=0 in meta -- skipped")
+            continue
 
-    # Full decode: feed the entire recording.  Required to span a minute
-    # mark and trigger frame_dec's time_valid.
-    full_generics = dict(common,
-                         MAX_SAMPLES = 0,            # 0 = full file
-                         EXPECT_FULL_FRAME = True)
+        common = dict(
+            REPLAY_FILE   = str(s16),
+            SAMPLE_COUNT  = pairs,
+            EXPECT_YEAR    = int(kv.get("year",    0)),
+            EXPECT_MONTH   = int(kv.get("month",   0)),
+            EXPECT_DAY     = int(kv.get("day",     0)),
+            EXPECT_WEEKDAY = int(kv.get("weekday", 0)),
+            EXPECT_HOUR    = int(kv.get("hour",    0)),
+            EXPECT_MINUTE  = int(kv.get("minute",  0)),
+            EXPECT_DST     = int(kv.get("dst_active", 0)),
+        )
 
-    # Attach each config to ONE specific test case so the cross-product of
-    # configs and tests doesn't produce nonsensical pairings (e.g. running
-    # the full_decode assertions over a 5 s clip).
-    tb.test("smoke").add_config(name="synth", generics=smoke_generics)
-    # The full-decode test is slow (~30 min wall) so it is opt-in.
-    if os.environ.get("DCF77_FULL_REPLAY") == "1":
-        tb.test("full_decode").add_config(name="synth", generics=full_generics)
+        smoke = dict(common,
+                     MAX_SAMPLES = 60 * rate,
+                     EXPECT_FULL_FRAME    = False,
+                     EXPECT_VALIDATE_TIME = False)
+        tb.test("smoke").add_config(name=stem, generics=smoke)
+
+        if has_exp and want_full:
+            full = dict(common,
+                        MAX_SAMPLES = 0,
+                        EXPECT_FULL_FRAME    = True,
+                        EXPECT_VALIDATE_TIME = True)
+            tb.test("full_decode").add_config(name=stem, generics=full)
 
 
 def _read_meta(path) -> dict:

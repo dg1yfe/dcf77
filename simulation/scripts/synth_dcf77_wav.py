@@ -13,11 +13,15 @@ The amplitude modulation matches doc/dcf77_format_spec.md:
 * absenkung from second N to second N + (0.1 s for bit 0, 0.2 s for bit 1)
 * no absenkung at second 59 (minute marker)
 
+A companion `<stem>.expect` sidecar is written next to the WAV.  It
+carries the ground-truth time fields so `wav_to_iq.py --expect` can
+cross-check its software decoder against them and surface regressions.
+
 Usage:
+    python3 simulation/scripts/synth_dcf77_wav.py            # defaults
     python3 simulation/scripts/synth_dcf77_wav.py \\
-        --out simulation/derived/synth.wav \\
-        --year 26 --month 5 --day 13 --weekday 3 \\
-        --hour 11 --minute 42 --dst 1 --duration 65
+        --out samples/foo.wav --year 26 --month 5 --day 13 \\
+        --weekday 3 --hour 11 --minute 42 --dst 1 --duration 65
 """
 from __future__ import annotations
 
@@ -92,7 +96,7 @@ def build_frame(year: int, month: int, day: int, weekday: int,
     return f
 
 
-def synth_baseband(frame: list[int],
+def synth_baseband(frames: list[list[int]],
                    duration_s: float,
                    fs: int,
                    f_carrier: float = 5_000.0,
@@ -100,46 +104,58 @@ def synth_baseband(frame: list[int],
                    amp_low: float  = 0.12) -> np.ndarray:
     """Build a real-valued USB-baseband signal of length `duration_s`.
 
-    Frame replay begins at t = 0 (second 0 of the minute the frame
-    represents).  If the recording goes past t = 60 s, a bit-0-style 100 ms
-    absenkung is added at t = 60 s as the first pulse of the NEXT minute
-    (so the decoder sees the minute-mark gap close out into a fresh pulse).
+    `frames` lists one 59-bit frame per minute, starting at t=0.  Each
+    frame's pulses land at sec 0..58 of the corresponding minute; second
+    59 has no pulse (the minute-mark gap).
     """
     n = int(round(duration_s * fs))
     t = np.arange(n) / fs
 
-    # Default amplitude is the carrier-on level.
     amp = np.full(n, amp_high, dtype=np.float64)
 
-    # 59 second-aligned pulses per minute; index 59 is the minute marker.
-    for sec, bit in enumerate(frame):
-        start = int(round(sec * fs))
-        if start >= n:
-            break
-        pulse_s = 0.1 if bit == 0 else 0.2
-        end = min(start + int(round(pulse_s * fs)), n)
-        amp[start:end] = amp_low
-
-    # First pulse of the next minute (bit 0 of that minute, treat as 0).
-    if duration_s > 60.0:
-        start = int(round(60.0 * fs))
-        if start < n:
-            end = min(start + int(round(0.1 * fs)), n)
+    for m, frame in enumerate(frames):
+        for sec, bit in enumerate(frame):
+            start = int(round((m * 60 + sec) * fs))
+            if start >= n:
+                return amp * np.cos(2.0 * math.pi * f_carrier * t)
+            pulse_s = 0.1 if bit == 0 else 0.2
+            end = min(start + int(round(pulse_s * fs)), n)
             amp[start:end] = amp_low
 
-    # Modulate a sinusoid at the baseband carrier (DCF77 = LO + 5 kHz).
     return amp * np.cos(2.0 * math.pi * f_carrier * t)
+
+
+def build_minute_sequence(year: int, month: int, day: int, weekday: int,
+                          hour: int, minute: int, dst_active: bool,
+                          count: int) -> list[list[int]]:
+    """Build `count` consecutive DCF77 frames starting at the given time.
+
+    Only the minute/hour fields are advanced -- date wrap-arounds are not
+    modelled (the synth is used for short clips; one or two minutes is
+    enough for the decoder to lock).
+    """
+    frames = []
+    for k in range(count):
+        m_total  = minute + k
+        m_minute = m_total % 60
+        m_hour   = (hour + m_total // 60) % 24
+        frames.append(build_frame(year, month, day, weekday,
+                                  m_hour, m_minute, dst_active))
+    return frames
 
 
 def main() -> int:
     p = argparse.ArgumentParser(
         description="Synthesise a DCF77 USB-baseband WAV file."
     )
-    p.add_argument("--out", required=True, type=Path)
+    default_out = Path(__file__).resolve().parent.parent.parent \
+        / "samples" / "synth.wav"
+    p.add_argument("--out", type=Path, default=default_out)
     p.add_argument("--fs", type=int, default=16_000,
                    help="WAV sample rate (Hz); default 16 000")
-    p.add_argument("--duration", type=float, default=65.0,
-                   help="Recording length in seconds")
+    p.add_argument("--duration", type=float, default=130.0,
+                   help="Recording length in seconds (>=120 lets the "
+                        "soft decoder lock onto two consecutive frames)")
     p.add_argument("--year",    type=int, default=26)
     p.add_argument("--month",   type=int, default=5)
     p.add_argument("--day",     type=int, default=13)
@@ -150,9 +166,11 @@ def main() -> int:
                    help="1 = MESZ summer, 0 = MEZ winter")
     args = p.parse_args()
 
-    frame = build_frame(args.year, args.month, args.day, args.weekday,
-                        args.hour, args.minute, bool(args.dst))
-    sig = synth_baseband(frame, args.duration, args.fs)
+    num_minutes = max(1, int(args.duration // 60) + 1)
+    frames = build_minute_sequence(args.year, args.month, args.day,
+                                   args.weekday, args.hour, args.minute,
+                                   bool(args.dst), num_minutes)
+    sig = synth_baseband(frames, args.duration, args.fs)
 
     peak = float(np.max(np.abs(sig))) or 1.0
     sig_i16 = np.clip(sig / peak * 16_384.0, -32_768, 32_767).astype(np.int16)
@@ -166,6 +184,26 @@ def main() -> int:
 
     print(f"wrote {args.out}: {len(sig_i16)} samples at {args.fs} Hz "
           f"({args.duration:.2f} s)")
+
+    # A frame is fully decodable only if its minute mark (sec m*60 + 59)
+    # falls within the recording.  The .expect sidecar records the LAST
+    # such minute -- this is what the FPGA holds at end-of-stream.
+    decodable = max(1, int(args.duration // 60))
+    last_total  = args.minute + decodable - 1
+    last_minute = last_total % 60
+    last_hour   = (args.hour + last_total // 60) % 24
+
+    expect = args.out.with_suffix(".expect")
+    expect.write_text(
+        f"year={args.year}\n"
+        f"month={args.month}\n"
+        f"day={args.day}\n"
+        f"weekday={args.weekday}\n"
+        f"hour={last_hour}\n"
+        f"minute={last_minute}\n"
+        f"dst_active={args.dst}\n"
+    )
+    print(f"wrote {expect} (last decodable minute = {last_hour:02d}:{last_minute:02d})")
     return 0
 
 
