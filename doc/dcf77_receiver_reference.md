@@ -158,18 +158,18 @@ integration-time overrides (and for testbench scaling).
 All registers are 32 bits.  Byte addresses are word-aligned (low two
 bits must be zero).
 
-| Offset | RW | Name          | One-line content                                                  |
-| ------ | -- | ------------- | ----------------------------------------------------------------- |
-| 0x00   | RW | `CTRL`        | enable + soft_reset                                                |
-| 0x04   | R  | `STATUS`      | sync_state, time_valid, bit_index, RSSI                            |
-| 0x08   | R  | `TIME_HMS`    | minute, hour                                                       |
-| 0x0C   | R  | `DATE`        | year, month, day, weekday                                          |
-| 0x10   | R  | `FLAGS`       | DST flags                                                          |
-| 0x14   | R  | `RSSI`        | env_max top 16 b                                                   |
-| 0x18   | R  | `LAST_FRAME0` | raw frame bits 0..31                                               |
-| 0x1C   | R  | `LAST_FRAME1` | raw frame bits 32..58                                              |
-| 0x20   | R  | `ENV_MIN`     | env_min top 16 b                                                   |
-| 0x24   | R  | `NOISE`       | noise-MAD IIR top 16 b                                             |
+| Offset | RW  | Name        | Content                                  |
+|--------|-----|-------------|------------------------------------------|
+| 0x00   | RW  | CTRL        | enable, soft_reset                       |
+| 0x04   | RO  | STATUS      | sync_state, time_valid, bit_index, RSSI  |
+| 0x08   | RO  | TIME_HMS    | minute, hour                             |
+| 0x0C   | RO  | DATE        | year, month, day, weekday                |
+| 0x10   | RO  | FLAGS       | DST flags                                |
+| 0x14   | RO  | RSSI        | env_max top 16 b                         |
+| 0x18   | RO  | LAST_FRAME0 | raw frame bits 0..31                     |
+| 0x1C   | RO  | LAST_FRAME1 | raw frame bits 32..58                    |
+| 0x20   | RO  | ENV_MIN     | env_min top 16 b                         |
+| 0x24   | RO  | NOISE       | noise-MAD IIR top 16 b                   |
 
 Writes to any read-only offset return **SLVERR**.  Reads at offsets ≥
 `0x28` return **DECERR**.
