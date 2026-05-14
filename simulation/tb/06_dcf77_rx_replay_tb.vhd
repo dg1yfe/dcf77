@@ -164,13 +164,15 @@ begin
     -- Event monitor: counts + verbose info() logging (visible with -v)      --
     -- -------------------------------------------------------------------- --
     monitor : process (clk)
-        variable prev_sync : sync_state_t := sync_search;
-        variable bit_no    : natural := 0;
+        variable prev_sync   : sync_state_t       := sync_search;
+        variable prev_time_v : std_logic          := '0';
+        variable prev_time   : dcf77_time_type    := DCF77_TIME_RESET;
     begin
         if rising_edge(clk) then
             if rst = '1' then
-                prev_sync := sync_search;
-                bit_no    := 0;
+                prev_sync   := sync_search;
+                prev_time_v := '0';
+                prev_time   := DCF77_TIME_RESET;
             else
                 if sync_st /= prev_sync then
                     info("sync_state " & sync_state_str(prev_sync)
@@ -185,7 +187,6 @@ begin
                          & " = " & std_logic'image(bit_val)
                          & " sync=" & sync_state_str(sync_st)
                          & " (#" & integer'image(bits_seen) & ")");
-                    bit_no := bit_no + 1;
                 end if;
 
                 if minute_mk = '1' then
@@ -194,7 +195,13 @@ begin
                          & ", bits_seen=" & integer'image(bits_seen) & ")");
                 end if;
 
-                if time_v_d = '1' then
+                -- Log time_valid only on a fresh decode: either the level
+                -- just rose, or the decoded time advanced while the level
+                -- stayed high.  Otherwise time_v_d=1 every clock would
+                -- flood the log.
+                if time_v_d = '1'
+                    and (prev_time_v = '0' or time_d /= prev_time)
+                then
                     time_valids := time_valids + 1;
                     info("time_valid: "
                          & integer'image(to_integer(time_d.year)) & "-"
@@ -205,6 +212,8 @@ begin
                          & integer'image(to_integer(time_d.minute))
                          & " dst=" & std_logic'image(time_d.dst_active));
                 end if;
+                prev_time_v := time_v_d;
+                prev_time   := time_d;
             end if;
         end if;
     end process;
