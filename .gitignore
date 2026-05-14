@@ -2,7 +2,12 @@
 vunit_out/
 simulation/derived/
 
-## Editor / OS junk
+## Real RX recordings (kept out-of-tree; large binaries)
+samples/
+
+## Editor / tooling scratch
+.claude/
+__pycache__/
 *.swp
 *~
 .DS_Store

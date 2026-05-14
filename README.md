@@ -16,28 +16,33 @@ adc[14b, 125 MS/s]
    ▼
 CIC₀  (N=3, R=2,  M=1)        17 b integrators @ 125 MHz, single-cycle
    ▼  62.5 MS/s
-CIC₁  (N=3, R=16, M=1)        29 b integ / 28 b comb (Hogenauer pruned)
-   ▼  3.91 MS/s
-CIC₂  (N=3, R=16, M=1)        31 b integ / 26 b comb
-   ▼  244.140 kS/s, 22 b signed
-sign-LO mixer ◀── NCO (24 b phase acc, 77.5 kHz, ±1.8 mHz)
-   ▼ I, Q (22 b each)
+CIC₁  (N=3, R=10, M=1)        29 b integ / 26 b comb (Hogenauer-pruned)
+   ▼  6.25 MS/s
+CIC₂  (N=3, R=25, M=1)        33 b integ / 26 b comb
+   ▼  250 kS/s, 22 b signed (real-valued, carrier still at 77.5 kHz)
+sign-LO mixer ◀── NCO (18 b phase acc, 77.5 kHz, ±0.04 Hz)
+   ▼ I, Q (22 b each) @ 250 kS/s
+CIC₃_I, CIC₃_Q  (N=3, R=10)   30 b integ / 26 b comb, multicycle 500
+   ▼ I, Q (22 b each) @ 25 kS/s  ── PM hook (iq_tap_out)
+CIC₄_I, CIC₄_Q  (N=3, R=25)   33 b integ / 26 b comb, multicycle 5000
+   ▼ I, Q (22 b each) @ 1 kS/s
 power = I² + Q² (1 × DSP48E1, MAC time-shared)
    ▼
-adaptive threshold (slow IIRs for env_max, half-peak threshold, hysteresis)
+adaptive threshold + env_min trough + noise-MAD IIR
    ▼ digital pulse
-pulse-width FSM @ 244 kS/s:  100 ms±10 ms → bit 0,  200 ms±10 ms → bit 1,
-                             no absenkung in expected window → minute mark
+pulse-width FSM @ 1 kS/s:  100 ms±10 ms → bit 0,  200 ms±10 ms → bit 1,
+                            no absenkung in expected window → minute mark
    ▼
 59-bit frame buffer
    ▼
 BCD + parity + plausibility checks  (per doc/dcf77_format_spec.md)
    ▼
-AXI4-Lite slave  (8 registers)
+AXI4-Lite slave  (10 registers)
 ```
 
-The post-mixer I/Q is also exposed as a `dcf77_iq_tap_type` port for a
-future PM (BPSK / m-sequence) correlator.
+The post-mixer I/Q is also exposed as a `dcf77_iq_tap_type` port at
+25 kS/s for a future PM (BPSK / m-sequence) correlator (~49 samples per
+PM chip, far above the typical 4–16 samples/chip budget).
 
 Design decisions are described in
 `/Users/eligs/.claude/plans/this-project-aims-to-toasty-pelican.md`; CIC
@@ -53,8 +58,9 @@ inc/                shared packages (compiled first)
   axi4lite_interface_pkg.vhd channel record types
 
 src/dcf77/          RTL
-  dcf77_cic_dec.vhd        generic 3-stage CIC building block (×3 in cascade)
-  dcf77_nco.vhd            24 b phase-accumulator DDS, sign-only I/Q outputs
+  dcf77_cic_dec.vhd        generic CIC building block (instantiated 7×:
+                            3 pre-mixer real + 2×2 post-mixer complex)
+  dcf77_nco.vhd            18 b phase-accumulator DDS, sign-only I/Q outputs
   dcf77_mixer.vhd          22 b cond-negate I/Q
   dcf77_env.vhd            I²+Q² with time-shared DSP48E1 MAC
   dcf77_bit_det.vhd        adaptive threshold + pulse-width FSM + sync state
@@ -65,8 +71,10 @@ src/dcf77/          RTL
   dcf77_axi_lite.vhd       top-level shell: core + readmux + writemux + flat AXI ports
 
 constraints/
-  dcf77.xdc                set_multicycle_path for CIC₁ (×2) / CIC₂ (×32)
-                           and false_path on the slow IIRs
+  dcf77.xdc                set_multicycle_path for CIC₁ (×2) / CIC₂ (×20)
+                           and CIC₃ (×500) / CIC₄ (×5000); false_path on
+                           the slow bit-det IIRs (env_max, env_min, noise,
+                           threshold, hyst)
 
 simulation/scripts/
   run.py                   VUnit runner (also registers TB configurations)
@@ -112,15 +120,89 @@ artefacts land in `vunit_out/` (gitignored).  Total runtime ≈ 35 s.
 | 0x08   | R  | TIME_HMS    | 5..0 minute, 12..8 hour                                   |
 | 0x0C   | R  | DATE        | 7..0 year, 11..8 month, 20..16 day, 26..24 weekday        |
 | 0x10   | R  | FLAGS       | 0 dst_active, 1 dst_announce, 2 leap_announce             |
-| 0x14   | R  | RSSI        | 31..16 magnitude (top 16 b of env_max)                    |
+| 0x14   | R  | RSSI        | 15..0 magnitude (top 16 b of env_max)                     |
 | 0x18   | R  | LAST_FRAME0 | raw frame bits 0..31                                      |
 | 0x1C   | R  | LAST_FRAME1 | raw frame bits 32..58                                     |
+| 0x20   | R  | ENV_MIN     | 15..0 magnitude (top 16 b of env_min trough tracker)      |
+| 0x24   | R  | NOISE       | 15..0 magnitude (top 16 b of noise-MAD IIR)               |
+
+`SNR_dB ≈ 20·log10((RSSI − ENV_MIN) / NOISE)` — the host reads the three
+fields and computes the dB value at audio cadence.
 
 `sync_state` encoding: `00` = search, `01` = lock, `10` = hold.  After
 `T_HOLD_SEC` (default 120 s) without a minute mark the state falls from
 `lock` to `hold`; after `T_SEARCH_SEC` (default 300 s) it falls to
 `search`.  Reads of addresses ≥ 0x20 return DECERR; writes to any
 read-only offset return SLVERR.
+
+## Replay test — decoding a real recording
+
+The receiver back end can be exercised against a real DCF77 reception
+(or a synthetic one for CI).  Because the recording stack typically
+samples at audio rates with a frequency-translated baseband, the
+recording is spliced into the chain **post-CIC** — at the 250 kS/s
+real-valued sample point that feeds the mixer.
+
+Three artefacts are involved:
+
+1. A **WAV file** (`*.wav`, mono real-valued, any sample rate ≥ 12 kHz).
+   The recording must be USB-demodulated with the receiver tuned to
+   **72.5 kHz**, so DCF77 (77.5 kHz) appears at +5 kHz in baseband.
+2. A binary post-CIC stream (`*.s16`, little-endian int16 at 250 kHz)
+   produced by the Python preprocessor.
+3. A metadata sidecar (`*.meta`) recording the expected decoded time.
+
+Workflow:
+
+```sh
+# Either: generate a synthetic recording for self-testing
+python3 simulation/scripts/synth_dcf77_wav.py \
+    --out simulation/derived/synth.wav --duration 65 \
+    --year 26 --month 5 --day 13 --weekday 3 \
+    --hour 11 --minute 42 --dst 1
+
+# Or: drop in your own WAV under simulation/derived/
+
+# Preprocess WAV -> .s16 + .meta
+python3 simulation/scripts/wav_to_postcic.py \
+    --in   simulation/derived/synth.wav \
+    --out  simulation/derived/synth.s16 \
+    --meta simulation/derived/synth.meta \
+    --year 26 --month 5 --day 13 --weekday 3 \
+    --hour 11 --minute 42 --dst 1
+
+# Run the replay tests
+python3 simulation/scripts/run.py "*rx_replay*"
+```
+
+Two test cases are available when both `synth.s16` and `synth.meta` are
+present in `simulation/derived/`:
+
+* `smoke` — feeds the first ~5 s and asserts at least one `bit_valid`
+  fires.  Registered by default.
+* `full_decode` — feeds the entire recording, asserts the decoded
+  fields match the metadata.  **Opt-in** via the
+  `DCF77_FULL_REPLAY=1` environment variable; it takes ~30 min and is
+  typically run on demand, not as part of every `run.py` invocation.
+
+  ```sh
+  DCF77_FULL_REPLAY=1 python3 simulation/scripts/run.py "*rx_replay*full*"
+  ```
+
+The default `CLOCKS_PER_TICK` is **8** (one sample every 8 clocks), about
+62× faster than silicon timing (125 MHz / 250 kHz = 500) while still
+leaving the env block enough clocks to complete its time-shared MAC.
+Smoke runs in ~3 min, full decode in ~30 min.  The decoder back end only
+counts `env_valid` pulses (not wall-clock gap between them), so results
+are independent of the chosen rate.  Silicon-faithful 500-clocks-per-
+sample timing is available by overriding both `CLOCKS_PER_TICK` and
+`NCO_PHASE_INCR` generics in `run.py` — see the
+`_configure_replay_testbench` block — at the cost of ~4 h sim runtime
+for a 65 s clip.
+
+The replay tests are silently skipped if the `.s16` / `.meta` artefacts
+are absent, so the core suite (32 tests, ~30 s) remains runnable without
+them.
 
 ## Tools — `cic_pruning.py`
 

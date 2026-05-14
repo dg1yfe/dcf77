@@ -212,8 +212,8 @@ begin
 
             -----------------------------------------------------------------
             elsif run("read_unmapped_decerr") then
-                -- 0x20 is past the last mapped register -> DECERR.
-                axi_read(x"20", rd, AXI_RESPONSE_DECERR);
+                -- 0x28 is past the last mapped register (NOISE at 0x24) -> DECERR.
+                axi_read(x"28", rd, AXI_RESPONSE_DECERR);
 
             -----------------------------------------------------------------
             elsif run("last_frame_reset") then
@@ -231,11 +231,14 @@ begin
             -----------------------------------------------------------------
             elsif run("soft_reset_pulse_resets_core") then
                 -- Drive ADC, let RSSI climb, fire soft_reset, verify RSSI
-                -- is zero again (i.e. the core saw a reset pulse).
+                -- is zero again (i.e. the core saw a reset pulse).  The
+                -- CIC chain decimates by 125_000 so env_valid pulses are
+                -- one per 125_000 clocks; we need ~10 of them for the
+                -- adaptive IIR to climb measurably.
                 adc_sample <= to_sfixed(6000, adc_sample_t'high,
                                         adc_sample_t'low);
                 adc_valid  <= '1';
-                wait_clk(2000);
+                wait_clk(2_000_000);
                 axi_read(x"04", rd, AXI_RESPONSE_OKAY);
                 check(rd(31 downto 16) /= std_logic_vector'(x"0000"),
                       "RSSI rose before soft_reset");
@@ -256,20 +259,22 @@ begin
                 -- Drive a strong ADC level with enable=0 and verify the
                 -- decoder doesn't track: env_max (read via STATUS bits
                 -- 31..16) should stay at zero.  Then enable and confirm
-                -- env_max climbs above zero with the same input.
+                -- env_max climbs above zero with the same input.  CIC
+                -- decimation = 125_000, so we need ~2 M clocks (~16
+                -- env_valid pulses) to see the IIR climb.
                 adc_sample <= to_sfixed(6000, adc_sample_t'high,
                                         adc_sample_t'low);
                 adc_valid  <= '1';
 
                 axi_write(x"00", x"00000000", AXI_RESPONSE_OKAY);  -- enable=0
-                wait_clk(2000);
+                wait_clk(2_000_000);
                 axi_read(x"04", rd, AXI_RESPONSE_OKAY);
                 check_equal(rd(31 downto 16),
                             std_logic_vector'(x"0000"),
                             "RSSI stays zero while CTRL.enable=0");
 
                 axi_write(x"00", x"00000001", AXI_RESPONSE_OKAY);  -- enable=1
-                wait_clk(2000);
+                wait_clk(2_000_000);
                 axi_read(x"04", rd, AXI_RESPONSE_OKAY);
                 check(rd(31 downto 16) /= std_logic_vector'(x"0000"),
                       "RSSI rises once CTRL.enable goes high");
@@ -283,6 +288,9 @@ begin
         wait;
     end process;
 
-    test_runner_watchdog(runner, 1 ms);
+    -- Some tests need ~2 M clocks (16 ms) for env_valid to fire enough
+    -- times that the bit_det IIRs settle measurably.  100 ms watchdog
+    -- gives generous margin.
+    test_runner_watchdog(runner, 100 ms);
 
 end architecture;

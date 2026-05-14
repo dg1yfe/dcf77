@@ -2,15 +2,22 @@
 -- dcf77_bit_det.vhd
 --
 -- Adaptive-threshold pulse-width AM bit detector.  Consumes the envelope
--- power at 244.140625 kS/s and produces bit / minute-mark events.
+-- power at 1 kS/s (post-mixer / post-CIC3+CIC4) and produces bit /
+-- minute-mark events.
 --
 -- Threshold tracking:
---   env_max is a slow IIR peak detector with fast attack (k_atk) and slow
---   decay (k_dec).  The DCF77 amplitude drops to ~15% during the absenkung,
---   so a half-peak threshold gives a comfortable separation.  Hysteresis at
---   ±env_max/8 prevents chattering on noise.
+--   env_max is an IIR peak detector with fast attack (K_ATK) and slow
+--   decay (K_DEC).  env_min is the mirrored trough tracker (fast attack
+--   on low excursions, slow drift back up).  The DCF77 amplitude drops
+--   to ~15 % during the absenkung; the threshold sits midway between
+--   env_max and env_min in effect, with ±env_max/8 hysteresis.
 --
--- Pulse-width FSM @ 244 kS/s:
+--   A noise estimate (noise_iir) tracks the running mean-absolute
+--   deviation of env_in from the currently-tracked level (env_max while
+--   carrier='1', env_min while carrier='0').  The host can compute
+--   SNR_dB ≈ 20·log10((env_max - env_min)/noise_iir).
+--
+-- Pulse-width FSM @ 1 kS/s:
 --   carrier='1' (high) -> count high duration; if it lasts beyond the
 --                         per-second window, latch a pending minute mark.
 --   carrier='0' (low ) -> count low duration; on the rising edge classify
@@ -18,12 +25,12 @@
 --                         emit the pending minute mark.
 --
 -- Per spec §1.1: 100 ms ±10 ms -> bit 0, 200 ms ±10 ms -> bit 1.
--- At 244 140.625 ticks/s:
---   90 ms  =  21 973 ticks
---   110 ms =  26 855 ticks
---   190 ms =  46 387 ticks
---   210 ms =  51 269 ticks
---   1500 ms = 366 211 ticks  (used for minute-mark gap detect)
+-- At 1 000 ticks/s:
+--    90 ms =    90 ticks
+--   110 ms =   110 ticks
+--   190 ms =   190 ticks
+--   210 ms =   210 ticks
+--  1500 ms =  1500 ticks   (minute-mark gap)
 -- =========================================================================
 
 library ieee;
@@ -36,19 +43,19 @@ use work.dcf77_pkg.all;
 
 entity dcf77_bit_det is
     generic (
-        K_ATK         : positive := 6;          -- attack shift (1/2^K_ATK per sample)
-        K_DEC         : positive := 20;         -- decay shift
-        -- Bit-pulse-width thresholds in env_valid ticks.  10 ms tolerance
-        -- at 244 kS/s -> tick-level numbers are natural here.
-        T_LOW_MIN     : positive := 21_973;     -- min low-pulse for any bit (90 ms)
-        T_BIT0_MAX    : positive := 26_855;     -- bit 0 upper bound (110 ms)
-        T_BIT1_MIN    : positive := 46_387;     -- bit 1 lower bound (190 ms)
-        T_BIT1_MAX    : positive := 51_269;     -- bit 1 upper bound (210 ms)
-        T_GAP_MINUTE  : positive := 366_211;    -- minute-mark gap (1500 ms)
+        K_ATK         : positive := 6;          -- env_max/min attack shift
+        K_DEC         : positive := 12;         -- env_max/min decay shift (~4 s @ 1 kHz)
+        K_NOISE       : positive := 12;         -- noise-MAD IIR shift (~4 s @ 1 kHz)
+        -- Bit-pulse-width thresholds in env_valid ticks.  At 1 kHz, 1 tick = 1 ms.
+        T_LOW_MIN     : positive := 90;         -- min low-pulse for any bit (90 ms)
+        T_BIT0_MAX    : positive := 110;        -- bit 0 upper bound (110 ms)
+        T_BIT1_MIN    : positive := 190;        -- bit 1 lower bound (190 ms)
+        T_BIT1_MAX    : positive := 210;        -- bit 1 upper bound (210 ms)
+        T_GAP_MINUTE  : positive := 1_500;      -- minute-mark gap (1500 ms)
         -- Sync-state demotion is on minute-scale: defining the thresholds
         -- in seconds keeps the numbers human-readable.  The actual tick
         -- counts are SAMPLE_RATE_HZ * the relevant seconds value.
-        SAMPLE_RATE_HZ : positive := 244_140;   -- env_valid rate at the real Fs
+        SAMPLE_RATE_HZ : positive := 1_000;     -- env_valid rate at the real Fs
         T_HOLD_SEC     : positive := 120;       -- lock -> hold (~2 min)
         T_SEARCH_SEC   : positive := 300        -- any -> search (~5 min)
     );
@@ -64,6 +71,8 @@ entity dcf77_bit_det is
         minute_mark : out std_logic;          -- one-cycle strobe
         sync_state  : out sync_state_t;
         env_max     : out env_word_t;
+        env_min     : out env_word_t;
+        noise       : out env_word_t;
         threshold   : out env_word_t
     );
 end entity dcf77_bit_det;
@@ -94,8 +103,10 @@ architecture rtl of dcf77_bit_det is
     type state_t is (S_HIGH, S_LOW);
 
     type reg_type is record
-        -- Adaptive threshold tracker
+        -- Adaptive threshold trackers and noise estimate
         env_max     : env_word_t;
+        env_min     : env_word_t;
+        noise_iir   : env_word_t;
         threshold   : env_word_t;
         hyst        : env_word_t;
         carrier     : std_logic;          -- hysteretic envelope decision
@@ -120,6 +131,8 @@ architecture rtl of dcf77_bit_det is
     constant ZERO_ENV : env_word_t := (others => '0');
     constant R_RESET  : reg_type := (
         env_max     => ZERO_ENV,
+        env_min     => ZERO_ENV,
+        noise_iir   => ZERO_ENV,
         threshold   => ZERO_ENV,
         hyst        => ZERO_ENV,
         carrier     => '1',
@@ -143,15 +156,20 @@ begin
     minute_mark <= r.minute_mark;
     sync_state  <= r.sync_state;
     env_max     <= r.env_max;
+    env_min     <= r.env_min;
+    noise       <= r.noise_iir;
     threshold   <= r.threshold;
 
     comb : process (all)
         variable v        : reg_type;
         variable delta    : sfixed(env_word_t'high + 1 downto env_word_t'low);
+        variable abs_dev  : sfixed(env_word_t'high + 1 downto env_word_t'low);
         variable shifted  : sfixed(env_word_t'high + 1 downto env_word_t'low);
         variable th_hi    : sfixed(env_word_t'high + 1 downto env_word_t'low);
         variable th_lo    : sfixed(env_word_t'high + 1 downto env_word_t'low);
         variable new_max  : sfixed(env_word_t'high + 1 downto env_word_t'low);
+        variable new_min  : sfixed(env_word_t'high + 1 downto env_word_t'low);
+        variable new_noise: sfixed(env_word_t'high + 1 downto env_word_t'low);
     begin
         v := r;
 
@@ -162,17 +180,16 @@ begin
         if env_valid = '1' then
 
             -----------------------------------------------------------------
-            -- Adaptive peak tracker (env_max).
+            -- Adaptive peak tracker (env_max): fast attack toward larger,
+            -- slow decay toward zero.
             -----------------------------------------------------------------
             if env_in > r.env_max then
-                -- Fast attack: env_max += (env_in - env_max) >> K_ATK
                 delta   := resize(env_in - r.env_max,
                                   delta'high, delta'low);
                 shifted := shift_right(delta, K_ATK);
                 new_max := resize(r.env_max + shifted,
                                   new_max'high, new_max'low);
             else
-                -- Slow decay: env_max -= env_max >> K_DEC
                 shifted := shift_right(resize(r.env_max,
                                               shifted'high, shifted'low),
                                        K_DEC);
@@ -181,6 +198,54 @@ begin
             end if;
             v.env_max := resize(new_max, env_word_t'high, env_word_t'low,
                                 fixed_saturate, fixed_truncate);
+
+            -----------------------------------------------------------------
+            -- Adaptive trough tracker (env_min): fast attack toward smaller,
+            -- slow drift back up toward env_max.
+            -----------------------------------------------------------------
+            if env_in < r.env_min then
+                delta   := resize(r.env_min - env_in,
+                                  delta'high, delta'low);
+                shifted := shift_right(delta, K_ATK);
+                new_min := resize(r.env_min - shifted,
+                                  new_min'high, new_min'low);
+            else
+                delta   := resize(r.env_max - r.env_min,
+                                  delta'high, delta'low);
+                shifted := shift_right(delta, K_DEC);
+                new_min := resize(r.env_min + shifted,
+                                  new_min'high, new_min'low);
+            end if;
+            v.env_min := resize(new_min, env_word_t'high, env_word_t'low,
+                                fixed_saturate, fixed_truncate);
+
+            -----------------------------------------------------------------
+            -- Noise estimator: running mean-absolute-deviation from the
+            -- currently-tracked level (env_max while carrier='1',
+            -- env_min while carrier='0').  Slow IIR with shift K_NOISE.
+            -----------------------------------------------------------------
+            if r.carrier = '1' then
+                delta := resize(env_in - r.env_max,
+                                delta'high, delta'low);
+            else
+                delta := resize(env_in - r.env_min,
+                                delta'high, delta'low);
+            end if;
+            if delta(delta'high) = '1' then
+                abs_dev := resize(- delta, abs_dev'high, abs_dev'low);
+            else
+                abs_dev := delta;
+            end if;
+            shifted   := shift_right(resize(r.noise_iir,
+                                            shifted'high, shifted'low),
+                                     K_NOISE);
+            new_noise := resize(r.noise_iir +
+                                resize(shift_right(abs_dev, K_NOISE),
+                                       new_noise'high, new_noise'low) -
+                                shifted,
+                                new_noise'high, new_noise'low);
+            v.noise_iir := resize(new_noise, env_word_t'high, env_word_t'low,
+                                  fixed_saturate, fixed_truncate);
 
             -- Derive threshold and hysteresis from the updated env_max.
             v.threshold := resize(shift_right(v.env_max, 1),

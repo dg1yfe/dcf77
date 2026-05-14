@@ -64,6 +64,8 @@ architecture tb of dcf77_bit_det_tb is
     signal minute_mark : std_logic;
     signal sync_state  : sync_state_t;
     signal env_max_o   : env_word_t;
+    signal env_min_o   : env_word_t;
+    signal noise_o     : env_word_t;
     signal threshold_o : env_word_t;
 
 begin
@@ -90,6 +92,8 @@ begin
             minute_mark => minute_mark,
             sync_state  => sync_state,
             env_max     => env_max_o,
+            env_min     => env_min_o,
+            noise       => noise_o,
             threshold   => threshold_o
         );
 

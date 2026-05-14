@@ -120,7 +120,9 @@ package dcf77_pkg is
         time       : dcf77_time_type;                 -- decoded time fields
         time_valid : std_logic;                       -- last frame fully parity-OK
         sync_state : sync_state_t;
-        rssi       : rssi_word_t;
+        rssi       : rssi_word_t;                     -- top bits of env_max
+        env_min    : rssi_word_t;                     -- top bits of env_min
+        noise      : rssi_word_t;                     -- top bits of noise IIR (MAD)
         bit_index  : bit_index_t;                     -- current second 0..58 (59 = frame full)
         last_frame : std_logic_vector(0 to 58);       -- raw bits of last minute
     end record;
@@ -130,6 +132,8 @@ package dcf77_pkg is
         time_valid => '0',
         sync_state => sync_search,
         rssi       => (others => '0'),
+        env_min    => (others => '0'),
+        noise      => (others => '0'),
         bit_index  => 0,
         last_frame => (others => '0')
     );
@@ -172,9 +176,11 @@ package dcf77_pkg is
     constant REG_TIME_HMS    : natural := 2;   -- 0x08 R
     constant REG_DATE        : natural := 3;   -- 0x0C R
     constant REG_FLAGS       : natural := 4;   -- 0x10 R
-    constant REG_RSSI        : natural := 5;   -- 0x14 R
+    constant REG_RSSI        : natural := 5;   -- 0x14 R   env_max top 16 b
     constant REG_LAST_FRAME0 : natural := 6;   -- 0x18 R
     constant REG_LAST_FRAME1 : natural := 7;   -- 0x1C R
+    constant REG_ENV_MIN     : natural := 8;   -- 0x20 R   env_min top 16 b
+    constant REG_NOISE       : natural := 9;   -- 0x24 R   noise_iir top 16 b
 
     ---------------------------------------------------------------------------
     -- 32-b register pack / unpack helpers.  The bit layouts below match the

@@ -3,17 +3,26 @@
 --
 -- Top-level wiring of the DCF77 receiver / decoder:
 --
---   adc -> CIC0(R=2) -> CIC1(R=16) -> CIC2(R=16) ---+--> mixer -+-> env -> bit_det
---                                                    |          |
---                                                    NCO(244k)  +-> iq_tap (PM hook)
---                                                                       |
---                                                              bit_det -+-> frame_dec
+--   adc -> CIC0(R=2) -> CIC1(R=10) -> CIC2(R=25) -+-> mixer @250 kS/s
+--                                                  |       |
+--                                                  NCO     +-+--> CIC3_I (R=10)
+--                                                          |        |    25 kS/s
+--                                                          +--> CIC3_Q   ---> iq_tap
+--                                                                   |
+--                                                                   +--> CIC4_I (R=25)
+--                                                                          1 kS/s
+--                                                                   +--> CIC4_Q
 --                                                                          |
---                                                                          time_out / status
+--                                                                env (I²+Q²)
+--                                                                          |
+--                                                                       bit_det
+--                                                                          |
+--                                                                       frame_dec --> status_out
 --
 -- All blocks live in the 125 MHz clock domain; inner CIC stages advance on
--- valid strobes, so XDC multicycle constraints (factor 2 for CIC1, factor
--- 32 for CIC2) are required at synthesis to actually relax their timing.
+-- valid strobes.  XDC multicycle constraints are needed at synthesis:
+--   CIC1: factor 2,   CIC2: factor 20,
+--   CIC3_*: factor 500, CIC4_*: factor 5000.
 -- =========================================================================
 
 library ieee;
@@ -27,21 +36,21 @@ use work.dcf77_cic_widths_pkg.all;
 
 entity dcf77_core is
     generic (
-        -- bit_det timing: defaults match the real 244.140 kS/s rate.  Tests
-        -- can scale these down to fit a short simulation budget.
-        K_ATK         : positive := 6;
-        K_DEC         : positive := 20;
-        T_LOW_MIN     : positive := 21_973;
-        T_BIT0_MAX    : positive := 26_855;
-        T_BIT1_MIN    : positive := 46_387;
-        T_BIT1_MAX    : positive := 51_269;
-        T_GAP_MINUTE  : positive := 366_211;
-        SAMPLE_RATE_HZ : positive := 244_140;
+        -- bit_det defaults: 1 kS/s tick rate (one sample per ms).
+        K_ATK          : positive := 6;
+        K_DEC          : positive := 12;
+        K_NOISE        : positive := 12;
+        T_LOW_MIN      : positive := 90;
+        T_BIT0_MAX     : positive := 110;
+        T_BIT1_MIN     : positive := 190;
+        T_BIT1_MAX     : positive := 210;
+        T_GAP_MINUTE   : positive := 1_500;
+        SAMPLE_RATE_HZ : positive := 1_000;
         T_HOLD_SEC     : positive := 120;
         T_SEARCH_SEC   : positive := 300;
 
-        -- NCO frequency increment (per 244 kS/s tick).
-        NCO_PHASE_INCR : natural := 5_326_192
+        -- NCO frequency increment for 18 b acc @ 250 kS/s mixer tick.
+        NCO_PHASE_INCR : natural := 81_245
     );
     port (
         clk       : in  std_logic;
@@ -59,35 +68,59 @@ end entity dcf77_core;
 
 architecture rtl of dcf77_core is
 
-    -- Inter-stage signals.
-    signal cic0_out  : sfixed(CIC0_OUT_W - 1 downto 0);
-    signal cic0_v    : std_logic;
-    signal cic1_out  : sfixed(CIC1_OUT_W - 1 downto 0);
-    signal cic1_v    : std_logic;
-    signal cic2_out  : sfixed(CIC2_OUT_W - 1 downto 0);  -- 22 b signed @ 244 kS/s
-    signal cic2_v    : std_logic;
+    -- Inter-stage signals (pre-mixer).
+    signal cic0_out   : sfixed(CIC0_OUT_W - 1 downto 0);
+    signal cic0_v     : std_logic;
+    signal cic1_out   : sfixed(CIC1_OUT_W - 1 downto 0);
+    signal cic1_v     : std_logic;
+    signal cic2_out   : sfixed(CIC2_OUT_W - 1 downto 0);  -- 22 b signed @ 250 kS/s
+    signal cic2_v     : std_logic;
 
-    signal cos_sign  : std_logic;
-    signal sin_sign  : std_logic;
+    signal cos_sign   : std_logic;
+    signal sin_sign   : std_logic;
 
-    signal i_mix     : iq_word_t;
-    signal q_mix     : iq_word_t;
-    signal mix_v     : std_logic;
+    signal i_mix      : iq_word_t;                        -- 22 b signed @ 250 kS/s
+    signal q_mix      : iq_word_t;
+    signal mix_v      : std_logic;
 
-    signal env_pwr   : env_word_t;
-    signal env_v     : std_logic;
+    -- Post-mixer per-channel decimators.
+    signal cic3_i_out : sfixed(CIC3_OUT_W - 1 downto 0);  -- 22 b @ 25 kS/s
+    signal cic3_q_out : sfixed(CIC3_OUT_W - 1 downto 0);
+    signal cic3_i_v   : std_logic;
+    signal cic3_q_v   : std_logic;
+    signal cic4_i_out : sfixed(CIC4_OUT_W - 1 downto 0);  -- 22 b @ 1 kS/s
+    signal cic4_q_out : sfixed(CIC4_OUT_W - 1 downto 0);
+    signal cic4_i_v   : std_logic;
+    signal cic4_q_v   : std_logic;
 
-    signal bit_val   : std_logic;
-    signal bit_v     : std_logic;
-    signal minute_mk : std_logic;
-    signal sync_st   : sync_state_t;
-    signal env_max_s : env_word_t;
-    signal thresh_s  : env_word_t;
+    signal env_pwr    : env_word_t;
+    signal env_v      : std_logic;
 
-    signal time_d    : dcf77_time_type;
-    signal time_v_d  : std_logic;
-    signal last_frm  : std_logic_vector(0 to 58);
-    signal bit_ix    : bit_index_t;
+    signal bit_val    : std_logic;
+    signal bit_v      : std_logic;
+    signal minute_mk  : std_logic;
+    signal sync_st    : sync_state_t;
+    signal env_max_s  : env_word_t;
+    signal env_min_s  : env_word_t;
+    signal noise_s    : env_word_t;
+    signal thresh_s   : env_word_t;
+
+    signal time_d     : dcf77_time_type;
+    signal time_v_d   : std_logic;
+    signal last_frm   : std_logic_vector(0 to 58);
+    signal bit_ix     : bit_index_t;
+
+    -- Cast top 16 b of an env_word_t (sfixed, but always >= 0 in this
+    -- design) to rssi_word_t.  Skips the sign bit and takes the 16 next
+    -- bits.
+    function env_to_rssi(x : env_word_t) return rssi_word_t is
+        constant TOP : natural := x'high - 1;          -- skip sign bit
+        constant BOT : natural := TOP - 15;
+        variable slv : std_logic_vector(env_word_t'length - 1 downto 0);
+    begin
+        slv := to_slv(x);
+        return ufixed(slv(TOP - x'low downto BOT - x'low));
+    end function;
 
 begin
 
@@ -156,7 +189,7 @@ begin
     -- ------------------------------------------------------------------ --
     u_nco : entity work.dcf77_nco
         generic map (
-            PHASE_WIDTH => 24,
+            PHASE_WIDTH => 18,
             PHASE_INCR  => NCO_PHASE_INCR
         )
         port map (
@@ -183,21 +216,102 @@ begin
             out_valid => mix_v
         );
 
-    -- PM hook: expose the post-mixer I/Q at 244 kS/s.
-    iq_tap_out.i_data <= i_mix;
-    iq_tap_out.q_data <= q_mix;
-    iq_tap_out.valid  <= mix_v;
+    -- ------------------------------------------------------------------ --
+    -- Post-mixer cascade (per I/Q channel): R=10 then R=25 = 250            --
+    -- 250 kS/s -> 25 kS/s (PM tap) -> 1 kS/s                                --
+    -- ------------------------------------------------------------------ --
+    u_cic3_i : entity work.dcf77_cic_dec
+        generic map (
+            N          => CIC_N,
+            DEC_R      => CIC3_R,
+            M          => CIC_M,
+            IN_WIDTH   => CIC3_IN_W,
+            INT_WIDTH  => CIC3_INT_W,
+            COMB_WIDTH => CIC3_COMB_W,
+            OUT_WIDTH  => CIC3_OUT_W
+        )
+        port map (
+            clk        => clk,
+            rst        => rst,
+            in_sample  => i_mix,
+            in_valid   => mix_v,
+            out_sample => cic3_i_out,
+            out_valid  => cic3_i_v
+        );
+
+    u_cic3_q : entity work.dcf77_cic_dec
+        generic map (
+            N          => CIC_N,
+            DEC_R      => CIC3_R,
+            M          => CIC_M,
+            IN_WIDTH   => CIC3_IN_W,
+            INT_WIDTH  => CIC3_INT_W,
+            COMB_WIDTH => CIC3_COMB_W,
+            OUT_WIDTH  => CIC3_OUT_W
+        )
+        port map (
+            clk        => clk,
+            rst        => rst,
+            in_sample  => q_mix,
+            in_valid   => mix_v,
+            out_sample => cic3_q_out,
+            out_valid  => cic3_q_v
+        );
+
+    -- PM hook: post-CIC3 I/Q at 25 kS/s.  Either channel's valid will do
+    -- (they tick together on the same mix_v stream).
+    iq_tap_out.i_data <= cic3_i_out;
+    iq_tap_out.q_data <= cic3_q_out;
+    iq_tap_out.valid  <= cic3_i_v;
+
+    u_cic4_i : entity work.dcf77_cic_dec
+        generic map (
+            N          => CIC_N,
+            DEC_R      => CIC4_R,
+            M          => CIC_M,
+            IN_WIDTH   => CIC4_IN_W,
+            INT_WIDTH  => CIC4_INT_W,
+            COMB_WIDTH => CIC4_COMB_W,
+            OUT_WIDTH  => CIC4_OUT_W
+        )
+        port map (
+            clk        => clk,
+            rst        => rst,
+            in_sample  => cic3_i_out,
+            in_valid   => cic3_i_v,
+            out_sample => cic4_i_out,
+            out_valid  => cic4_i_v
+        );
+
+    u_cic4_q : entity work.dcf77_cic_dec
+        generic map (
+            N          => CIC_N,
+            DEC_R      => CIC4_R,
+            M          => CIC_M,
+            IN_WIDTH   => CIC4_IN_W,
+            INT_WIDTH  => CIC4_INT_W,
+            COMB_WIDTH => CIC4_COMB_W,
+            OUT_WIDTH  => CIC4_OUT_W
+        )
+        port map (
+            clk        => clk,
+            rst        => rst,
+            in_sample  => cic3_q_out,
+            in_valid   => cic3_q_v,
+            out_sample => cic4_q_out,
+            out_valid  => cic4_q_v
+        );
 
     -- ------------------------------------------------------------------ --
-    -- Envelope power + bit detector                                        --
+    -- Envelope power + bit detector @ 1 kS/s                                --
     -- ------------------------------------------------------------------ --
     u_env : entity work.dcf77_env
         port map (
             clk       => clk,
             rst       => rst,
-            i_in      => i_mix,
-            q_in      => q_mix,
-            in_valid  => mix_v,
+            i_in      => cic4_i_out,
+            q_in      => cic4_q_out,
+            in_valid  => cic4_i_v,
             power     => env_pwr,
             out_valid => env_v
         );
@@ -206,6 +320,7 @@ begin
         generic map (
             K_ATK          => K_ATK,
             K_DEC          => K_DEC,
+            K_NOISE        => K_NOISE,
             T_LOW_MIN      => T_LOW_MIN,
             T_BIT0_MAX     => T_BIT0_MAX,
             T_BIT1_MIN     => T_BIT1_MIN,
@@ -225,6 +340,8 @@ begin
             minute_mark => minute_mk,
             sync_state  => sync_st,
             env_max     => env_max_s,
+            env_min     => env_min_s,
+            noise       => noise_s,
             threshold   => thresh_s
         );
 
@@ -253,16 +370,12 @@ begin
     status_out.last_frame <= last_frm;
     status_out.bit_index  <= bit_ix;
 
-    -- RSSI = top 16 bits of the sfixed env_max value (always non-negative,
-    -- so reinterpreting the raw bits as ufixed is safe).  The MSB of env_max
-    -- is the sign bit and is always '0' for a sum of squares.
-    rssi_slice : block
-        constant TOP : natural := env_max_s'high - 1;  -- skip sign bit
-        constant BOT : natural := TOP - 15;
-        signal slv : std_logic_vector(env_word_t'length - 1 downto 0);
-    begin
-        slv <= to_slv(env_max_s);
-        status_out.rssi <= ufixed(slv(TOP - env_max_s'low downto BOT - env_max_s'low));
-    end block;
+    -- RSSI, ENV_MIN, NOISE: top 16 bits of the respective sfixed values.
+    -- Each is non-negative by construction (env_max and env_min track
+    -- magnitudes; noise_iir is a MAD), so we skip the sign bit and take
+    -- the next 16 b as a ufixed magnitude.
+    status_out.rssi    <= env_to_rssi(env_max_s);
+    status_out.env_min <= env_to_rssi(env_min_s);
+    status_out.noise   <= env_to_rssi(noise_s);
 
 end architecture rtl;

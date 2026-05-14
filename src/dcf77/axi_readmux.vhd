@@ -120,6 +120,14 @@ begin
                                   others => '0');
                 when REG_LAST_FRAME0 => v.ro.data := last_frame0_to_slv(r.st);
                 when REG_LAST_FRAME1 => v.ro.data := last_frame1_to_slv(r.st);
+                when REG_ENV_MIN =>
+                    v.ro.data := (31 downto 16 => '0',
+                                  others => '0');
+                    v.ro.data(15 downto 0) := std_logic_vector(r.st.env_min);
+                when REG_NOISE =>
+                    v.ro.data := (31 downto 16 => '0',
+                                  others => '0');
+                    v.ro.data(15 downto 0) := std_logic_vector(r.st.noise);
                 when others =>
                     v.ro.data := (others => '0');
                     v.ro.resp := AXI_RESPONSE_DECERR;

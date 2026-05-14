@@ -23,14 +23,15 @@ end entity;
 architecture tb of dcf77_nco_tb is
 
     constant CLK_PERIOD       : time     := 8 ns;       -- 125 MHz
-    constant TICK_PERIOD_CLKS : positive := 512;        -- 244.140625 kS/s
-    constant PHASE_WIDTH      : positive := 24;
-    constant PHASE_INCR       : natural  := 5_326_192;  -- ~77.5 kHz @ 244 kS/s
+    constant TICK_PERIOD_CLKS : positive := 500;        -- 250 kS/s
+    constant PHASE_WIDTH      : positive := 18;
+    constant PHASE_INCR       : natural  := 81_245;     -- ~77.5 kHz @ 250 kS/s
 
-    -- Reference cycle count for the cos waveform over a 1-second window:
-    -- 77 500 cycles/sec at the tick rate.  We test a shorter window
-    -- (4096 ticks ~= 16.78 ms) and check that the integer cycle count
-    -- matches the expectation within +/- 1.
+    -- Reference cycle count for the cos waveform over the capture window:
+    -- 77.5 kHz at the 250 kS/s tick rate -> 0.31 cycles per tick.
+    -- 4096 ticks = ~16.4 ms -> ~1270 cycles -> 2540 edges (cos has two
+    -- sign flips per cycle).  Tolerate +/- 4 edges for the small phase
+    -- error from rounding K to the nearest 18-b value.
     constant CAPTURE_TICKS    : positive := 4096;
 
     signal clk      : std_logic := '0';
@@ -114,15 +115,15 @@ begin
             if run("frequency") then
                 gen_tick(CAPTURE_TICKS, cos_edges, sin_edges, xor_high);
                 -- Each LO cycle has two sign-flips, so cos_edges should be
-                -- 2 * (77500 / 244140.625) * CAPTURE_TICKS ~= 2602 with our
-                -- 4096-tick window.  Tolerate +/- 4 edges to accommodate the
-                -- initial transient (cos starts at the reset phase, '0').
-                check(cos_edges >= 2598 and cos_edges <= 2606,
+                -- 2 * (77500 / 250000) * CAPTURE_TICKS ~= 2539 with our
+                -- 4096-tick window.  Tolerate +/- 6 edges for initial
+                -- transient and 18-b NCO rounding error.
+                check(cos_edges >= 2533 and cos_edges <= 2545,
                       "cos edge count: " & integer'image(cos_edges) &
-                      " (expected ~2602)");
-                check(sin_edges >= 2598 and sin_edges <= 2606,
+                      " (expected ~2539)");
+                check(sin_edges >= 2533 and sin_edges <= 2545,
                       "sin edge count: " & integer'image(sin_edges) &
-                      " (expected ~2602)");
+                      " (expected ~2539)");
 
             -----------------------------------------------------------------
             elsif run("quadrature") then

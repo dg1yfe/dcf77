@@ -28,8 +28,8 @@ use ieee.numeric_std.all;
 
 entity dcf77_nco is
     generic (
-        PHASE_WIDTH : positive := 24;
-        PHASE_INCR  : natural  := 5_326_192   -- 2^24 * 77.5e3 / 244140.625
+        PHASE_WIDTH : positive := 18;
+        PHASE_INCR  : natural  := 81_245      -- 2^18 * 77.5e3 / 250000
     );
     port (
         clk      : in  std_logic;

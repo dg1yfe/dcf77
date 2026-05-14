@@ -30,16 +30,17 @@ entity dcf77_axi_lite is
         -- override them at integration time for fast simulation.  Defaults
         -- match the real 244.140 kS/s tick rate.
         K_ATK         : positive := 6;
-        K_DEC         : positive := 20;
-        T_LOW_MIN     : positive := 21_973;
-        T_BIT0_MAX    : positive := 26_855;
-        T_BIT1_MIN    : positive := 46_387;
-        T_BIT1_MAX    : positive := 51_269;
-        T_GAP_MINUTE  : positive := 366_211;
-        SAMPLE_RATE_HZ: positive := 244_140;
+        K_DEC         : positive := 12;
+        K_NOISE       : positive := 12;
+        T_LOW_MIN     : positive := 90;
+        T_BIT0_MAX    : positive := 110;
+        T_BIT1_MIN    : positive := 190;
+        T_BIT1_MAX    : positive := 210;
+        T_GAP_MINUTE  : positive := 1_500;
+        SAMPLE_RATE_HZ: positive := 1_000;
         T_HOLD_SEC    : positive := 120;
         T_SEARCH_SEC  : positive := 300;
-        NCO_PHASE_INCR: natural  := 5_326_192
+        NCO_PHASE_INCR: natural  := 81_245
     );
     port (
         -- AXI4-Lite slave (system clock = ACLK; matches dcf77_core's clk).
@@ -184,6 +185,7 @@ begin
         generic map (
             K_ATK          => K_ATK,
             K_DEC          => K_DEC,
+            K_NOISE        => K_NOISE,
             T_LOW_MIN      => T_LOW_MIN,
             T_BIT0_MAX     => T_BIT0_MAX,
             T_BIT1_MIN     => T_BIT1_MIN,
