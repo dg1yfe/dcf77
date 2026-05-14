@@ -29,6 +29,11 @@ instantiates `dcf77_core` (the actual receiver) plus the
 
 ## 2. Block diagram and data flow
 
+![DCF77 data flow](dcf77-dataflow.drawio.svg)
+
+Diagram source: `doc/dcf77-dataflow.drawio.svg`.  The SVG embeds the
+draw.io XML — open it directly in draw.io / diagrams.net to edit.
+
 ```
   ADC                       (14 b signed, 125 MS/s, two's complement)
     │
@@ -154,6 +159,11 @@ integration-time overrides (and for testbench scaling).
 ---
 
 ## 5. AXI4-Lite register map
+
+![DCF77 register map](dcf77-registers.drawio.svg)
+
+Diagram source: `doc/dcf77-registers.drawio.svg`.  The SVG embeds the
+draw.io XML — open it directly in draw.io / diagrams.net to edit.
 
 All registers are 32 bits.  Byte addresses are word-aligned (low two
 bits must be zero).
