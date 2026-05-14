@@ -45,6 +45,11 @@ entity dcf77_rx_replay_tb is
         MAX_SAMPLES    : natural := 0;     -- 0 = feed every pair
         EXPECT_FULL_FRAME    : boolean := false;
         EXPECT_VALIDATE_TIME : boolean := false;
+        -- When true, the smoke test asserts the receiver tracked at least
+        -- 30 bits and one minute mark.  Set false for weak / interfered
+        -- recordings so the WAV still exercises the pipeline without
+        -- failing the regression on the receiver's decode limits.
+        EXPECT_DECODE_PROGRESS : boolean := true;
         EXPECT_YEAR    : natural := 0;
         EXPECT_MONTH   : natural := 0;
         EXPECT_DAY     : natural := 0;
@@ -315,12 +320,21 @@ begin
                 else
                     wait until stim_done = '1';
                     wait for 1 ms;
-                    check(bits_seen >= 30,
-                          "bit_valid fired enough times (" &
-                          integer'image(bits_seen) & " >= 30)");
-                    check(minutes_seen >= 1,
-                          "at least one minute_mark fired (" &
-                          integer'image(minutes_seen) & ")");
+                    if EXPECT_DECODE_PROGRESS then
+                        check(bits_seen >= 30,
+                              "bit_valid fired enough times (" &
+                              integer'image(bits_seen) & " >= 30)");
+                        check(minutes_seen >= 1,
+                              "at least one minute_mark fired (" &
+                              integer'image(minutes_seen) & ")");
+                    else
+                        info("EXPECT_DECODE_PROGRESS=false; "
+                             & "weak/interfered recording, no decode "
+                             & "assertion (bits_seen="
+                             & integer'image(bits_seen)
+                             & " minutes_seen="
+                             & integer'image(minutes_seen) & ")");
+                    end if;
                 end if;
 
             -----------------------------------------------------------------

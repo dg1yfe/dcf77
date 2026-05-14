@@ -157,8 +157,8 @@ def _configure_replay_testbench(lib) -> None:
         has_exp    = int(kv.get("expect_full_decode", 0)) == 1
 
         if not has_signal:
-            print(f"[replay] {wav.name}: signal_present=0 in meta -- skipped")
-            continue
+            print(f"[replay] {wav.name}: signal_present=0 -- registered "
+                  f"smoke without decode-progress assertion")
 
         common = dict(
             REPLAY_FILE   = str(s16),
@@ -177,8 +177,9 @@ def _configure_replay_testbench(lib) -> None:
         # 59-bit frame and triggers time_valid).
         smoke = dict(common,
                      MAX_SAMPLES = 130 * rate,
-                     EXPECT_FULL_FRAME    = False,
-                     EXPECT_VALIDATE_TIME = False)
+                     EXPECT_FULL_FRAME      = False,
+                     EXPECT_VALIDATE_TIME   = False,
+                     EXPECT_DECODE_PROGRESS = has_signal)
         tb.test("smoke").add_config(name=stem, generics=smoke)
 
         if has_exp and want_full:

@@ -199,7 +199,11 @@ Two replay tests are registered per WAV when its `.s16`/`.meta` exist:
 
 WAVs that the Python decoder couldn't decode (weak / noisy recordings)
 still get a smoke config — only the full-decode validation is skipped
-for them.
+for them.  Additionally, when `signal_present=0` in the .meta the smoke
+config drops the `bits_seen >= 30` / `minutes_seen >= 1` assertion so
+the pipeline still runs end-to-end without the regression failing on
+the receiver's decode limits.  The TB log line
+`EXPECT_DECODE_PROGRESS=false; ...` makes the relaxed mode explicit.
 
 ### Verbose decode logging
 
