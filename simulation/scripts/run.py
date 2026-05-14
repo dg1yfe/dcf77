@@ -139,6 +139,7 @@ def _configure_replay_testbench(lib) -> None:
         return
 
     want_full = os.environ.get("DCF77_FULL_REPLAY") == "1"
+    full_configured = False
 
     for wav in sorted(SAMPLES_DIR.glob("*.wav")):
         stem = wav.stem
@@ -186,6 +187,21 @@ def _configure_replay_testbench(lib) -> None:
                         EXPECT_FULL_FRAME    = True,
                         EXPECT_VALIDATE_TIME = True)
             tb.test("full_decode").add_config(name=stem, generics=full)
+            full_configured = True
+
+    # VUnit runs every `run(...)` in the testbench, so if nobody registered
+    # a real full_decode config it would otherwise execute once with default
+    # generics and emit a "no REPLAY_FILE" info() line.  Drop in an
+    # explicitly-named placeholder so the result is labelled clearly.  We
+    # omit REPLAY_FILE from the generics so the entity default ("") kicks
+    # in -- ghdl refuses an empty-string generic on the command line.
+    if not full_configured:
+        reason = ("set_DCF77_FULL_REPLAY_to_1"
+                  if not want_full
+                  else "no_WAV_with_expect_full_decode")
+        tb.test("full_decode").add_config(
+            name=reason,
+            generics=dict(EXPECT_FULL_FRAME=False))
 
 
 def _read_meta(path) -> dict:
