@@ -111,6 +111,17 @@ python3 simulation/scripts/run.py --clean    # rebuild from scratch
 Tests run under GHDL with `--std=08 -fsynopsys -frelaxed`.  Build
 artefacts land in `vunit_out/` (gitignored).  Total runtime ≈ 35 s.
 
+## Documentation
+
+The README is developer-facing.  For integrator-oriented documentation
+(top-level interface, generics, register address map with per-bit
+field tables, operational notes, SNR computation, sync-state machine,
+resource footprint, software pseudo-code) see
+[**`doc/dcf77_receiver_reference.md`**](doc/dcf77_receiver_reference.md).
+
+The DCF77 protocol itself (AM frame layout, BCD encoding, parity rules,
+PM hints) is documented in [`doc/dcf77_format_spec.md`](doc/dcf77_format_spec.md).
+
 ## AXI4-Lite register map
 
 | Offset | RW | Name        | Layout                                                    |
