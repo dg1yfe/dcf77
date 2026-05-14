@@ -305,10 +305,13 @@ begin
                     info("no REPLAY_FILE configured, skipping replay smoke");
                 else
                     wait until stim_done = '1';
-                    wait for 100 us;
-                    check(bits_seen >= 1,
-                          "at least one bit_valid fired (" &
-                          integer'image(bits_seen) & ")");
+                    wait for 1 ms;
+                    check(bits_seen >= 30,
+                          "bit_valid fired enough times (" &
+                          integer'image(bits_seen) & " >= 30)");
+                    check(minutes_seen >= 1,
+                          "at least one minute_mark fired (" &
+                          integer'image(minutes_seen) & ")");
                 end if;
 
             -----------------------------------------------------------------

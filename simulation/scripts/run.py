@@ -171,8 +171,11 @@ def _configure_replay_testbench(lib) -> None:
             EXPECT_DST     = int(kv.get("dst_active", 0)),
         )
 
+        # >=120 s of feed so the second minute mark fires (the first one
+        # delimits an empty frame_buf; the second carries the first full
+        # 59-bit frame and triggers time_valid).
         smoke = dict(common,
-                     MAX_SAMPLES = 60 * rate,
+                     MAX_SAMPLES = 130 * rate,
                      EXPECT_FULL_FRAME    = False,
                      EXPECT_VALIDATE_TIME = False)
         tb.test("smoke").add_config(name=stem, generics=smoke)
