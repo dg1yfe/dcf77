@@ -155,6 +155,8 @@ and post-mixer CIC stages are bypassed, so the same back-end logic
 runs ~250× faster than feeding the full signal chain.  A 4-minute
 clip decodes in seconds.
 
+![Replay pipeline](doc/dcf77-replay-pipeline.drawio.svg)
+
 Drop a WAV into `samples/`, run the preprocessor, run the regression:
 
 ```sh
