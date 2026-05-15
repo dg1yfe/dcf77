@@ -7,16 +7,25 @@ ground-truth reference the VHDL replay testbench validates against;
 caching it in the .meta file means the decoder runs once per WAV, not
 every test invocation.
 
-Algorithm:
-    1. envelope = |I + jQ|   (rotation-invariant: tolerates LO offset)
-    2. adaptive peak (fast attack, slow decay) -> threshold at half peak
-    3. measure low-pulse widths in samples (= ms at 1 kS/s)
-    4. 70..130 ms -> bit 0;  170..230 ms -> bit 1;  >=1500 ms gap -> minute mark
-    5. once 59 valid bits since the last minute mark, BCD-decode the
-       fields per doc/dcf77_format_spec.md and check the three parity bits
-    6. require two consecutive valid frames with minute incrementing
-       by one (mod 60) before declaring "decoded" -- filters single-bit
-       errors on weak recordings
+Algorithm (matched filter, 3 unit-energy templates per second):
+    1. envelope = |I + jQ|          (rotation-invariant: tolerates LO offset)
+    2. baseline = uniform_filter1d(env, 2 s)   tracks slow RSSI drift
+       e_d      = env - baseline   (zero-mean deviation)
+    3. templates (all length T = 1000 = 1 s @ 1 kS/s, unit energy):
+         t_bit0 : -1 for [0:100],  +1/9 for [100:1000]  (zero mean)
+         t_bit1 : -1 for [0:200],  +1/4 for [200:1000]  (zero mean)
+         t_mm   : +1/sqrt(T) for the whole second        (constant)
+    4. cross-correlate e_d with each template -> c_0, c_1, c_mm
+    5. phase-lock the 1 Hz second grid: pick phi maximising
+       sum_k max(c_0[phi+k*T], c_1[phi+k*T])
+    6. at each grid point label the second as:
+         BIT_0 / BIT_1   if max(c_0, c_1) > PULSE_PRESENT_FRAC * median
+         MINUTE_MARK     if not a pulse AND |c_mm| < FLAT_FRAC * median
+         ambiguous       otherwise (dropped from the bit buffer)
+    7. walk labels: bits accumulate, MINUTE_MARK flushes the buffer
+       (decoding a 59-bit frame if parity + plausibility pass).
+    8. require two consecutive valid frames (n -> n+1 mod 60) before
+       declaring "locked".
 
 Return value of decode_iq() is a dict with the time fields plus the
 boolean `locked` (True when two-frame agreement was reached).
@@ -24,21 +33,27 @@ boolean `locked` (True when two-frame agreement was reached).
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Iterable
 
 import numpy as np
+from scipy.signal import fftconvolve
+from scipy.ndimage import uniform_filter1d
 
 
 SAMPLE_RATE_HZ      = 1000
-T_LOW_MIN_MS        = 70
-T_BIT0_MAX_MS       = 130
-T_BIT1_MIN_MS       = 170
-T_BIT1_MAX_MS       = 230
-T_GAP_MINUTE_MS     = 1500
+T_PER_SECOND        = SAMPLE_RATE_HZ
+T_BIT0_LOW          = 100        # samples (= ms at 1 kS/s)
+T_BIT1_LOW          = 200
+BASELINE_WIN        = 2 * SAMPLE_RATE_HZ
+MIN_DURATION_SEC    = 120        # need at least two minutes for a lock
 
-PEAK_ATTACK_SHIFT   = 3       # alpha ~ 1/8 -- fast follow up
-PEAK_DECAY_SHIFT    = 10      # alpha ~ 1/1024 -- slow trickle down (~1 s)
-THRESHOLD_FRAC      = 0.5     # threshold = peak * 0.5
+PULSE_ABSENT_FRAC   = 0.2        # bit_score below this fraction of the
+                                  # recording's median ⇒ no pulse this second
+MIN_SIGNAL_SCORE    = 1e-6       # below this the recording is just noise
+
+LABEL_BIT0          = 0
+LABEL_BIT1          = 1
+LABEL_MM            = 2
+LABEL_AMBIGUOUS     = -1
 
 
 W_MIN = [1, 2, 4, 8, 10, 20, 40]
@@ -104,106 +119,156 @@ def _decode_frame(bits: list[int]) -> FrameDecode | None:
     )
 
 
-def _detect_pulses(env: np.ndarray) -> list[tuple[int, int]]:
-    """Return (low_start_idx, low_length_samples) pairs.
+def _make_bit_template(low_samples: int) -> np.ndarray:
+    """Zero-mean unit-energy template: -1 during the dip, +k during the
+    carrier-on portion (k chosen so the template's mean is zero)."""
+    t = np.empty(T_PER_SECOND, dtype=np.float64)
+    high = low_samples / (T_PER_SECOND - low_samples)
+    t[:low_samples] = -1.0
+    t[low_samples:] = high
+    return t / np.linalg.norm(t)
 
-    Threshold = THRESHOLD_FRAC * adaptive peak; peak is a fast-attack /
-    slow-decay tracker rebuilt by running the entire stream in one pass.
+
+def _make_mm_template() -> np.ndarray:
+    """Unit-energy constant template: 1/sqrt(T) everywhere."""
+    return np.full(T_PER_SECOND, 1.0 / np.sqrt(T_PER_SECOND))
+
+
+T_BIT0   = _make_bit_template(T_BIT0_LOW)
+T_BIT1   = _make_bit_template(T_BIT1_LOW)
+T_MM     = _make_mm_template()
+
+
+def _correlate(e_d: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Cross-correlate the detrended envelope with the three templates.
+
+    Returns (c_0, c_1, c_mm), each of length len(e_d) - T + 1, indexed by
+    the template's start-of-window position.
     """
-    n = len(env)
-    peak = float(env[: min(1000, n)].max()) if n else 0.0
-    if peak <= 0:
-        return []
-
-    atk = 1.0 / (1 << PEAK_ATTACK_SHIFT)
-    dec = 1.0 / (1 << PEAK_DECAY_SHIFT)
-
-    pulses: list[tuple[int, int]] = []
-    state_low = False
-    low_start = 0
-
-    for i in range(n):
-        sample = float(env[i])
-        if sample > peak:
-            peak += atk * (sample - peak)
-        else:
-            peak -= dec * peak
-        thresh = THRESHOLD_FRAC * peak
-        is_low = sample < thresh
-
-        if is_low and not state_low:
-            state_low = True
-            low_start = i
-        elif not is_low and state_low:
-            state_low = False
-            pulses.append((low_start, i - low_start))
-
-    if state_low:
-        pulses.append((low_start, n - low_start))
-
-    return pulses
+    c_0 = fftconvolve(e_d, T_BIT0[::-1], mode="valid")
+    c_1 = fftconvolve(e_d, T_BIT1[::-1], mode="valid")
+    # c_mm[n] = sum(e_d[n:n+T]) / sqrt(T)  (unit-energy constant template).
+    # Build via cumsum so the indexing exactly matches fftconvolve('valid').
+    n = len(e_d)
+    csum = np.concatenate(([0.0], np.cumsum(e_d, dtype=np.float64)))
+    sliding_sum = csum[T_PER_SECOND:] - csum[: n - T_PER_SECOND + 1]
+    c_mm = sliding_sum / np.sqrt(T_PER_SECOND)
+    return c_0, c_1, c_mm
 
 
-def _classify(low_len_samples: int) -> int | None:
-    ms = low_len_samples * 1000 // SAMPLE_RATE_HZ
-    if T_LOW_MIN_MS <= ms <= T_BIT0_MAX_MS:
+def _find_phase(c_0: np.ndarray, c_1: np.ndarray) -> int:
+    """Return the second-grid phase phi in [0, T) that maximises the
+    sum of max(c_0, c_1) over all phi+k*T grid points."""
+    bit_score = np.maximum(c_0, c_1)
+    full = (len(bit_score) // T_PER_SECOND) * T_PER_SECOND
+    if full == 0:
         return 0
-    if T_BIT1_MIN_MS <= ms <= T_BIT1_MAX_MS:
-        return 1
-    return None
+    reshaped = bit_score[:full].reshape(-1, T_PER_SECOND)
+    phase_scores = reshaped.sum(axis=0)
+    return int(np.argmax(phase_scores))
+
+
+def _decide_seconds(c_0: np.ndarray, c_1: np.ndarray, c_mm: np.ndarray,
+                    phi: int) -> np.ndarray:
+    """Per-second labelling.  Returns a 1-D int array of labels indexed
+    by second-of-recording, drawn from {0, 1, 2}.
+
+    Decision rule (no ambiguous category — parity + plausibility checks
+    at the back filter incorrectly classified bits):
+      * MINUTE_MARK if max(c_0, c_1) < PULSE_ABSENT_FRAC * its median
+        AND c_mm > 0 (no pulse this second AND envelope sat above the
+        local 2-s mean -- the characteristic "carrier on, no dip" gap
+        at second 59).
+      * BIT_x = argmax(c_0, c_1) otherwise (every other second is
+        treated as a bit, with the value taken from whichever template
+        scored higher).
+    """
+    idx = np.arange(phi, len(c_0), T_PER_SECOND)
+    s0, s1, sm = c_0[idx], c_1[idx], c_mm[idx]
+    bit_score = np.maximum(s0, s1)
+    bit_value = (s1 > s0).astype(int)
+
+    if bit_score.size == 0:
+        return np.array([], dtype=int)
+
+    absent_thr = PULSE_ABSENT_FRAC * np.median(bit_score)
+
+    no_pulse = bit_score < absent_thr
+    mm_here  = no_pulse & (sm > 0)
+
+    label = bit_value.copy()
+    label[mm_here] = LABEL_MM
+    return label
+
+
+def _walk_labels(labels: np.ndarray) -> list[FrameDecode]:
+    """Reduce per-second labels to a list of plausible decoded frames."""
+    frames: list[FrameDecode] = []
+    buf: list[int] = []
+    for lab in labels:
+        if lab == LABEL_BIT0 or lab == LABEL_BIT1:
+            buf.append(int(lab))
+            if len(buf) > 59:
+                buf = []
+        elif lab == LABEL_MM:
+            if len(buf) == 59:
+                fd = _decode_frame(buf)
+                if fd is not None and fd.plausible():
+                    frames.append(fd)
+            buf = []
+        # LABEL_AMBIGUOUS: drop the second silently, keep accumulating.
+    # End-of-stream: try the final buffer in case a clip ends mid-minute
+    if len(buf) == 59:
+        fd = _decode_frame(buf)
+        if fd is not None and fd.plausible():
+            frames.append(fd)
+    return frames
+
+
+def _find_consecutive(frames: list[FrameDecode]) -> FrameDecode | None:
+    """Return the LATEST frame `b` of a (n, n+1 mod 60) pair `(a, b)`, if any.
+
+    We return `b` (not `a`) so the reported timestamp matches what the FPGA's
+    frame_dec holds at end-of-stream: the most recent successfully decoded
+    minute.  The (a, b) consistency check filters single-bit errors before
+    the value is published.
+    """
+    last_match: FrameDecode | None = None
+    for a, b in zip(frames, frames[1:]):
+        if (a.minute + 1) % 60 == b.minute \
+           and a.hour == b.hour - (1 if b.minute == 0 else 0):
+            last_match = b
+    return last_match
 
 
 def decode_iq(iq: np.ndarray) -> dict:
-    """Decode complex baseband samples at 1 kS/s.
+    """Decode complex baseband samples at 1 kS/s using a matched-filter
+    bit detector.
 
     Returns a dict with year/month/day/weekday/hour/minute/dst_active and
     a `locked` boolean (True iff two consecutive frames with minute n,
     n+1 mod 60 were decoded).  Time fields are zero when not locked.
     """
+    if len(iq) < MIN_DURATION_SEC * SAMPLE_RATE_HZ:
+        return _empty_result()
+
     env = np.abs(iq).astype(np.float64)
-    raw_pulses = _detect_pulses(env)
+    baseline = uniform_filter1d(env, size=BASELINE_WIN, mode="nearest")
+    e_d = env - baseline
 
-    # Count pulses whose width falls in a valid bit window.  A clean
-    # minute carries 59 such pulses (~30 bit-0 + ~29 bit-1).  If the
-    # recording is essentially noise the classifier finds none and we
-    # flag the WAV as signal-absent so the test runner can skip it.
-    valid_pulses = sum(1 for _, l in raw_pulses if _classify(l) is not None)
-    duration_min = max(1.0, len(iq) / (60.0 * SAMPLE_RATE_HZ))
-    signal_present = valid_pulses >= 20 * duration_min
+    c_0, c_1, c_mm = _correlate(e_d)
+    phi = _find_phase(c_0, c_1)
+    labels = _decide_seconds(c_0, c_1, c_mm, phi)
 
-    bits: list[int] = []
-    last_acc_start = None
-    last_acc_end   = None
-    frames: list[FrameDecode] = []
-    MIN_GAP_TO_LAST_ACC_MS = 700
+    valid_pulses = int(np.sum((labels == LABEL_BIT0) | (labels == LABEL_BIT1)))
+    # Median bit score (positive when there's any DCF77 modulation,
+    # essentially zero on pure noise).
+    bit_scores = np.maximum(c_0[phi::T_PER_SECOND],
+                            c_1[phi::T_PER_SECOND])
+    median_score = float(np.median(bit_scores)) if bit_scores.size else 0.0
+    signal_present = median_score > MIN_SIGNAL_SCORE and valid_pulses >= 10
 
-    for start, length in raw_pulses:
-        bit = _classify(length)
-        if bit is None:
-            continue
-
-        if last_acc_start is not None:
-            gap_acc_ms = start - last_acc_start
-            if gap_acc_ms < MIN_GAP_TO_LAST_ACC_MS:
-                continue
-            gap_end_ms = start - last_acc_end
-            if gap_end_ms >= T_GAP_MINUTE_MS:
-                if len(bits) == 59:
-                    fd = _decode_frame(bits)
-                    if fd is not None and fd.plausible():
-                        frames.append(fd)
-                bits = []
-        bits.append(bit)
-        if len(bits) > 59:
-            bits = []
-        last_acc_start = start
-        last_acc_end   = start + length
-
-    if len(bits) == 59:
-        fd = _decode_frame(bits)
-        if fd is not None and fd.plausible():
-            frames.append(fd)
-
+    frames = _walk_labels(labels)
     locked = _find_consecutive(frames)
     if locked is None:
         return _empty_result(signal_present=signal_present,
@@ -230,22 +295,6 @@ def _empty_result(signal_present: bool = False, valid_pulses: int = 0) -> dict:
             "locked": False, "frames_decoded": 0,
             "signal_present": signal_present,
             "valid_pulses": valid_pulses}
-
-
-def _find_consecutive(frames: list[FrameDecode]) -> FrameDecode | None:
-    """Return the LATEST frame `b` of a (n, n+1 mod 60) pair `(a, b)`, if any.
-
-    We return `b` (not `a`) so the reported timestamp matches what the FPGA's
-    frame_dec holds at end-of-stream: the most recent successfully decoded
-    minute.  The (a, b) consistency check filters single-bit errors before
-    the value is published.
-    """
-    last_match: FrameDecode | None = None
-    for a, b in zip(frames, frames[1:]):
-        if (a.minute + 1) % 60 == b.minute \
-           and a.hour == b.hour - (1 if b.minute == 0 else 0):
-            last_match = b
-    return last_match
 
 
 def summarize(result: dict) -> str:
