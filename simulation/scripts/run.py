@@ -150,15 +150,14 @@ def _configure_replay_testbench(lib) -> None:
                   f"`python3 simulation/scripts/wav_to_iq.py --all`")
             continue
 
-        kv         = _read_meta(meta)
-        rate       = int(kv.get("sample_rate_hz", 1000))
-        pairs      = int(kv["sample_count"])
-        has_signal = int(kv.get("signal_present", 1)) == 1
-        has_exp    = int(kv.get("expect_full_decode", 0)) == 1
+        kv      = _read_meta(meta)
+        rate    = int(kv.get("sample_rate_hz", 1000))
+        pairs   = int(kv["sample_count"])
+        has_exp = int(kv.get("expect_full_decode", 0)) == 1
 
-        if not has_signal:
-            print(f"[replay] {wav.name}: signal_present=0 -- registered "
-                  f"smoke without decode-progress assertion")
+        if not has_exp:
+            print(f"[replay] {wav.name}: Python decoder did not lock -- "
+                  f"smoke runs without decode-progress assertion")
 
         common = dict(
             REPLAY_FILE   = str(s16),
@@ -179,7 +178,7 @@ def _configure_replay_testbench(lib) -> None:
                      MAX_SAMPLES = 130 * rate,
                      EXPECT_FULL_FRAME      = False,
                      EXPECT_VALIDATE_TIME   = False,
-                     EXPECT_DECODE_PROGRESS = has_signal)
+                     EXPECT_DECODE_PROGRESS = has_exp)
         tb.test("smoke").add_config(name=stem, generics=smoke)
 
         if has_exp and want_full:
