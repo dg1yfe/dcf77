@@ -24,11 +24,15 @@ Algorithm (matched filter, 3 unit-energy templates per second):
          ambiguous       otherwise (dropped from the bit buffer)
     7. walk labels: bits accumulate, MINUTE_MARK flushes the buffer
        (decoding a 59-bit frame if parity + plausibility pass).
-    8. require two consecutive valid frames (n -> n+1 mod 60) before
-       declaring "locked".
+    8. lock on the last decoded frame -- a single 59-bit frame that
+       (a) starts with bit[0]=0 and bit[20]=1, (b) passes all three
+       even-parity checks, and (c) is plausible (ranges of every
+       field), is considered ground truth.  Matches the FPGA's
+       frame_dec semantics: time_valid drops only when a fresh
+       minute fails the checks.
 
 Return value of decode_iq() is a dict with the time fields plus the
-boolean `locked` (True when two-frame agreement was reached).
+boolean `locked` (True when at least one such frame was decoded).
 """
 from __future__ import annotations
 
@@ -225,20 +229,16 @@ def _walk_labels(labels: np.ndarray) -> list[FrameDecode]:
     return frames
 
 
-def _find_consecutive(frames: list[FrameDecode]) -> FrameDecode | None:
-    """Return the LATEST frame `b` of a (n, n+1 mod 60) pair `(a, b)`, if any.
+def _latest_frame(frames: list[FrameDecode]) -> FrameDecode | None:
+    """Return the most recent decoded frame, or None if the list is empty.
 
-    We return `b` (not `a`) so the reported timestamp matches what the FPGA's
-    frame_dec holds at end-of-stream: the most recent successfully decoded
-    minute.  The (a, b) consistency check filters single-bit errors before
-    the value is published.
+    Every entry in `frames` already passed `_decode_frame`'s framing check
+    (bit[0]==0, bit[20]==1), the three even-parity checks, and the
+    plausibility ranges in `FrameDecode.plausible`, so it is a valid
+    ground-truth candidate on its own.  Reporting the latest entry
+    matches what the FPGA's frame_dec holds at end-of-stream.
     """
-    last_match: FrameDecode | None = None
-    for a, b in zip(frames, frames[1:]):
-        if (a.minute + 1) % 60 == b.minute \
-           and a.hour == b.hour - (1 if b.minute == 0 else 0):
-            last_match = b
-    return last_match
+    return frames[-1] if frames else None
 
 
 def decode_iq(iq: np.ndarray) -> dict:
@@ -269,7 +269,7 @@ def decode_iq(iq: np.ndarray) -> dict:
     signal_present = median_score > MIN_SIGNAL_SCORE and valid_pulses >= 10
 
     frames = _walk_labels(labels)
-    locked = _find_consecutive(frames)
+    locked = _latest_frame(frames)
     if locked is None:
         return _empty_result(signal_present=signal_present,
                               valid_pulses=valid_pulses)
@@ -307,7 +307,8 @@ def summarize(result: dict) -> str:
                 f"{result['valid_pulses']} valid pulses)")
     return (f"decoder: {result['year']:02d}-{result['month']:02d}-{result['day']:02d} "
             f"wd={result['weekday']} {result['hour']:02d}:{result['minute']:02d} "
-            f"dst={result['dst_active']} (locked over 2 frames, "
+            f"dst={result['dst_active']} (locked on {result['frames_decoded']} "
+            f"valid frame{'s' if result['frames_decoded'] != 1 else ''}, "
             f"{result['valid_pulses']} valid pulses)")
 
 
