@@ -180,15 +180,15 @@ The preprocessor:
    so the DCF77 carrier lands at DC.
 2. Low-passes (60 Hz) and decimates to **1 kS/s**.
 3. Writes interleaved little-endian int16 I/Q pairs to `*.s16`.
-4. Runs its **own software DCF77 decoder** (`dcf77_soft_decode.py`)
-   on the same I/Q stream, requiring two consecutive frames in
-   agreement (minute n → n+1) before declaring the recovered
-   timestamp.  The result is cached in `*.meta`.
+4. Runs its **own software DCF77 decoder** (`dcf77_soft_decode.py`,
+   see [§ Soft decoder internals](#soft-decoder-internals)) on the
+   same I/Q stream and caches the recovered timestamp in `*.meta`.
 
 Two replay tests are registered per WAV when its `.s16`/`.meta` exist:
 
-* **`smoke`** — feeds the first 60 s of the recording, asserts that
-  `bit_valid` fired at least once.  Runs by default; ~1 s wall time.
+* **`smoke`** — feeds the first 130 s of the recording.  If the soft
+  decoder locked, asserts `bits_seen ≥ 30` and `minutes_seen ≥ 1`;
+  otherwise just verifies the pipeline runs end-to-end.
 * **`full_decode`** — feeds the entire recording, asserts the decoded
   fields match the reference time the Python decoder recovered from
   the same audio.  Only registered when the preprocessor locked
@@ -201,11 +201,31 @@ Two replay tests are registered per WAV when its `.s16`/`.meta` exist:
 
 WAVs that the Python decoder couldn't decode (weak / noisy recordings)
 still get a smoke config — only the full-decode validation is skipped
-for them.  Additionally, when `signal_present=0` in the .meta the smoke
-config drops the `bits_seen >= 30` / `minutes_seen >= 1` assertion so
-the pipeline still runs end-to-end without the regression failing on
+for them.  Additionally, when `expect_full_decode=0` in the .meta the
+smoke config drops the `bits_seen >= 30` / `minutes_seen >= 1` assertion
+so the pipeline still runs end-to-end without the regression failing on
 the receiver's decode limits.  The TB log line
 `EXPECT_DECODE_PROGRESS=false; ...` makes the relaxed mode explicit.
+
+### Soft decoder internals
+
+`dcf77_soft_decode.py` recovers the embedded timestamp via a three-template
+matched filter on the same 1 kS/s I/Q stream the testbench will inject.
+Two pulse-shape templates (`t_bit0`, `t_bit1`) score "how dip-like is this
+second's envelope?", a third constant template (`t_mm`) confirms "envelope
+sat above the local mean = no dip = minute mark".  Phase lock for the
+1 Hz second grid falls out of a coherent sum across the whole recording;
+per-second decisions are then assembled into 59-bit frames and validated
+by framing + parity + plausibility checks.
+
+![Matched-filter detector](doc/dcf77-matched-filter.drawio.svg)
+
+The bit templates are linearly independent but not orthogonal (inner
+product ≈ 0.667, ~48° angle), so `argmax(c_0, c_1)` discriminates by
+linear-discriminant margin rather than by orthogonal projection — about
+5 dB shy of the optimal orthogonalised pair.  A single parity-good,
+plausibility-passing frame is enough to lock; the matched filter's
+implicit coherent averaging makes false locks vanishingly unlikely.
 
 ### Verbose decode logging
 
