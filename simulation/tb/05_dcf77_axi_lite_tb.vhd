@@ -153,6 +153,35 @@ begin
             rready <= '0';
         end procedure;
 
+        -- Drive a 77.5 kHz square wave on adc_sample for n_clocks cycles.
+        -- 125 MHz / 1612 cycles = 77 544 Hz, ~0.06 % off the LO frequency,
+        -- which is well within the post-mixer CIC passband.  The chain
+        -- band-pass-filters this to a strong DC component on the I/Q
+        -- channels, so env_max climbs in bit_det.  Constant-DC stimulus
+        -- (which the old tests used) is correctly rejected by the
+        -- properly-pruned Hogenauer CIC + sign-LO mixer combo, so RSSI
+        -- never moves with DC -- hence this tone.
+        procedure drive_tone(n_clocks : natural) is
+            variable tone_phase : integer range 0 to 1611 := 0;
+        begin
+            adc_valid <= '1';
+            for i in 1 to n_clocks loop
+                if tone_phase < 806 then
+                    adc_sample <= to_sfixed(4000, adc_sample_t'high,
+                                            adc_sample_t'low);
+                else
+                    adc_sample <= to_sfixed(-4000, adc_sample_t'high,
+                                            adc_sample_t'low);
+                end if;
+                if tone_phase = 1611 then
+                    tone_phase := 0;
+                else
+                    tone_phase := tone_phase + 1;
+                end if;
+                wait_clk;
+            end loop;
+        end procedure;
+
         variable rd : std_logic_vector(31 downto 0);
 
     begin
@@ -230,15 +259,14 @@ begin
 
             -----------------------------------------------------------------
             elsif run("soft_reset_pulse_resets_core") then
-                -- Drive ADC, let RSSI climb, fire soft_reset, verify RSSI
-                -- is zero again (i.e. the core saw a reset pulse).  The
-                -- CIC chain decimates by 125_000 so env_valid pulses are
-                -- one per 125_000 clocks; we need ~10 of them for the
-                -- adaptive IIR to climb measurably.
-                adc_sample <= to_sfixed(6000, adc_sample_t'high,
-                                        adc_sample_t'low);
-                adc_valid  <= '1';
-                wait_clk(2_000_000);
+                -- Drive a 77.5 kHz tone, let RSSI climb, fire soft_reset,
+                -- verify RSSI is zero again (i.e. the core saw a reset
+                -- pulse).  env_dec_v fires every 1.25M clocks (after the
+                -- new CIC_ENV 1 kS/s -> 100 S/s decimator), so 2.5M
+                -- clocks gives ~2 env_dec_v pulses -- enough for the
+                -- env_max IIR (K_ATK=3) to come well off zero given the
+                -- huge CIC gain on a 77.5 kHz tone.
+                drive_tone(10_000_000);
                 axi_read(x"04", rd, AXI_RESPONSE_OKAY);
                 check(rd(31 downto 16) /= std_logic_vector'(x"0000"),
                       "RSSI rose before soft_reset");
@@ -256,25 +284,21 @@ begin
 
             -----------------------------------------------------------------
             elsif run("enable_gates_adc") then
-                -- Drive a strong ADC level with enable=0 and verify the
-                -- decoder doesn't track: env_max (read via STATUS bits
-                -- 31..16) should stay at zero.  Then enable and confirm
-                -- env_max climbs above zero with the same input.  CIC
-                -- decimation = 125_000, so we need ~2 M clocks (~16
-                -- env_valid pulses) to see the IIR climb.
-                adc_sample <= to_sfixed(6000, adc_sample_t'high,
-                                        adc_sample_t'low);
-                adc_valid  <= '1';
-
+                -- Drive a strong 77.5 kHz tone with enable=0 and verify
+                -- the decoder doesn't track: env_max (STATUS bits 31..16)
+                -- stays at zero.  Then enable and confirm env_max climbs
+                -- above zero with the same tone.  See drive_tone() for
+                -- why DC stimulus does not work under the properly-pruned
+                -- Hogenauer CIC chain.
                 axi_write(x"00", x"00000000", AXI_RESPONSE_OKAY);  -- enable=0
-                wait_clk(2_000_000);
+                drive_tone(10_000_000);
                 axi_read(x"04", rd, AXI_RESPONSE_OKAY);
                 check_equal(rd(31 downto 16),
                             std_logic_vector'(x"0000"),
                             "RSSI stays zero while CTRL.enable=0");
 
                 axi_write(x"00", x"00000001", AXI_RESPONSE_OKAY);  -- enable=1
-                wait_clk(2_000_000);
+                drive_tone(10_000_000);
                 axi_read(x"04", rd, AXI_RESPONSE_OKAY);
                 check(rd(31 downto 16) /= std_logic_vector'(x"0000"),
                       "RSSI rises once CTRL.enable goes high");
@@ -288,9 +312,9 @@ begin
         wait;
     end process;
 
-    -- Some tests need ~2 M clocks (16 ms) for env_valid to fire enough
-    -- times that the bit_det IIRs settle measurably.  100 ms watchdog
-    -- gives generous margin.
-    test_runner_watchdog(runner, 100 ms);
+    -- Some tests need ~10 M clocks (80 ms) per drive_tone() call for the
+    -- env CIC + env_max IIR to climb measurably; enable_gates_adc runs
+    -- two such drives, so allow generous margin.
+    test_runner_watchdog(runner, 500 ms);
 
 end architecture;
