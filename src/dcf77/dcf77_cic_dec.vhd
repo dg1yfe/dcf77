@@ -4,18 +4,27 @@
 -- Single-stage CIC decimator with N integrators, decimation factor R, and
 -- comb differential delay M (= 1 only).  Integrator and comb widths are
 -- chosen by the caller (typically sourced from dcf77_cic_widths_pkg) so the
--- entity can be instantiated three times in the DCF77 cascade with different
--- widths and decimation factors but a single source file.
+-- entity can be instantiated multiple times in the DCF77 cascade with
+-- different widths and decimation factors from a single source file.
 --
 -- Structure (Hogenauer 1981):
 --
 --   in_sample -> I_1 -> I_2 -> ... -> I_N -> dec(R) -> C_1 -> C_2 -> ... -> C_N -> out
 --
--- Pipelining: each integrator is followed by a register so the integrator
--- chain has N register stages at full input rate.  The combs are computed
--- in a single combinational pass at decimation tick and registered into the
--- comb_prev delay line and the output.  All adders use wrap-around overflow
--- (CIC modular arithmetic).
+-- Each stage truncates **LSBs** (per the Hogenauer noise-budget analysis in
+-- simulation/scripts/cic_pruning.py), anchored at the same natural-MSB
+-- position throughout the chain.  This is the canonical Hogenauer-pruned
+-- structure: the kept bits are the top portion of the natural-scale value
+-- and the dropped LSBs are bounded-L2 truncation noise.
+--
+-- Internally every adder operates at the natural MSB (= IN_WIDTH +
+-- N*ceil(log2(R*M)) - 1).  Integrator wrap is modular (fixed_wrap); the
+-- comb section's subtraction recovers the signal modulo 2^COMB_WIDTH at
+-- its (higher) LSB position.  The OUTPUT port still presents the bit
+-- pattern at sfixed(OUT_WIDTH-1 downto 0) (LSB=0) so downstream
+-- consumers don't need to know the internal LSB scaling; the bit pattern
+-- represents the natural-scale value shifted right by (natural_msb -
+-- OUT_WIDTH + 1) bits.
 -- =========================================================================
 
 library ieee;
@@ -47,27 +56,53 @@ end entity dcf77_cic_dec;
 
 architecture rtl of dcf77_cic_dec is
 
-    -- M=1 is the only differential delay supported; trapped at elaboration.
     constant M_OK : boolean := (M = 1);
 
+    function clog2(n : positive) return natural is
+        variable acc : natural := 0;
+        variable v   : natural := n - 1;
+    begin
+        while v > 0 loop
+            acc := acc + 1;
+            v   := v / 2;
+        end loop;
+        return acc;
+    end function;
+
     constant DEC_CNT_W : natural :=
-        maximum(1, integer(ceil(log2(real(DEC_R)))));
+        maximum(1, clog2(DEC_R));
 
-    type integ_array_t is array (1 to N) of sfixed(INT_WIDTH - 1 downto 0);
-    type comb_array_t  is array (1 to N) of sfixed(COMB_WIDTH - 1 downto 0);
+    -- Natural-MSB position: the kept signal range is anchored at this
+    -- bit through the entire chain.  Every stage shares the same hi
+    -- index; only the LSB position varies (more LSBs dropped at deeper
+    -- pruning points).
+    constant LOG2_RM : natural := clog2(DEC_R * M);
+    constant NAT_MSB : integer := IN_WIDTH + N * LOG2_RM - 1;
 
-    constant ZERO_INT  : sfixed(INT_WIDTH - 1 downto 0)  := (others => '0');
-    constant ZERO_COMB : sfixed(COMB_WIDTH - 1 downto 0) := (others => '0');
-    constant ZERO_OUT  : sfixed(OUT_WIDTH - 1 downto 0)  := (others => '0');
+    constant INT_LSB  : integer := NAT_MSB - INT_WIDTH  + 1;
+    constant COMB_LSB : integer := NAT_MSB - COMB_WIDTH + 1;
+    constant OUT_LSB  : integer := NAT_MSB - OUT_WIDTH  + 1;
+
+    subtype integ_t is sfixed(NAT_MSB downto INT_LSB);
+    subtype comb_t  is sfixed(NAT_MSB downto COMB_LSB);
+    subtype outl_t  is sfixed(NAT_MSB downto OUT_LSB);
+
+    type integ_array_t is array (1 to N) of integ_t;
+    type comb_array_t  is array (1 to N) of comb_t;
+
+    constant ZERO_INT   : integ_t := (others => '0');
+    constant ZERO_COMB  : comb_t  := (others => '0');
+    constant ZERO_OUTL  : outl_t  := (others => '0');
+    constant ZERO_OUT   : sfixed(OUT_WIDTH - 1 downto 0) := (others => '0');
 
     type reg_type is record
         integ      : integ_array_t;
         dec_cnt    : unsigned(DEC_CNT_W - 1 downto 0);
-        -- comb_prev(k) is the previous-sample input to comb k at the decimated
-        -- rate.  comb_prev(1) stores the previous integ(N) snapshot; combs 2..N
-        -- store the previous output of their own input chain (see comb section).
+        -- comb_prev(1) holds the previous integ(N) snapshot at the comb
+        -- LSB scale; comb_prev(k) for k >= 2 holds the previous output
+        -- of comb stage k-1.
         comb_prev  : comb_array_t;
-        out_sample : sfixed(OUT_WIDTH - 1 downto 0);
+        out_local  : outl_t;
         out_valid  : std_logic;
     end record;
 
@@ -75,7 +110,7 @@ architecture rtl of dcf77_cic_dec is
         integ      => (others => ZERO_INT),
         dec_cnt    => (others => '0'),
         comb_prev  => (others => ZERO_COMB),
-        out_sample => ZERO_OUT,
+        out_local  => ZERO_OUTL,
         out_valid  => '0'
     );
 
@@ -89,35 +124,33 @@ begin
 
     comb : process (all)
         variable v          : reg_type;
-        variable widened_in : sfixed(INT_WIDTH - 1 downto 0);
+        variable widened_in : integ_t;
         variable dec_tick   : std_logic;
         variable cv         : comb_array_t;
-        variable cv_in      : sfixed(COMB_WIDTH - 1 downto 0);
+        variable cv_in      : comb_t;
     begin
         v := r;
         v.out_valid := '0';
 
         -----------------------------------------------------------------------
-        -- Pipelined integrators @ in_valid.
-        --
-        -- Each integrator uses the REGISTERED value of the previous stage
-        -- (r.integ(k-1)), so the chain forms an N-deep pipeline.  The
-        -- magnitude response is unchanged; only a constant group delay of
-        -- (N-1) input samples is added.
+        -- Pipelined integrators @ in_valid.  Operate at the natural MSB
+        -- (INT_LSB > 0 means we discard the input's bottom INT_LSB bits as
+        -- pruning noise).  Wrap is modular per CIC theory; the comb section
+        -- recovers the signal regardless of any wraps that occurred here.
         -----------------------------------------------------------------------
         if in_valid = '1' then
-            widened_in := resize(in_sample, INT_WIDTH - 1, 0,
-                                 fixed_saturate, fixed_truncate);
+            widened_in := resize(in_sample, NAT_MSB, INT_LSB,
+                                 fixed_wrap, fixed_truncate);
             v.integ(1) := resize(r.integ(1) + widened_in,
-                                 INT_WIDTH - 1, 0,
+                                 NAT_MSB, INT_LSB,
                                  fixed_wrap, fixed_truncate);
             for k in 2 to N loop
                 v.integ(k) := resize(r.integ(k) + r.integ(k - 1),
-                                     INT_WIDTH - 1, 0,
+                                     NAT_MSB, INT_LSB,
                                      fixed_wrap, fixed_truncate);
             end loop;
 
-            -- Decimation counter: tick once every R input samples.
+            -- Decimation counter.
             if r.dec_cnt = to_unsigned(DEC_R - 1, DEC_CNT_W) then
                 v.dec_cnt := (others => '0');
                 dec_tick  := '1';
@@ -130,37 +163,39 @@ begin
         end if;
 
         -----------------------------------------------------------------------
-        -- Comb section.  Fires on dec_tick at the decimated rate.
-        --
-        -- comb_prev(1) holds the previous integ(N) snapshot (truncated to
-        -- COMB_WIDTH).  comb_prev(k) for k >= 2 holds the previous value of
-        -- the (k-1)'th comb chain output, i.e. cv(k-1) from the previous
-        -- decimation cycle.
+        -- Comb section.  Each stage drops further LSBs (COMB_LSB > INT_LSB),
+        -- still anchored at NAT_MSB.  Modular subtraction (fixed_wrap) so
+        -- residual integrator wraps cancel correctly.
         -----------------------------------------------------------------------
         if dec_tick = '1' then
-            cv_in := resize(v.integ(N), COMB_WIDTH - 1, 0,
-                            fixed_saturate, fixed_truncate);
+            cv_in := resize(v.integ(N), NAT_MSB, COMB_LSB,
+                            fixed_wrap, fixed_truncate);
             cv(1) := resize(cv_in - r.comb_prev(1),
-                            COMB_WIDTH - 1, 0,
+                            NAT_MSB, COMB_LSB,
                             fixed_wrap, fixed_truncate);
             for k in 2 to N loop
                 cv(k) := resize(cv(k - 1) - r.comb_prev(k),
-                                COMB_WIDTH - 1, 0,
+                                NAT_MSB, COMB_LSB,
                                 fixed_wrap, fixed_truncate);
             end loop;
             v.comb_prev(1) := cv_in;
             for k in 2 to N loop
                 v.comb_prev(k) := cv(k - 1);
             end loop;
-            v.out_sample := resize(cv(N), OUT_WIDTH - 1, 0,
-                                   fixed_saturate, fixed_truncate);
-            v.out_valid  := '1';
+            -- Final output: drop the remaining LSBs down to OUT_LSB.
+            v.out_local := resize(cv(N), NAT_MSB, OUT_LSB,
+                                  fixed_wrap, fixed_truncate);
+            v.out_valid := '1';
         end if;
 
         rin <= v;
     end process;
 
-    out_sample <= r.out_sample;
+    -- Transfer the output bit pattern to the port-shaped sfixed (LSB=0)
+    -- without altering the bits.  Downstream consumers see a plain
+    -- OUT_WIDTH-bit signed number; the natural-scale LSB position
+    -- (NAT_MSB - OUT_WIDTH + 1) is implicit in the chain's overall scaling.
+    out_sample <= to_sfixed(to_slv(r.out_local), OUT_WIDTH - 1, 0);
     out_valid  <= r.out_valid;
 
     seq : process (clk)

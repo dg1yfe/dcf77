@@ -53,7 +53,28 @@ architecture tb of dcf77_cic_dec_tb is
         return acc;
     end function;
 
+    function clog2(n : positive) return natural is
+        variable acc : natural := 0;
+        variable v   : natural := n - 1;
+    begin
+        while v > 0 loop
+            acc := acc + 1;
+            v   := v / 2;
+        end loop;
+        return acc;
+    end function;
+
     constant DC_GAIN : integer := ipow(DEC_R, N_STAGES);
+    -- Hogenauer-pruned output: the CIC drops (NAT_MSB - OUT_W + 1) LSBs at
+    -- the output stage so the kept OUT_W bits represent the top of the
+    -- natural-scale value.  To get an output bit pattern that equals the
+    -- input gain (DC_GAIN, IMPULSE_AREA) under that pruning, the test
+    -- inputs must be scaled by 2^OUT_LSB so the natural output lands in
+    -- the kept range.
+    constant LOG2_RM : natural := clog2(DEC_R);
+    constant NAT_MSB : integer := IN_WIDTH + N_STAGES * LOG2_RM - 1;
+    constant OUT_LSB : integer := NAT_MSB - OUT_WIDTH + 1;
+    constant SCALE   : integer := 2 ** maximum(0, OUT_LSB);
     -- The decimated impulse response of an N-stage CIC with decimation R sums
     -- to R^(N-1), not R^N.  (The full input-rate impulse response sums to R^N;
     -- decimation by R picks every R'th tap, so the cumulative area scales
@@ -146,19 +167,22 @@ begin
 
             -----------------------------------------------------------------
             elsif run("dc_gain") then
-                -- Apply constant 1 for enough samples that the integrator
+                -- Apply constant SCALE for enough samples that the integrator
                 -- ramps up and the comb chain has produced at least 4 fully-
                 -- settled output samples.  After settling, each decimated
-                -- output should equal R^N exactly.
-                drive_and_capture(1, 8 * N_STAGES * DEC_R, last_v, sum_v);
+                -- output bit pattern should equal R^N exactly (the input
+                -- pre-scaling cancels the Hogenauer OUT_LSB drop).
+                drive_and_capture(SCALE, 8 * N_STAGES * DEC_R, last_v, sum_v);
                 check_equal(last_v, DC_GAIN,
                             "DC step settles to R^N");
 
             -----------------------------------------------------------------
             elsif run("impulse") then
-                -- Single impulse at t=0.  Sum of all decimated outputs over
-                -- the (N*R+1) impulse response support equals R^N.
-                drive_sample(1);
+                -- Single SCALE-magnitude impulse at t=0.  Sum of all decimated
+                -- output bit patterns over the (N*R+1) impulse response
+                -- support equals R^(N-1) (= IMPULSE_AREA) after the OUT_LSB
+                -- cancellation.
+                drive_sample(SCALE);
                 drive_and_capture(0, N_STAGES * DEC_R * 2, last_v, sum_v);
                 check_equal(sum_v, IMPULSE_AREA,
                             "decimated impulse area equals R^(N-1)");
