@@ -1,7 +1,8 @@
 -- =========================================================================
 -- 02_dcf77_env_tb.vhd
 --
--- VUnit testbench for dcf77_env (time-shared I^2 + Q^2 power).
+-- VUnit testbench for dcf77_env (alpha-max + beta-min magnitude).
+-- |I+jQ| ~= max(|I|,|Q|) + (3/8)*min(|I|,|Q|).
 -- =========================================================================
 
 library vunit_lib;
@@ -37,23 +38,27 @@ architecture tb of dcf77_env_tb is
         return to_sfixed(v, iq_word_t'high, iq_word_t'low);
     end function;
 
-    -- Read the power output as an integer at its native LSB position.
-    function pwr_int(p : env_word_t) return integer is
+    -- Read the magnitude output as an integer at its native LSB position
+    -- (env_word_t is sfixed(25 downto 0), so the bit pattern == the value).
+    function env_int(p : env_word_t) return integer is
     begin
         return to_integer(signed(to_slv(p)));
     end function;
 
-    -- Expected power output for a given (I, Q) input pair.
-    --   top18(x) = x shifted right by 4 bits, then taken as 18 b
-    --   product LSB = 2^8 (LSB of mul_op = 2^4)
-    --   accumulator LSB = 2^8
-    --   env LSB = 2^10  -> we shift product right by 2 more
-    --   So env_int = floor(top18(I)^2 + top18(Q)^2) >> 2
+    -- alpha=1, beta=3/8 expected magnitude.  Integer arithmetic matches
+    -- the RTL: (min >> 2) + (min >> 3), each truncating toward zero.
     function expected(i_val, q_val : integer) return integer is
-        variable i_top : integer := i_val / 16;   -- top 18 b == shift right 4
-        variable q_top : integer := q_val / 16;
+        variable ia : integer := abs(i_val);
+        variable qa : integer := abs(q_val);
+        variable mx : integer;
+        variable mn : integer;
     begin
-        return (i_top * i_top + q_top * q_top) / 4;  -- shift right 2 more for LSB 2^10
+        if ia > qa then
+            mx := ia;  mn := qa;
+        else
+            mx := qa;  mn := ia;
+        end if;
+        return mx + (mn / 4) + (mn / 8);
     end function;
 
 begin
@@ -81,7 +86,7 @@ begin
             in_valid <= '0';
             i_in <= (others => '0');
             q_in <= (others => '0');
-            -- Wait for out_valid (FSM takes 3 clocks after in_valid -> emit).
+            -- 2-cycle pipeline: latch then emit.  16 is comfortable headroom.
             for i in 1 to 16 loop
                 wait until rising_edge(clk);
                 exit when out_valid = '1';
@@ -103,35 +108,36 @@ begin
             -----------------------------------------------------------------
             if run("zero") then
                 pulse_in(0, 0);
-                check_equal(pwr_int(power), 0, "power of (0,0)");
+                check_equal(env_int(power), 0, "magnitude of (0,0)");
 
             -----------------------------------------------------------------
             elsif run("pure_i") then
-                -- I=2^16, Q=0  -> top18(I)=2^12, top18(Q)=0
-                -- (2^12)^2 = 2^24 -> /4 -> 2^22
+                -- Q=0  -> magnitude = |I|
                 pulse_in(65536, 0);
                 exp := expected(65536, 0);
-                check_equal(pwr_int(power), exp, "power of (65536, 0)");
+                check_equal(env_int(power), exp, "magnitude of (65536, 0)");
 
             -----------------------------------------------------------------
             elsif run("pure_q") then
                 pulse_in(0, 65536);
                 exp := expected(0, 65536);
-                check_equal(pwr_int(power), exp, "power of (0, 65536)");
+                check_equal(env_int(power), exp, "magnitude of (0, 65536)");
 
             -----------------------------------------------------------------
             elsif run("equal_iq") then
+                -- |I| = |Q| -> max + 3/8 * min  (within ~5.5 % of sqrt 2)
                 pulse_in(32768, 32768);
                 exp := expected(32768, 32768);
-                check_equal(pwr_int(power), exp, "power of (32768, 32768)");
+                check_equal(env_int(power), exp,
+                            "magnitude of (32768, 32768)");
 
             -----------------------------------------------------------------
             elsif run("negative_i") then
-                -- Squaring removes sign, so (-32768, 0) == (32768, 0).
+                -- abs() removes sign, so (-32768, 0) == (32768, 0).
                 pulse_in(-32768, 0);
                 exp := expected(-32768, 0);
-                check_equal(pwr_int(power), exp,
-                            "power of (-32768, 0) equals power of (32768, 0)");
+                check_equal(env_int(power), exp,
+                            "magnitude of (-32768, 0) equals (32768, 0)");
 
             end if;
         end loop;

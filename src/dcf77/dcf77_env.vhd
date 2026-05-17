@@ -1,19 +1,26 @@
 -- =========================================================================
 -- dcf77_env.vhd
 --
--- Envelope-power computation: power = I^2 + Q^2 at 244 kS/s.  One DSP48E1
--- in MAC mode is time-shared between the two squares.  The top 18 bits of
--- each iq_word_t operand are routed into the multiplier (the bottom 4 bits
--- sit below the realistic ADC ENOB-12 noise floor anyway).
+-- AM envelope magnitude via the "alpha max + beta min" approximation:
+--     |I+jQ| ~= alpha * max(|I|,|Q|) + beta * min(|I|,|Q|)
+-- with alpha = 1, beta = 3/8.  Max approximation error ~3.5 % at 22.5 deg,
+-- which sits well below the noise floor of every signal in this pipeline.
 --
--- FSM:
---   IDLE  -- wait for in_valid; latch I, Q.
---   MUL_I -- compute I*I, store in acc.
---   MUL_Q -- compute Q*Q, add to acc.
---   EMIT  -- present the resized power and out_valid for one cycle.
+-- Replaces the earlier I*I + Q*Q ("power") implementation.  Motivation:
+--   * Squaring doubles the envelope bandwidth (cross-terms at 2*f_mod),
+--     so a steep CIC_ENV at 100 S/s aliases the upper half of the power
+--     envelope's spectrum.  Magnitude keeps the original ~50 Hz baseband.
+--   * No multiplier.  The previous power calc time-shared one DSP48E1
+--     between I*I and Q*Q; this version is pure abs/compare/shift/add,
+--     freeing that DSP slice entirely.
+--   * Noise on a single carrier sample is amplitude-additive on
+--     magnitude but variance-additive on power, so the magnitude form
+--     produces a flatter noise floor and cleaner dip discrimination.
 --
--- With ~512 clock cycles per sample at 125 MHz, the 4-state path leaves
--- ample idle time; the DSP MAC handles the rest.
+-- Pipeline (single-cycle compute, two-cycle latency):
+--   S_IDLE -- on in_valid, latch I, Q, advance.
+--   S_EMIT -- compute |I|, |Q|, pick max/min, magnitude = max + (3*min)/8,
+--             present out_valid for one cycle, back to IDLE.
 -- =========================================================================
 
 library ieee;
@@ -40,55 +47,35 @@ end entity dcf77_env;
 
 architecture rtl of dcf77_env is
 
-    -- Top 18 b operand for the DSP multiplier.  LSB position 4 of the
-    -- 22-b iq_word_t (high 21, low 0) -> sfixed(21 downto 4).
-    subtype mul_op_t is sfixed(21 downto 4);
+    -- abs() on sfixed grows by one MSB (the corner case
+    -- -2^(N-1) becomes +2^(N-1), which doesn't fit in the original width).
+    subtype abs_t is sfixed(iq_word_t'high + 1 downto iq_word_t'low);
 
-    -- Multiplier output: sfixed(21+21+1 downto 4+4) = sfixed(43 downto 8),
-    -- 36 b.  Both squares produce non-negative values; we carry the sign
-    -- bit through the sfixed multiply and ignore it (it stays 0).
-    subtype product_t is sfixed(43 downto 8);
+    -- (1 + 3/8)*2^N peak; +1 b headroom over max(|I|,|Q|).
+    subtype mag_t is sfixed(iq_word_t'high + 2 downto iq_word_t'low);
 
-    -- Accumulator: sum of two squares fits in product_t'high + 1 bits.
-    subtype acc_t is sfixed(44 downto 8);
-
-    type state_t is (S_IDLE, S_MUL_I, S_MUL_Q, S_EMIT);
+    type state_t is (S_IDLE, S_EMIT);
 
     type reg_type is record
         state     : state_t;
         i_lat     : iq_word_t;
         q_lat     : iq_word_t;
-        -- Shared multiplier operand and accumulator.  Vivado infers a single
-        -- DSP48E1 in MAC mode for the (operand * operand + acc) expression
-        -- below because the state machine guarantees only one multiply per
-        -- clock and the operand register is reused.
-        operand   : mul_op_t;
-        acc       : acc_t;
         power     : env_word_t;
         out_valid : std_logic;
     end record;
 
-    constant ZERO_OP  : mul_op_t  := (others => '0');
-    constant ZERO_IQ  : iq_word_t := (others => '0');
-    constant ZERO_ACC : acc_t     := (others => '0');
-    constant ZERO_PW  : env_word_t := (others => '0');
+    constant ZERO_IQ  : iq_word_t  := (others => '0');
+    constant ZERO_ENV : env_word_t := (others => '0');
 
     constant R_RESET : reg_type := (
         state     => S_IDLE,
         i_lat     => ZERO_IQ,
         q_lat     => ZERO_IQ,
-        operand   => ZERO_OP,
-        acc       => ZERO_ACC,
-        power     => ZERO_PW,
+        power     => ZERO_ENV,
         out_valid => '0'
     );
 
     signal r, rin : reg_type;
-
-    function top18(x : iq_word_t) return mul_op_t is
-    begin
-        return resize(x, 21, 4, fixed_saturate, fixed_truncate);
-    end function;
 
 begin
 
@@ -96,8 +83,12 @@ begin
     out_valid <= r.out_valid;
 
     comb : process (all)
-        variable v       : reg_type;
-        variable squared : product_t;
+        variable v        : reg_type;
+        variable i_abs    : abs_t;
+        variable q_abs    : abs_t;
+        variable mx       : abs_t;
+        variable mn       : abs_t;
+        variable mag      : mag_t;
     begin
         v := r;
         v.out_valid := '0';
@@ -105,37 +96,36 @@ begin
         case r.state is
             when S_IDLE =>
                 if in_valid = '1' then
-                    v.i_lat   := i_in;
-                    v.q_lat   := q_in;
-                    v.operand := top18(i_in);
-                    v.acc     := ZERO_ACC;
-                    v.state   := S_MUL_I;
+                    v.i_lat := i_in;
+                    v.q_lat := q_in;
+                    v.state := S_EMIT;
                 end if;
 
-            when S_MUL_I =>
-                -- squared <- I_top * I_top (single multiply this cycle).
-                squared := resize(r.operand * r.operand,
-                                  product_t'high, product_t'low,
-                                  fixed_saturate, fixed_truncate);
-                v.acc   := resize(squared,
-                                  acc_t'high, acc_t'low,
-                                  fixed_saturate, fixed_truncate);
-                v.operand := top18(r.q_lat);
-                v.state   := S_MUL_Q;
-
-            when S_MUL_Q =>
-                squared := resize(r.operand * r.operand,
-                                  product_t'high, product_t'low,
-                                  fixed_saturate, fixed_truncate);
-                v.acc   := resize(r.acc + squared,
-                                  acc_t'high, acc_t'low,
-                                  fixed_saturate, fixed_truncate);
-                v.state := S_EMIT;
-
             when S_EMIT =>
-                -- r.acc is non-negative (sum of two squares); resize directly
-                -- into env_word_t (sfixed) with saturation on overflow.
-                v.power := resize(r.acc,
+                -- |I|, |Q|.  fixed_pkg's abs grows the width by one MSB.
+                i_abs := abs(r.i_lat);
+                q_abs := abs(r.q_lat);
+
+                -- max(|I|,|Q|), min(|I|,|Q|).
+                if i_abs > q_abs then
+                    mx := i_abs;
+                    mn := q_abs;
+                else
+                    mx := q_abs;
+                    mn := i_abs;
+                end if;
+
+                -- alpha=1, beta=3/8.  3/8 = 1/4 + 1/8, so beta*min is
+                -- (min >> 2) + (min >> 3) -- two free shifts, one add.
+                -- Sum needs 1 b headroom above max; mag_t provides it.
+                mag := resize(mx
+                              + shift_right(mn, 2)
+                              + shift_right(mn, 3),
+                              mag_t'high, mag_t'low,
+                              fixed_saturate, fixed_truncate);
+
+                -- env_word_t holds the magnitude directly at LSB 2^0.
+                v.power := resize(mag,
                                   env_word_t'high, env_word_t'low,
                                   fixed_saturate, fixed_truncate);
                 v.out_valid := '1';

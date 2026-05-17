@@ -32,13 +32,14 @@ package dcf77_pkg is
     -- minute mark" sentinel.  Range-limited so it can't silently overflow.
     subtype bit_index_t  is natural range 0 to 59;
     -- Envelope power = top18(I)*top18(I) + top18(Q)*top18(Q).  The mixer
-    -- operands have LSB position 4 after the top-18 truncation, so the
-    -- product has LSB position 8 and natural full range sfixed(43 downto 8).
-    -- env_word_t is sfixed (carries the sign bit so the same arithmetic
-    -- operators work in the threshold IIRs) but the value is by construction
-    -- non-negative.  We drop the bottom 2 bits and the top overflow bits of
-    -- the natural sum, keeping a compact 26 b magnitude with LSB 2^10.
-    subtype env_word_t   is sfixed(35 downto 10);  -- 26 b power, LSB 2^10
+    -- env_word_t carries the AM envelope magnitude computed by dcf77_env via
+    -- the |I| + 3/8*|Q| approximation (alpha=1, beta=3/8).  The iq_word_t
+    -- operands fit in 22 b at LSB 0, so the magnitude max is
+    -- (1 + 3/8) * 2^21 ~= 2.88 M, well within the 25 b unsigned range of
+    -- env_word_t.  sfixed (signed) is kept so the bit_det IIRs can reuse
+    -- the same arithmetic operators across env_in, env_max, env_min and the
+    -- difference terms, but the value is by construction non-negative.
+    subtype env_word_t   is sfixed(25 downto 0);   -- 26 b magnitude, LSB 2^0
     subtype rssi_word_t  is ufixed(15 downto 0);   -- 16 b slow-IIR RSSI
 
     ---------------------------------------------------------------------------
