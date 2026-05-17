@@ -43,19 +43,23 @@ use work.dcf77_pkg.all;
 
 entity dcf77_bit_det is
     generic (
-        K_ATK         : positive := 6;          -- env_max/min attack shift
-        K_DEC         : positive := 12;         -- env_max/min decay shift (~4 s @ 1 kHz)
-        K_NOISE       : positive := 12;         -- noise-MAD IIR shift (~4 s @ 1 kHz)
-        -- Bit-pulse-width thresholds in env_valid ticks.  At 1 kHz, 1 tick = 1 ms.
-        T_LOW_MIN     : positive := 90;         -- min low-pulse for any bit (90 ms)
-        T_BIT0_MAX    : positive := 110;        -- bit 0 upper bound (110 ms)
-        T_BIT1_MIN    : positive := 190;        -- bit 1 lower bound (190 ms)
-        T_BIT1_MAX    : positive := 210;        -- bit 1 upper bound (210 ms)
-        T_GAP_MINUTE  : positive := 1_500;      -- minute-mark gap (1500 ms)
+        K_ATK         : positive := 3;          -- env_max/min attack shift (~80 ms @ 100 S/s)
+        K_DEC         : positive := 9;          -- env_max/min decay shift (~5 s @ 100 S/s)
+        K_NOISE       : positive := 9;          -- noise-MAD IIR shift (~5 s @ 100 S/s)
+        -- Bit-pulse-width thresholds in env_valid ticks.  At 100 S/s, 1 tick = 10 ms.
+        -- The CIC_ENV (R=10, N=3) impulse response is ~27 input samples wide
+        -- = ~2.7 output samples, so a rectangular 100 ms dip arrives as an
+        -- 8-10 tick pulse and a 200 ms dip as 18-20 ticks.  Windows widened
+        -- accordingly with a guard gap in [13..14] between bit-0 and bit-1.
+        T_LOW_MIN     : positive := 6;          -- min low-pulse for any bit (60 ms)
+        T_BIT0_MAX    : positive := 13;         -- bit 0 upper bound (130 ms)
+        T_BIT1_MIN    : positive := 14;         -- bit 1 lower bound (140 ms)
+        T_BIT1_MAX    : positive := 23;         -- bit 1 upper bound (230 ms)
+        T_GAP_MINUTE  : positive := 150;        -- minute-mark gap (1500 ms)
         -- Sync-state demotion is on minute-scale: defining the thresholds
         -- in seconds keeps the numbers human-readable.  The actual tick
         -- counts are SAMPLE_RATE_HZ * the relevant seconds value.
-        SAMPLE_RATE_HZ : positive := 1_000;     -- env_valid rate at the real Fs
+        SAMPLE_RATE_HZ : positive := 100;       -- env_valid rate at the real Fs
         T_HOLD_SEC     : positive := 120;       -- lock -> hold (~2 min)
         T_SEARCH_SEC   : positive := 300        -- any -> search (~5 min)
     );

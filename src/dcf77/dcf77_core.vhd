@@ -37,15 +37,15 @@ use work.dcf77_cic_widths_pkg.all;
 entity dcf77_core is
     generic (
         -- bit_det defaults: 1 kS/s tick rate (one sample per ms).
-        K_ATK          : positive := 6;
-        K_DEC          : positive := 12;
-        K_NOISE        : positive := 12;
-        T_LOW_MIN      : positive := 90;
-        T_BIT0_MAX     : positive := 110;
-        T_BIT1_MIN     : positive := 190;
-        T_BIT1_MAX     : positive := 210;
-        T_GAP_MINUTE   : positive := 1_500;
-        SAMPLE_RATE_HZ : positive := 1_000;
+        K_ATK          : positive := 3;
+        K_DEC          : positive := 9;
+        K_NOISE        : positive := 9;
+        T_LOW_MIN      : positive := 6;
+        T_BIT0_MAX     : positive := 13;
+        T_BIT1_MIN     : positive := 14;
+        T_BIT1_MAX     : positive := 23;
+        T_GAP_MINUTE   : positive := 150;
+        SAMPLE_RATE_HZ : positive := 100;
         T_HOLD_SEC     : positive := 120;
         T_SEARCH_SEC   : positive := 300;
 
@@ -95,6 +95,15 @@ architecture rtl of dcf77_core is
 
     signal env_pwr    : env_word_t;
     signal env_v      : std_logic;
+
+    -- Envelope decimator (CIC_ENV): 1 kS/s -> 100 S/s.  Reinterprets the
+    -- env_word_t (sfixed(35..10)) bit pattern as sfixed(IN_W-1..0) on the
+    -- way in and back to env_word_t on the way out.  The CIC's arithmetic
+    -- doesn't depend on LSB position, only on bit count.
+    signal env_pwr_cic    : sfixed(CIC_ENV_IN_W - 1 downto 0);
+    signal env_dec_raw    : sfixed(CIC_ENV_OUT_W - 1 downto 0);
+    signal env_dec_out    : env_word_t;
+    signal env_dec_v      : std_logic;
 
     signal bit_val    : std_logic;
     signal bit_v      : std_logic;
@@ -303,7 +312,7 @@ begin
         );
 
     -- ------------------------------------------------------------------ --
-    -- Envelope power + bit detector @ 1 kS/s                                --
+    -- Envelope power @ 1 kS/s -> CIC env decimator @ 100 S/s -> bit_det    --
     -- ------------------------------------------------------------------ --
     u_env : entity work.dcf77_env
         port map (
@@ -314,6 +323,33 @@ begin
             in_valid  => cic4_i_v,
             power     => env_pwr,
             out_valid => env_v
+        );
+
+    -- env_word_t has LSB at 2^10 while dcf77_cic_dec's ports use LSB at 0;
+    -- the bits transfer 1-for-1.  The CIC's Hogenauer-pruned output drops
+    -- the gain's LSBs, so OUT_W=26 holds the natural value and no input
+    -- pre-scaling is needed.
+    env_pwr_cic <= to_sfixed(to_slv(env_pwr), CIC_ENV_IN_W - 1, 0);
+    env_dec_out <= to_sfixed(to_slv(env_dec_raw),
+                             env_word_t'high, env_word_t'low);
+
+    u_env_dec : entity work.dcf77_cic_dec
+        generic map (
+            N          => CIC_N,
+            DEC_R      => CIC_ENV_R,
+            M          => CIC_M,
+            IN_WIDTH   => CIC_ENV_IN_W,
+            INT_WIDTH  => CIC_ENV_INT_W,
+            COMB_WIDTH => CIC_ENV_COMB_W,
+            OUT_WIDTH  => CIC_ENV_OUT_W
+        )
+        port map (
+            clk        => clk,
+            rst        => rst,
+            in_sample  => env_pwr_cic,
+            in_valid   => env_v,
+            out_sample => env_dec_raw,
+            out_valid  => env_dec_v
         );
 
     u_bit_det : entity work.dcf77_bit_det
@@ -333,8 +369,8 @@ begin
         port map (
             clk         => clk,
             rst         => rst,
-            env_in      => env_pwr,
-            env_valid   => env_v,
+            env_in      => env_dec_out,
+            env_valid   => env_dec_v,
             bit_value   => bit_val,
             bit_valid   => bit_v,
             minute_mark => minute_mk,

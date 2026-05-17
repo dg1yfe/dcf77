@@ -94,8 +94,26 @@ set_multicycle_path -hold 4999 \
     -to   [get_cells -hier -filter {NAME =~ *u_cic4_*comb_prev*}]
 
 ## ---------------------------------------------------------------------------
+## CIC_ENV (R=10, post-envelope decimator): advance every 125 000 clocks
+## (= 5000 * 25, the cic4_v rate at the 1 kS/s point).
+## ---------------------------------------------------------------------------
+set_multicycle_path -setup 125000 \
+    -from [get_cells -hier -filter {NAME =~ *u_env_dec*integ_reg*}] \
+    -to   [get_cells -hier -filter {NAME =~ *u_env_dec*integ_reg*}]
+set_multicycle_path -hold 124999 \
+    -from [get_cells -hier -filter {NAME =~ *u_env_dec*integ_reg*}] \
+    -to   [get_cells -hier -filter {NAME =~ *u_env_dec*integ_reg*}]
+
+set_multicycle_path -setup 125000 \
+    -from [get_cells -hier -filter {NAME =~ *u_env_dec*comb_prev*}] \
+    -to   [get_cells -hier -filter {NAME =~ *u_env_dec*comb_prev*}]
+set_multicycle_path -hold 124999 \
+    -from [get_cells -hier -filter {NAME =~ *u_env_dec*comb_prev*}] \
+    -to   [get_cells -hier -filter {NAME =~ *u_env_dec*comb_prev*}]
+
+## ---------------------------------------------------------------------------
 ## Adaptive threshold / RSSI / env_min / noise slow IIRs in dcf77_bit_det
-## only update at the 1 kS/s env_valid tick.  False-path them; they have no
+## only update at the 100 S/s env_valid tick.  False-path them; they have no
 ## functional timing requirement beyond eventually-consistent.
 ## ---------------------------------------------------------------------------
 set_false_path -from [get_cells -hier -filter {NAME =~ *u_bit_det*env_max_reg*}]

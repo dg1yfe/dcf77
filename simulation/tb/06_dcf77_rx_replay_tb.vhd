@@ -36,6 +36,7 @@ use std.textio.all;
 
 library dcf77;
 use dcf77.dcf77_pkg.all;
+use dcf77.dcf77_cic_widths_pkg.all;
 
 entity dcf77_rx_replay_tb is
     generic (
@@ -77,6 +78,12 @@ architecture tb of dcf77_rx_replay_tb is
 
     signal env_pwr   : env_word_t;
     signal env_v     : std_logic;
+
+    -- CIC_ENV: 1 kS/s -> 100 S/s.  Same wiring trick as dcf77_core.
+    signal env_pwr_cic : sfixed(CIC_ENV_IN_W - 1 downto 0);
+    signal env_dec_raw : sfixed(CIC_ENV_OUT_W - 1 downto 0);
+    signal env_dec_out : env_word_t;
+    signal env_dec_v   : std_logic;
 
     signal bit_val   : std_logic;
     signal bit_v     : std_logic;
@@ -136,12 +143,35 @@ begin
             out_valid => env_v
         );
 
+    env_pwr_cic <= to_sfixed(to_slv(env_pwr), CIC_ENV_IN_W - 1, 0);
+    env_dec_out <= to_sfixed(to_slv(env_dec_raw),
+                             env_word_t'high, env_word_t'low);
+
+    u_env_dec : entity dcf77.dcf77_cic_dec
+        generic map (
+            N          => CIC_N,
+            DEC_R      => CIC_ENV_R,
+            M          => CIC_M,
+            IN_WIDTH   => CIC_ENV_IN_W,
+            INT_WIDTH  => CIC_ENV_INT_W,
+            COMB_WIDTH => CIC_ENV_COMB_W,
+            OUT_WIDTH  => CIC_ENV_OUT_W
+        )
+        port map (
+            clk        => clk,
+            rst        => rst,
+            in_sample  => env_pwr_cic,
+            in_valid   => env_v,
+            out_sample => env_dec_raw,
+            out_valid  => env_dec_v
+        );
+
     u_bit_det : entity dcf77.dcf77_bit_det
         port map (
             clk         => clk,
             rst         => rst,
-            env_in      => env_pwr,
-            env_valid   => env_v,
+            env_in      => env_dec_out,
+            env_valid   => env_dec_v,
             bit_value   => bit_val,
             bit_valid   => bit_v,
             minute_mark => minute_mk,

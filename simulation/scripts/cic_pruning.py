@@ -73,6 +73,8 @@ class StageSpec:
     name: str
     R: int
     in_rate_hz: float
+    in_width_override: int | None = None   # None ⇒ inherit from previous stage
+    out_width_override: int | None = None  # None ⇒ default sizing rule
 
 
 STAGES: list[StageSpec] = [
@@ -84,6 +86,10 @@ STAGES: list[StageSpec] = [
     # 250 kS/s -> 1 kS/s.
     StageSpec("cic3", R=10, in_rate_hz=    250_000),
     StageSpec("cic4", R=25, in_rate_hz=     25_000),
+    # Envelope decimator (after I^2 + Q^2 in dcf77_env):
+    # 1 kS/s -> 100 S/s.  Input width = env_word_t total bits (26).
+    StageSpec("cic_env", R=10, in_rate_hz=1_000,
+              in_width_override=26, out_width_override=26),
 ]
 
 
@@ -195,13 +201,17 @@ def analyse_cascade() -> dict:
     stage_out_widths: list[int] = []
     last_idx = len(STAGES) - 1
     for idx, spec in enumerate(STAGES):
-        if idx == 0:
+        if spec.in_width_override is not None:
+            in_width = spec.in_width_override
+        elif idx == 0:
             # Stage 0 has only 3 b of growth from a 14 b input -> 17 b.  Keep all.
             in_width = INPUT_WIDTH
         else:
             in_width = stage_out_widths[-1]
         natural = in_width + N_STAGES_FILT * int(math.ceil(math.log2(spec.R * M)))
-        if idx == last_idx:
+        if spec.out_width_override is not None:
+            out_w = min(spec.out_width_override, natural)
+        elif idx == last_idx:
             out_w = OUTPUT_WIDTH
         elif idx == 0:
             out_w = natural   # carry all bits to stage 1
@@ -213,6 +223,8 @@ def analyse_cascade() -> dict:
     stage_in_width = INPUT_WIDTH
     stages_info = []
     for idx, spec in enumerate(STAGES):
+        if spec.in_width_override is not None:
+            stage_in_width = spec.in_width_override
         stage_full = stage_in_width + N_STAGES_FILT * int(math.ceil(math.log2(spec.R * M)))
         out_target = stage_out_widths[idx]
 

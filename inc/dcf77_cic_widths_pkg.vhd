@@ -22,8 +22,8 @@ package dcf77_cic_widths_pkg is
     constant CIC_OUTPUT_WIDTH : natural := 22;
     constant CIC_N            : natural := 3;
     constant CIC_M            : natural := 1;
-    constant CIC_TOTAL_R      : natural := 125000;
-    constant CIC_FULL_OUT_W   : natural := 65;
+    constant CIC_TOTAL_R      : natural := 1250000;
+    constant CIC_FULL_OUT_W   : natural := 77;
 
     -- cic0: R = 2
     constant CIC0_R           : natural := 2;
@@ -59,6 +59,13 @@ package dcf77_cic_widths_pkg is
     constant CIC4_INT_W       : natural := 33;
     constant CIC4_COMB_W      : natural := 26;
     constant CIC4_OUT_W       : natural := 22;
+
+    -- cic_env: R = 10
+    constant CIC_ENV_R           : natural := 10;
+    constant CIC_ENV_IN_W        : natural := 26;
+    constant CIC_ENV_INT_W       : natural := 34;
+    constant CIC_ENV_COMB_W      : natural := 30;
+    constant CIC_ENV_OUT_W       : natural := 26;
 
 
 end package dcf77_cic_widths_pkg;

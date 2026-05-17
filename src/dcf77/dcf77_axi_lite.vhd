@@ -28,16 +28,16 @@ entity dcf77_axi_lite is
     generic (
         -- Forward the bit_det timing into the embedded core so the host can
         -- override them at integration time for fast simulation.  Defaults
-        -- match the real 244.140 kS/s tick rate.
-        K_ATK         : positive := 6;
-        K_DEC         : positive := 12;
-        K_NOISE       : positive := 12;
-        T_LOW_MIN     : positive := 90;
-        T_BIT0_MAX    : positive := 110;
-        T_BIT1_MIN    : positive := 190;
-        T_BIT1_MAX    : positive := 210;
-        T_GAP_MINUTE  : positive := 1_500;
-        SAMPLE_RATE_HZ: positive := 1_000;
+        -- match the real 100 S/s envelope tick rate (post-CIC_ENV).
+        K_ATK         : positive := 3;
+        K_DEC         : positive := 9;
+        K_NOISE       : positive := 9;
+        T_LOW_MIN     : positive := 6;
+        T_BIT0_MAX    : positive := 13;
+        T_BIT1_MIN    : positive := 14;
+        T_BIT1_MAX    : positive := 23;
+        T_GAP_MINUTE  : positive := 150;
+        SAMPLE_RATE_HZ: positive := 100;
         T_HOLD_SEC    : positive := 120;
         T_SEARCH_SEC  : positive := 300;
         NCO_PHASE_INCR: natural  := 81_245
