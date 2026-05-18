@@ -118,25 +118,31 @@ package dcf77_pkg is
     -- a single record to the AXI readmux (the only other input to the
     -- readmux is the dcf77_control_type echoed from the writemux).
     type dcf77_status_type is record
-        time       : dcf77_time_type;                 -- decoded time fields
-        time_valid : std_logic;                       -- last frame fully parity-OK
-        sync_state : sync_state_t;
-        rssi       : rssi_word_t;                     -- top bits of env_max
-        env_min    : rssi_word_t;                     -- top bits of env_min
-        noise      : rssi_word_t;                     -- top bits of noise IIR (MAD)
-        bit_index  : bit_index_t;                     -- current second 0..58 (59 = frame full)
-        last_frame : std_logic_vector(0 to 58);       -- raw bits of last minute
+        time         : dcf77_time_type;               -- decoded time fields
+        time_valid   : std_logic;                     -- last frame fully parity-OK
+        sync_state   : sync_state_t;
+        sync_quality : unsigned(5 downto 0);          -- 0..63 in-guard streak counter
+        mm_quality   : unsigned(1 downto 0);          -- 0..3 minute-mark confidence
+        cycle_in_min : unsigned(5 downto 0);          -- 0..59 predicted sec-in-minute
+        rssi         : rssi_word_t;                   -- top bits of env_max
+        env_min      : rssi_word_t;                   -- top bits of env_min
+        noise        : rssi_word_t;                   -- top bits of noise IIR (MAD)
+        bit_index    : bit_index_t;                   -- current second 0..58 (59 = frame full)
+        last_frame   : std_logic_vector(0 to 58);     -- raw bits of last minute
     end record;
 
     constant DCF77_STATUS_RESET : dcf77_status_type := (
-        time       => DCF77_TIME_RESET,
-        time_valid => '0',
-        sync_state => sync_search,
-        rssi       => (others => '0'),
-        env_min    => (others => '0'),
-        noise      => (others => '0'),
-        bit_index  => 0,
-        last_frame => (others => '0')
+        time         => DCF77_TIME_RESET,
+        time_valid   => '0',
+        sync_state   => sync_search,
+        sync_quality => (others => '0'),
+        mm_quality   => (others => '0'),
+        cycle_in_min => (others => '0'),
+        rssi         => (others => '0'),
+        env_min      => (others => '0'),
+        noise        => (others => '0'),
+        bit_index    => 0,
+        last_frame   => (others => '0')
     );
 
     ---------------------------------------------------------------------------
@@ -182,6 +188,7 @@ package dcf77_pkg is
     constant REG_LAST_FRAME1 : natural := 7;   -- 0x1C R
     constant REG_ENV_MIN     : natural := 8;   -- 0x20 R   env_min top 16 b
     constant REG_NOISE       : natural := 9;   -- 0x24 R   noise_iir top 16 b
+    constant REG_SYNC_DIAG   : natural := 10;  -- 0x28 R   sync_q / mm_q / cycle_in_min
 
     ---------------------------------------------------------------------------
     -- 32-b register pack / unpack helpers.  The bit layouts below match the
@@ -214,6 +221,13 @@ package dcf77_pkg is
     -- LAST_FRAME 0 / 1: frame bits 0..31 / 32..58.
     function last_frame0_to_slv (s : dcf77_status_type) return std_logic_vector;
     function last_frame1_to_slv (s : dcf77_status_type) return std_logic_vector;
+
+    -- SYNC_DIAG register:
+    --   bits  5..0  : sync_quality (0..63 saturating in-guard streak)
+    --   bits  7..6  : mm_quality   (0..3 minute-mark confidence counter)
+    --   bits 13..8  : cycle_in_min (0..59 predicted second-in-minute)
+    --   bits 31..14 : reserved
+    function sync_diag_to_slv (s : dcf77_status_type) return std_logic_vector;
 
     ---------------------------------------------------------------------------
     -- Helper functions.
@@ -364,6 +378,15 @@ package body dcf77_pkg is
         for i in 32 to 58 loop
             r(i - 32) := s.last_frame(i);
         end loop;
+        return r;
+    end function;
+
+    function sync_diag_to_slv (s : dcf77_status_type) return std_logic_vector is
+        variable r : std_logic_vector(31 downto 0) := (others => '0');
+    begin
+        r( 5 downto  0) := std_logic_vector(s.sync_quality);
+        r( 7 downto  6) := std_logic_vector(s.mm_quality);
+        r(13 downto  8) := std_logic_vector(s.cycle_in_min);
         return r;
     end function;
 

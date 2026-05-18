@@ -36,15 +36,13 @@ use work.dcf77_cic_widths_pkg.all;
 
 entity dcf77_core is
     generic (
-        -- bit_det defaults: 1 kS/s tick rate (one sample per ms).
+        -- bit_det defaults: 100 S/s tick rate (one envelope sample per 10 ms).
         K_ATK          : positive := 3;
         K_DEC          : positive := 9;
         K_NOISE        : positive := 9;
-        T_LOW_MIN      : positive := 6;
-        T_BIT0_MAX     : positive := 13;
-        T_BIT1_MIN     : positive := 14;
-        T_BIT1_MAX     : positive := 23;
-        T_GAP_MINUTE   : positive := 150;
+        DERIV_DELAY    : positive := 2;
+        K_SLOPE        : positive := 2;
+        K_REF          : positive := 2;
         SAMPLE_RATE_HZ : positive := 100;
         T_HOLD_SEC     : positive := 120;
         T_SEARCH_SEC   : positive := 300;
@@ -109,6 +107,9 @@ architecture rtl of dcf77_core is
     signal bit_v      : std_logic;
     signal minute_mk  : std_logic;
     signal sync_st    : sync_state_t;
+    signal sync_q_s   : unsigned(5 downto 0);
+    signal mm_q_s     : unsigned(1 downto 0);
+    signal cycle_s    : unsigned(5 downto 0);
     signal env_max_s  : env_word_t;
     signal env_min_s  : env_word_t;
     signal noise_s    : env_word_t;
@@ -357,28 +358,30 @@ begin
             K_ATK          => K_ATK,
             K_DEC          => K_DEC,
             K_NOISE        => K_NOISE,
-            T_LOW_MIN      => T_LOW_MIN,
-            T_BIT0_MAX     => T_BIT0_MAX,
-            T_BIT1_MIN     => T_BIT1_MIN,
-            T_BIT1_MAX     => T_BIT1_MAX,
-            T_GAP_MINUTE   => T_GAP_MINUTE,
+            DERIV_DELAY    => DERIV_DELAY,
+            K_SLOPE        => K_SLOPE,
+            K_REF          => K_REF,
             SAMPLE_RATE_HZ => SAMPLE_RATE_HZ,
             T_HOLD_SEC     => T_HOLD_SEC,
             T_SEARCH_SEC   => T_SEARCH_SEC
         )
         port map (
-            clk         => clk,
-            rst         => rst,
-            env_in      => env_dec_out,
-            env_valid   => env_dec_v,
-            bit_value   => bit_val,
-            bit_valid   => bit_v,
-            minute_mark => minute_mk,
-            sync_state  => sync_st,
-            env_max     => env_max_s,
-            env_min     => env_min_s,
-            noise       => noise_s,
-            threshold   => thresh_s
+            clk           => clk,
+            rst           => rst,
+            env_in        => env_dec_out,
+            env_valid     => env_dec_v,
+            bit_value     => bit_val,
+            bit_valid     => bit_v,
+            minute_mark   => minute_mk,
+            sync_state    => sync_st,
+            sync_quality  => sync_q_s,
+            mm_quality    => mm_q_s,
+            cycle_in_min  => cycle_s,
+            env_max       => env_max_s,
+            env_min       => env_min_s,
+            noise         => noise_s,
+            threshold     => thresh_s,
+            edge_accepted => open
         );
 
     -- ------------------------------------------------------------------ --
@@ -400,11 +403,14 @@ begin
     -- ------------------------------------------------------------------ --
     -- Aggregate the comprehensive status record from the sub-blocks.      --
     -- ------------------------------------------------------------------ --
-    status_out.time       <= time_d;
-    status_out.time_valid <= time_v_d;
-    status_out.sync_state <= sync_st;
-    status_out.last_frame <= last_frm;
-    status_out.bit_index  <= bit_ix;
+    status_out.time         <= time_d;
+    status_out.time_valid   <= time_v_d;
+    status_out.sync_state   <= sync_st;
+    status_out.sync_quality <= sync_q_s;
+    status_out.mm_quality   <= mm_q_s;
+    status_out.cycle_in_min <= cycle_s;
+    status_out.last_frame   <= last_frm;
+    status_out.bit_index    <= bit_ix;
 
     -- RSSI, ENV_MIN, NOISE: top 16 bits of the respective sfixed values.
     -- Each is non-negative by construction (env_max and env_min track

@@ -37,14 +37,9 @@ architecture tb of dcf77_core_tb is
     constant FC : real := 77_500.0;
     constant FS : real := 125_000_000.0;
 
-    -- Scaled bit_det generics (units = env_valid ticks @ 244 kS/s effective).
-    constant TG_LOW_MIN    : positive := 80;
-    constant TG_BIT0_MAX   : positive := 110;
-    constant TG_BIT1_MIN   : positive := 180;
-    constant TG_BIT1_MAX   : positive := 220;
-    constant TG_GAP_MINUTE : positive := 1500;
-    constant TG_K_ATK      : positive := 2;
-    constant TG_K_DEC      : positive := 14;
+    -- Scaled bit_det generics (units = env_valid ticks @ 100 S/s).
+    constant TG_K_ATK : positive := 2;
+    constant TG_K_DEC : positive := 14;
 
     -- One env_valid pulse appears every 512 input samples.
     constant CLOCKS_PER_TICK : positive := 512;
@@ -70,13 +65,8 @@ begin
 
     dut : entity dcf77.dcf77_core
         generic map (
-            K_ATK        => TG_K_ATK,
-            K_DEC        => TG_K_DEC,
-            T_LOW_MIN    => TG_LOW_MIN,
-            T_BIT0_MAX   => TG_BIT0_MAX,
-            T_BIT1_MIN   => TG_BIT1_MIN,
-            T_BIT1_MAX   => TG_BIT1_MAX,
-            T_GAP_MINUTE => TG_GAP_MINUTE
+            K_ATK => TG_K_ATK,
+            K_DEC => TG_K_DEC
         )
         port map (
             clk        => clk,

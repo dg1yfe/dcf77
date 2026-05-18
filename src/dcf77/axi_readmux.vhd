@@ -128,6 +128,7 @@ begin
                     v.ro.data := (31 downto 16 => '0',
                                   others => '0');
                     v.ro.data(15 downto 0) := std_logic_vector(r.st.noise);
+                when REG_SYNC_DIAG   => v.ro.data := sync_diag_to_slv(r.st);
                 when others =>
                     v.ro.data := (others => '0');
                     v.ro.resp := AXI_RESPONSE_DECERR;

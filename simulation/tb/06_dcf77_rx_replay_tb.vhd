@@ -168,18 +168,22 @@ begin
 
     u_bit_det : entity dcf77.dcf77_bit_det
         port map (
-            clk         => clk,
-            rst         => rst,
-            env_in      => env_dec_out,
-            env_valid   => env_dec_v,
-            bit_value   => bit_val,
-            bit_valid   => bit_v,
-            minute_mark => minute_mk,
-            sync_state  => sync_st,
-            env_max     => env_max_s,
-            env_min     => env_min_s,
-            noise       => noise_s,
-            threshold   => thresh_s
+            clk           => clk,
+            rst           => rst,
+            env_in        => env_dec_out,
+            env_valid     => env_dec_v,
+            bit_value     => bit_val,
+            bit_valid     => bit_v,
+            minute_mark   => minute_mk,
+            sync_state    => sync_st,
+            sync_quality  => open,
+            mm_quality    => open,
+            cycle_in_min  => open,
+            env_max       => env_max_s,
+            env_min       => env_min_s,
+            noise         => noise_s,
+            threshold     => thresh_s,
+            edge_accepted => open
         );
 
     u_frame : entity dcf77.dcf77_frame_dec
