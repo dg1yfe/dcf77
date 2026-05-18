@@ -60,7 +60,10 @@ entity dcf77_rx_replay_tb is
         EXPECT_DST     : natural := 0;
         -- 125 MHz clock cycles between successive (I,Q) pairs.  The env /
         -- bit_det / frame_dec chain is strobe-driven, so this just sets
-        -- how fast simulated time advances; 8 is comfortable.
+        -- how fast simulated time advances.  Eight clocks is enough for
+        -- every block in this back-end chain (env: 2-cycle FSM, CIC_ENV
+        -- single-cycle).  Production has 125 000 clocks per I/Q sample
+        -- so this is purely a test-time-compression knob.
         CLOCKS_PER_TICK : positive := 8
     );
 end entity;
@@ -130,7 +133,11 @@ begin
     clk <= not clk after CLK_PERIOD / 2;
 
     -- -------------------------------------------------------------------- --
-    -- Receiver back end (env -> bit_det -> frame_dec)                       --
+    -- Receiver back end (env -> CIC_ENV -> bit_det -> frame_dec).  The
+    -- replay corpus is already post-mixer baseband at 1 kS/s, so we use
+    -- the magnitude-envelope path (|I|+(3/8)|Q|) here instead of the
+    -- carrier-PLL-driven synchronous abs(I) path used in dcf77_core.
+    -- The two converge at CIC_ENV's input.
     -- -------------------------------------------------------------------- --
     u_env : entity dcf77.dcf77_env
         port map (

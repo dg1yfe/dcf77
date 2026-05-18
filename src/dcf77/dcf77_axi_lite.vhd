@@ -38,7 +38,7 @@ entity dcf77_axi_lite is
         SAMPLE_RATE_HZ: positive := 100;
         T_HOLD_SEC    : positive := 120;
         T_SEARCH_SEC  : positive := 300;
-        NCO_PHASE_INCR: natural  := 81_245
+        NCO_PHASE_INCR: natural  := 10_399_018
     );
     port (
         -- AXI4-Lite slave (system clock = ACLK; matches dcf77_core's clk).

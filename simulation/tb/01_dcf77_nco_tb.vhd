@@ -24,8 +24,8 @@ architecture tb of dcf77_nco_tb is
 
     constant CLK_PERIOD       : time     := 8 ns;       -- 125 MHz
     constant TICK_PERIOD_CLKS : positive := 500;        -- 250 kS/s
-    constant PHASE_WIDTH      : positive := 18;
-    constant PHASE_INCR       : natural  := 81_245;     -- ~77.5 kHz @ 250 kS/s
+    constant PHASE_WIDTH      : positive := 25;
+    constant PHASE_INCR       : natural  := 10_399_018; -- ~77.5 kHz @ 250 kS/s
 
     -- Reference cycle count for the cos waveform over the capture window:
     -- 77.5 kHz at the 250 kS/s tick rate -> 0.31 cycles per tick.
@@ -39,6 +39,7 @@ architecture tb of dcf77_nco_tb is
     signal tick     : std_logic := '0';
     signal cos_sign : std_logic;
     signal sin_sign : std_logic;
+    signal phase_acc_out : unsigned(PHASE_WIDTH - 1 downto 0);
 
 begin
 
@@ -50,11 +51,13 @@ begin
             PHASE_INCR  => PHASE_INCR
         )
         port map (
-            clk      => clk,
-            rst      => rst,
-            tick     => tick,
-            cos_sign => cos_sign,
-            sin_sign => sin_sign
+            clk              => clk,
+            rst              => rst,
+            tick             => tick,
+            phase_inc_offset => (others => '0'),
+            cos_sign         => cos_sign,
+            sin_sign         => sin_sign,
+            phase_acc_out    => phase_acc_out
         );
 
     test_runner : process

@@ -47,8 +47,9 @@ entity dcf77_core is
         T_HOLD_SEC     : positive := 120;
         T_SEARCH_SEC   : positive := 300;
 
-        -- NCO frequency increment for 18 b acc @ 250 kS/s mixer tick.
-        NCO_PHASE_INCR : natural := 81_245
+        -- NCO frequency increment for 25 b acc @ 250 kS/s mixer tick.
+        -- 2^25 * 77500 / 250000 = 10_399_018.6...
+        NCO_PHASE_INCR : natural := 10_399_018
     );
     port (
         clk       : in  std_logic;
@@ -77,6 +78,13 @@ architecture rtl of dcf77_core is
     signal cos_sign   : std_logic;
     signal sin_sign   : std_logic;
 
+    -- NCO phase accumulator (25 b unsigned) and signed PLL offset (24 b).
+    constant NCO_PHASE_W  : positive := 25;
+    constant NCO_OFFSET_W : positive := 24;
+    signal nco_phase_acc        : unsigned(NCO_PHASE_W  - 1 downto 0);
+    signal nco_phase_inc_offset : signed  (NCO_OFFSET_W - 1 downto 0)
+                                := (others => '0');
+
     signal i_mix      : iq_word_t;                        -- 22 b signed @ 250 kS/s
     signal q_mix      : iq_word_t;
     signal mix_v      : std_logic;
@@ -90,6 +98,16 @@ architecture rtl of dcf77_core is
     signal cic4_q_out : sfixed(CIC4_OUT_W - 1 downto 0);
     signal cic4_i_v   : std_logic;
     signal cic4_q_v   : std_logic;
+
+    -- Q-channel boxcar @ 1 kS/s feeding the carrier PLL.  R=25 from
+    -- cic3_q_out @ 25 kS/s; width = 22 + ceil(log2(25)) = 27 b signed.
+    constant Q_PLL_W  : positive := 27;
+    signal q_pll      : signed(Q_PLL_W - 1 downto 0);
+    signal q_pll_v    : std_logic;
+
+    -- Carrier-PLL lock indicator (real-mode output gating).
+    signal pll_lock   : std_logic;
+    signal pll_qiir   : unsigned(Q_PLL_W - 1 downto 0);
 
     signal env_pwr    : env_word_t;
     signal env_v      : std_logic;
@@ -110,6 +128,11 @@ architecture rtl of dcf77_core is
     signal sync_q_s   : unsigned(5 downto 0);
     signal mm_q_s     : unsigned(1 downto 0);
     signal cycle_s    : unsigned(5 downto 0);
+
+    -- Carrier-PLL-gated decoder outputs.
+    signal bit_v_gated     : std_logic;
+    signal minute_mk_gated : std_logic;
+    signal sync_st_gated   : sync_state_t;
     signal env_max_s  : env_word_t;
     signal env_min_s  : env_word_t;
     signal noise_s    : env_word_t;
@@ -199,15 +222,17 @@ begin
     -- ------------------------------------------------------------------ --
     u_nco : entity work.dcf77_nco
         generic map (
-            PHASE_WIDTH => 18,
+            PHASE_WIDTH => NCO_PHASE_W,
             PHASE_INCR  => NCO_PHASE_INCR
         )
         port map (
-            clk      => clk,
-            rst      => rst,
-            tick     => cic2_v,
-            cos_sign => cos_sign,
-            sin_sign => sin_sign
+            clk              => clk,
+            rst              => rst,
+            tick             => cic2_v,
+            phase_inc_offset => nco_phase_inc_offset,
+            cos_sign         => cos_sign,
+            sin_sign         => sin_sign,
+            phase_acc_out    => nco_phase_acc
         );
 
     u_mixer : entity work.dcf77_mixer
@@ -313,7 +338,54 @@ begin
         );
 
     -- ------------------------------------------------------------------ --
-    -- Envelope power @ 1 kS/s -> CIC env decimator @ 100 S/s -> bit_det    --
+    -- Q-channel boxcar + carrier-tracking PLL.
+    -- 1-stage boxcar (R=25) on cic3_q_out @ 25 kS/s -> 1 kS/s, 27 b
+    -- signed Q sample drives the 2nd-order PI loop, which feeds a 24 b
+    -- signed phase-increment offset back into the NCO.  Lock state gates
+    -- the bit-detector's outputs.
+    -- ------------------------------------------------------------------ --
+    u_q_boxcar : entity work.dcf77_q_boxcar
+        generic map (
+            IN_WIDTH  => CIC3_OUT_W,        -- 22
+            RATE      => CIC4_R,            -- 25
+            OUT_WIDTH => Q_PLL_W            -- 27
+        )
+        port map (
+            clk        => clk,
+            rst        => rst,
+            in_sample  => cic3_q_out,
+            in_valid   => cic3_q_v,
+            out_sample => q_pll,
+            out_valid  => q_pll_v
+        );
+
+    u_carrier_pll : entity work.dcf77_carrier_pll
+        generic map (
+            Q_WIDTH         => Q_PLL_W,         -- 27
+            OFFSET_WIDTH    => NCO_OFFSET_W,    -- 24
+            -- Lock thresholds in |q|_iir units; |q| peaks at ~ A * RATE
+            -- where A is the post-CIC carrier amplitude.  For a strong
+            -- carrier A ~ 2^20, |q|_peak ~ 25*2^20 = 2^24.6.  In-band
+            -- ~ 1/16 of peak = 2^20; out-of-band ~ 1/4 = 2^23.  These
+            -- defaults are starting points; tune per deployment.
+            K_LOCK_SHIFT    => 6,
+            LOCK_IN_THR     => 2**20,
+            LOCK_OUT_THR    => 2**23,
+            LOCK_HOLD_TICKS => 256
+        )
+        port map (
+            clk              => clk,
+            rst              => rst,
+            q_sample         => q_pll,
+            q_valid          => q_pll_v,
+            phase_inc_offset => nco_phase_inc_offset,
+            lock_state       => pll_lock,
+            q_iir_out        => pll_qiir
+        );
+
+    -- ------------------------------------------------------------------ --
+    -- Magnitude envelope @ 1 kS/s -> CIC env decimator @ 100 S/s -> bit_det
+    -- Placeholder until carrier-PLL synchronous detection wires in.
     -- ------------------------------------------------------------------ --
     u_env : entity work.dcf77_env
         port map (
@@ -385,6 +457,24 @@ begin
         );
 
     -- ------------------------------------------------------------------ --
+    -- Carrier-PLL gating: outputs only flow through the frame decoder
+    -- while the PLL is locked.  Pre-lock sync_state is forced to
+    -- sync_search so a stale lock indication can't leak through the
+    -- AXI status register before the receiver has actually acquired.
+    -- ------------------------------------------------------------------ --
+    bit_v_gated     <= bit_v     and pll_lock;
+    minute_mk_gated <= minute_mk and pll_lock;
+
+    process (pll_lock, sync_st)
+    begin
+        if pll_lock = '0' then
+            sync_st_gated <= sync_search;
+        else
+            sync_st_gated <= sync_st;
+        end if;
+    end process;
+
+    -- ------------------------------------------------------------------ --
     -- Frame decoder                                                        --
     -- ------------------------------------------------------------------ --
     u_frame : entity work.dcf77_frame_dec
@@ -392,8 +482,8 @@ begin
             clk         => clk,
             rst         => rst,
             bit_value   => bit_val,
-            bit_valid   => bit_v,
-            minute_mark => minute_mk,
+            bit_valid   => bit_v_gated,
+            minute_mark => minute_mk_gated,
             time_out    => time_d,
             time_valid  => time_v_d,
             last_frame  => last_frm,
@@ -405,7 +495,7 @@ begin
     -- ------------------------------------------------------------------ --
     status_out.time         <= time_d;
     status_out.time_valid   <= time_v_d;
-    status_out.sync_state   <= sync_st;
+    status_out.sync_state   <= sync_st_gated;
     status_out.sync_quality <= sync_q_s;
     status_out.mm_quality   <= mm_q_s;
     status_out.cycle_in_min <= cycle_s;
