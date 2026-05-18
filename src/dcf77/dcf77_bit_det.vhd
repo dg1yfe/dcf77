@@ -122,6 +122,13 @@ architecture rtl of dcf77_bit_det is
         have_anchor   : std_logic;
         give_up_cnt   : natural range 0 to GIVE_UP_TICKS;
 
+        -- Run-on mm-candidate detector: an mm candidate firing in
+        -- consecutive cycles means our anchor is off-phase and W1 is
+        -- landing on the carrier portion of every bit.  Drop the
+        -- anchor after RUN_ON_LIMIT in a row so the next falling edge
+        -- re-anchors at the (presumably) correct bit boundary.
+        cand_run_on  : natural range 0 to 7;
+
         -- sync_q saturating "seconds anchored" counter.
         sync_q : natural range 0 to SYNC_Q_MAX;
 
@@ -161,6 +168,7 @@ architecture rtl of dcf77_bit_det is
         sample_in_bit   => 0,
         have_anchor     => '0',
         give_up_cnt     => 0,
+        cand_run_on     => 0,
         sync_q          => 0,
         acc_W1          => ZERO_ACC10,
         acc_W2          => ZERO_ACC10,
@@ -465,6 +473,20 @@ begin
                     candidate := '1';
                 end if;
 
+                -- Run-on detector: mm-candidate firing in N consecutive
+                -- cycles means our anchor is off-phase and W1 is landing
+                -- on the carrier portion of every bit.  Real signal has
+                -- one mm per minute, so two in a row is already wrong;
+                -- threshold N=3 leaves margin for transient confusion
+                -- around the real mm boundary.
+                if candidate = '1' then
+                    if r.cand_run_on < 7 then
+                        v.cand_run_on := r.cand_run_on + 1;
+                    end if;
+                else
+                    v.cand_run_on := 0;
+                end if;
+
                 do_fire_mm  := '0';
                 do_fire_bit := '0';
 
@@ -531,6 +553,24 @@ begin
                 v.acc_W1 := ZERO_ACC10;
                 v.acc_W2 := ZERO_ACC10;
                 v.acc_W3 := ZERO_ACC80;
+
+                -- Wrong-anchor recovery: drop anchor when too many mm
+                -- candidates fire back-to-back.  Next falling edge
+                -- will re-anchor; iir_high / env_max state is kept so
+                -- the re-acquired anchor doesn't have to re-warm.
+                if v.cand_run_on >= 3 then
+                    v.have_anchor   := '0';
+                    v.give_up_cnt   := 0;
+                    v.cand_run_on   := 0;
+                    v.sample_in_bit := 0;
+                    v.mm_counter    := 0;
+                    v.cycle_in_min  := 0;
+                    v.sync_q        := 0;
+                    -- Suppress this cycle's outputs -- they were
+                    -- almost certainly garbage.
+                    v.bit_valid     := '0';
+                    v.minute_mark   := '0';
+                end if;
 
             end if;
 
