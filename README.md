@@ -20,18 +20,26 @@ CIC₁  (N=3, R=10, M=1)        29 b integ / 26 b comb (Hogenauer-pruned)
    ▼  6.25 MS/s
 CIC₂  (N=3, R=25, M=1)        33 b integ / 26 b comb
    ▼  250 kS/s, 22 b signed (real-valued, carrier still at 77.5 kHz)
-sign-LO mixer ◀── NCO (18 b phase acc, 77.5 kHz, ±0.04 Hz)
-   ▼ I, Q (22 b each) @ 250 kS/s
-CIC₃_I, CIC₃_Q  (N=3, R=10)   30 b integ / 26 b comb, multicycle 500
-   ▼ I, Q (22 b each) @ 25 kS/s  ── PM hook (iq_tap_out)
-CIC₄_I, CIC₄_Q  (N=3, R=25)   33 b integ / 26 b comb, multicycle 5000
-   ▼ I, Q (22 b each) @ 1 kS/s
-power = I² + Q² (1 × DSP48E1, MAC time-shared)
-   ▼
-adaptive threshold + env_min trough + noise-MAD IIR
-   ▼ digital pulse
-pulse-width FSM @ 1 kS/s:  100 ms±10 ms → bit 0,  200 ms±10 ms → bit 1,
-                            no absenkung in expected window → minute mark
+sign-LO mixer ◀── NCO (25 b phase acc + signed phase_inc_offset)
+   ▼ I, Q (22 b each) @ 250 kS/s                ▲
+CIC₃_I, CIC₃_Q  (N=3, R=10)                     │
+   ▼ I, Q (22 b each) @ 25 kS/s ── PM hook       │ phase_inc_offset
+CIC₄_I  (N=3, R=25)             (Q side: ──┐    │
+   ▼ I @ 22 b, 1 kS/s              boxcar  │    │
+                                  R=25, 27 b)   │
+   ▼                                  │         │
+                                      ▼         │
+env = |I|+(3/8)|Q|                  carrier_pll │
+(alpha-max+beta-min, no DSP)        2nd-order PI ┘
+   ▼ 26 b unsigned, 1 kS/s          + lock_state
+CIC_ENV  (N=3, R=10)                 (gates outputs)
+   ▼ env @ 100 S/s
+symbol-structural bit_det @ 100 S/s
+  - free-running modulo-100 sample counter, anchored on first edge
+  - W1 [0..10) = mm-candidate window;  acc_W1 > 7·env_max → mm
+  - W2 [10..20) = bit discriminator;   acc_W2 < 0.578·iir_high → bit-1
+  - W3 [20..100) = carrier reference;  feeds iir_high IIR
+  - drop anchor on 3-in-a-row mm candidates (wrong-phase recovery)
    ▼
 59-bit frame buffer
    ▼
@@ -41,8 +49,9 @@ AXI4-Lite slave  (10 registers)
 ```
 
 The post-mixer I/Q is also exposed as a `dcf77_iq_tap_type` port at
-25 kS/s for a future PM (BPSK / m-sequence) correlator (~49 samples per
-PM chip, far above the typical 4–16 samples/chip budget).
+25 kS/s (post-CIC₃) for a future PM (BPSK / m-sequence) correlator
+(~49 samples per PM chip, far above the typical 4–16 samples/chip
+budget).
 
 Design decisions are described in
 `/Users/eligs/.claude/plans/this-project-aims-to-toasty-pelican.md`; CIC
@@ -59,11 +68,16 @@ inc/                shared packages (compiled first)
 
 src/dcf77/          RTL
   dcf77_cic_dec.vhd        generic CIC building block (instantiated 7×:
-                            3 pre-mixer real + 2×2 post-mixer complex)
-  dcf77_nco.vhd            18 b phase-accumulator DDS, sign-only I/Q outputs
+                            3 pre-mixer real + 2×2 post-mixer complex
+                            + CIC_ENV envelope decimator)
+  dcf77_nco.vhd            25 b phase-accumulator DDS with signed
+                            phase_inc_offset port, sign-only I/Q
   dcf77_mixer.vhd          22 b cond-negate I/Q
-  dcf77_env.vhd            I²+Q² with time-shared DSP48E1 MAC
-  dcf77_bit_det.vhd        adaptive threshold + pulse-width FSM + sync state
+  dcf77_q_boxcar.vhd       1-stage CIC on Q (R=25) → 1 kS/s for the PLL
+  dcf77_carrier_pll.vhd    2nd-order PI carrier-tracking loop + lock det.
+  dcf77_env.vhd            magnitude |I|+(3/8)|Q| (alpha-max+beta-min)
+  dcf77_bit_det.vhd        symbol-structural detector @ 100 S/s, anchor
+                            on first edge + run-on-mm-candidate recovery
   dcf77_frame_dec.vhd      59-bit buffer + BCD/parity decoder
   dcf77_core.vhd           top-level RTL wiring (no AXI here)
   axi_readmux.vhd          AXI4-Lite read-channel decoder
@@ -140,11 +154,11 @@ PM hints) is documented in [`doc/dcf77_format_spec.md`](doc/dcf77_format_spec.md
 `SNR_dB ≈ 20·log10((RSSI − ENV_MIN) / NOISE)` — the host reads the three
 fields and computes the dB value at audio cadence.
 
-`sync_state` encoding: `00` = search, `01` = lock, `10` = hold.  After
-`T_HOLD_SEC` (default 120 s) without a minute mark the state falls from
-`lock` to `hold`; after `T_SEARCH_SEC` (default 300 s) it falls to
-`search`.  Reads of addresses ≥ 0x20 return DECERR; writes to any
-read-only offset return SLVERR.
+`sync_state` encoding: `00` = search, `01` = lock, `10` = hold.  Mapped
+from the carrier PLL's `lock_state` AND-d with the bit_det's anchor
+state and mm-counter: pll_lock='0' → search; pll_lock='1' AND mm_counter=0
+→ hold; pll_lock='1' AND mm_counter>0 → lock.  Writes to any read-only
+offset return SLVERR.
 
 ## Replay test — decoding a real recording
 

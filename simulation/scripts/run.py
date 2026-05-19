@@ -116,6 +116,7 @@ def _configure_testbenches(lib) -> None:
     )
 
     _configure_replay_testbench(lib)
+    _configure_if_replay_testbench(lib)
 
 
 def _configure_replay_testbench(lib) -> None:
@@ -195,6 +196,86 @@ def _configure_replay_testbench(lib) -> None:
     # explicitly-named placeholder so the result is labelled clearly.  We
     # omit REPLAY_FILE from the generics so the entity default ("") kicks
     # in -- ghdl refuses an empty-string generic on the command line.
+    if not full_configured:
+        reason = ("set_DCF77_FULL_REPLAY_to_1"
+                  if not want_full
+                  else "no_WAV_with_expect_full_decode")
+        tb.test("full_decode").add_config(
+            name=reason,
+            generics=dict(EXPECT_FULL_FRAME=False))
+
+
+def _configure_if_replay_testbench(lib) -> None:
+    """Register one IF-replay-TB configuration per WAV with .if.s16/.if.meta.
+
+    For each samples/<stem>.wav the runner looks for derived/<stem>.if.s16
+    + .if.meta produced by wav_to_if.py.  The IF testbench feeds the
+    real-valued WAV samples (at 12 kS/s, DCF77 still at its IF) straight
+    into the receiver's mixer with the NCO retuned, so the carrier-PLL
+    loop closes end-to-end.
+
+    Run `python3 simulation/scripts/wav_to_if.py --all` to populate the
+    .if.s16/.if.meta artefacts after dropping WAVs into samples/.
+    """
+    try:
+        tb = lib.test_bench("dcf77_if_replay_tb")
+    except KeyError:
+        return
+
+    if not SAMPLES_DIR.is_dir():
+        return
+
+    want_full = os.environ.get("DCF77_FULL_REPLAY") == "1"
+    full_configured = False
+
+    for wav in sorted(SAMPLES_DIR.glob("*.wav")):
+        stem = wav.stem
+        if_s16  = DERIVED_DIR / f"{stem}.if.s16"
+        if_meta = DERIVED_DIR / f"{stem}.if.meta"
+        if not (if_s16.exists() and if_meta.exists()):
+            print(f"[if-replay] {wav.name}: no derived/.if.s16/.if.meta -- "
+                  f"run `python3 simulation/scripts/wav_to_if.py --all`")
+            continue
+
+        kv      = _read_meta(if_meta)
+        rate    = int(kv.get("sample_rate_hz", 12000))
+        if_hz   = int(float(kv.get("if_hz", 5000)))
+        samples = int(kv["sample_count"])
+        has_exp = int(kv.get("expect_full_decode", 0)) == 1
+
+        if not has_exp:
+            print(f"[if-replay] {wav.name}: Python decoder did not lock -- "
+                  f"smoke runs without decode-progress assertion")
+
+        common = dict(
+            REPLAY_FILE    = str(if_s16),
+            SAMPLE_COUNT   = samples,
+            SAMPLE_RATE_HZ = rate,
+            IF_HZ          = if_hz,
+            EXPECT_YEAR    = int(kv.get("year",    0)),
+            EXPECT_MONTH   = int(kv.get("month",   0)),
+            EXPECT_DAY     = int(kv.get("day",     0)),
+            EXPECT_WEEKDAY = int(kv.get("weekday", 0)),
+            EXPECT_HOUR    = int(kv.get("hour",    0)),
+            EXPECT_MINUTE  = int(kv.get("minute",  0)),
+            EXPECT_DST     = int(kv.get("dst_active", 0)),
+        )
+
+        smoke = dict(common,
+                     MAX_SAMPLES = 130 * rate,
+                     EXPECT_FULL_FRAME      = False,
+                     EXPECT_VALIDATE_TIME   = False,
+                     EXPECT_DECODE_PROGRESS = has_exp)
+        tb.test("smoke").add_config(name=stem, generics=smoke)
+
+        if has_exp and want_full:
+            full = dict(common,
+                        MAX_SAMPLES = 0,
+                        EXPECT_FULL_FRAME    = True,
+                        EXPECT_VALIDATE_TIME = True)
+            tb.test("full_decode").add_config(name=stem, generics=full)
+            full_configured = True
+
     if not full_configured:
         reason = ("set_DCF77_FULL_REPLAY_to_1"
                   if not want_full

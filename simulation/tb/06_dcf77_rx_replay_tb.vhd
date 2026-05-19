@@ -29,6 +29,7 @@ context vunit_lib.vunit_context;
 library ieee;
 use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;
+use ieee.fixed_float_types.all;
 use ieee.fixed_pkg.all;
 
 library std;
@@ -133,22 +134,33 @@ begin
     clk <= not clk after CLK_PERIOD / 2;
 
     -- -------------------------------------------------------------------- --
-    -- Receiver back end (env -> CIC_ENV -> bit_det -> frame_dec).  The
-    -- replay corpus is already post-mixer baseband at 1 kS/s, so we use
-    -- the magnitude-envelope path (|I|+(3/8)|Q|) here instead of the
-    -- carrier-PLL-driven synchronous abs(I) path used in dcf77_core.
-    -- The two converge at CIC_ENV's input.
+    -- Receiver back end (magnitude env -> CIC_ENV -> bit_det -> frame_dec).
+    --
+    -- The replay corpus is already post-mixer baseband at 1 kS/s, but the
+    -- recording's residual carrier phase relative to the AM modulation is
+    -- arbitrary (wav_to_iq.py applies its own complex LO at record time)
+    -- and the carrier PLL has no NCO to drive in this bypass path, so we
+    -- recover the envelope via the phase-agnostic |I|+(3/8)|Q| magnitude
+    -- approximation (alpha=1, beta=3/8).  dcf77_core uses synchronous
+    -- abs(I) detection instead since its PLL closes the loop on the real
+    -- NCO.  Both branches converge at CIC_ENV's input.
     -- -------------------------------------------------------------------- --
-    u_env : entity dcf77.dcf77_env
-        port map (
-            clk       => clk,
-            rst       => rst,
-            i_in      => i_in_s,
-            q_in      => q_in_s,
-            in_valid  => iq_v,
-            power     => env_pwr,
-            out_valid => env_v
-        );
+    magnitude_proc : process (i_in_s, q_in_s)
+        variable ia, qa, mx, mn : sfixed(iq_word_t'high + 1 downto
+                                         iq_word_t'low);
+    begin
+        ia := abs(i_in_s);
+        qa := abs(q_in_s);
+        if ia > qa then
+            mx := ia; mn := qa;
+        else
+            mx := qa; mn := ia;
+        end if;
+        env_pwr <= resize(mx + shift_right(mn, 2) + shift_right(mn, 3),
+                          env_word_t'high, env_word_t'low,
+                          fixed_saturate, fixed_truncate);
+    end process;
+    env_v <= iq_v;
 
     env_pwr_cic <= to_sfixed(to_slv(env_pwr), CIC_ENV_IN_W - 1, 0);
     env_dec_out <= to_sfixed(to_slv(env_dec_raw),

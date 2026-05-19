@@ -95,9 +95,10 @@ architecture rtl of dcf77_core is
     signal cic3_i_v   : std_logic;
     signal cic3_q_v   : std_logic;
     signal cic4_i_out : sfixed(CIC4_OUT_W - 1 downto 0);  -- 22 b @ 1 kS/s
-    signal cic4_q_out : sfixed(CIC4_OUT_W - 1 downto 0);
     signal cic4_i_v   : std_logic;
-    signal cic4_q_v   : std_logic;
+    -- CIC4_Q removed: the carrier PLL consumes the post-mixer Q via a
+    -- 1-stage boxcar on cic3_q_out (25 kS/s -> 1 kS/s), not via a
+    -- second 3-stage CIC.  AM envelope after PLL lock is abs(I).
 
     -- Q-channel boxcar @ 1 kS/s feeding the carrier PLL.  R=25 from
     -- cic3_q_out @ 25 kS/s; width = 22 + ceil(log2(25)) = 27 b signed.
@@ -318,24 +319,12 @@ begin
             out_valid  => cic4_i_v
         );
 
-    u_cic4_q : entity work.dcf77_cic_dec
-        generic map (
-            N          => CIC_N,
-            DEC_R      => CIC4_R,
-            M          => CIC_M,
-            IN_WIDTH   => CIC4_IN_W,
-            INT_WIDTH  => CIC4_INT_W,
-            COMB_WIDTH => CIC4_COMB_W,
-            OUT_WIDTH  => CIC4_OUT_W
-        )
-        port map (
-            clk        => clk,
-            rst        => rst,
-            in_sample  => cic3_q_out,
-            in_valid   => cic3_q_v,
-            out_sample => cic4_q_out,
-            out_valid  => cic4_q_v
-        );
+    -- CIC4_Q is intentionally absent: after carrier-PLL lock the AM
+    -- envelope is synchronously detected as abs(I) on the I-channel
+    -- alone, and the PLL itself consumes the Q channel via the boxcar
+    -- (cic3_q_out @ 25 kS/s) below.  The replay testbench instantiates
+    -- its own dcf77_env (magnitude |I|+(3/8)|Q|) directly on the file
+    -- I/Q because no NCO loop closure happens there.
 
     -- ------------------------------------------------------------------ --
     -- Q-channel boxcar + carrier-tracking PLL.
@@ -384,19 +373,19 @@ begin
         );
 
     -- ------------------------------------------------------------------ --
-    -- Magnitude envelope @ 1 kS/s -> CIC env decimator @ 100 S/s -> bit_det
-    -- Placeholder until carrier-PLL synchronous detection wires in.
+    -- Synchronously-detected AM envelope.
+    --
+    -- After carrier-PLL lock, Q -> 0 and all AM-modulation amplitude
+    -- collapses onto I.  abs(I) is then the envelope, with the +3 dB
+    -- SNR benefit of synchronous detection over magnitude detection.
+    -- The 180-deg phase ambiguity (PLL locks at either of two phase-
+    -- stable points) is handled by taking the absolute value.  No DSP,
+    -- LUT-only.
     -- ------------------------------------------------------------------ --
-    u_env : entity work.dcf77_env
-        port map (
-            clk       => clk,
-            rst       => rst,
-            i_in      => cic4_i_out,
-            q_in      => cic4_q_out,
-            in_valid  => cic4_i_v,
-            power     => env_pwr,
-            out_valid => env_v
-        );
+    env_pwr <= resize(abs(cic4_i_out),
+                      env_word_t'high, env_word_t'low,
+                      fixed_saturate, fixed_truncate);
+    env_v   <= cic4_i_v;
 
     -- env_word_t has LSB at 2^10 while dcf77_cic_dec's ports use LSB at 0;
     -- the bits transfer 1-for-1.  The CIC's Hogenauer-pruned output drops

@@ -49,36 +49,43 @@ draw.io XML — open it directly in draw.io / diagrams.net to edit.
                        │  real-valued, 22 b, 250 kS/s
                        │  (carrier still at 77.5 kHz)
                        ▼
-              ┌─────────────────────┐
-              │ sign-LO mixer (I,Q) │ ◀── NCO 18-b, K=81245 (77.5 kHz)
-              └─────────────────────┘
-                       │
-                       │  I, Q  (each 22 b signed, 250 kS/s)
-                       ▼
+              ┌─────────────────────┐         ┌──────────────────┐
+              │ sign-LO mixer (I,Q) │ ◀──┐    │ NCO 25-b acc     │
+              └─────────────────────┘    └────│ K=10_399_018     │
+                       │                      │ + phase_inc_offset│
+                       │  I, Q (each 22 b,    └──────────────────┘
+                       │  250 kS/s)                       ▲
+        ┌──────────────┼──────────────┐                   │
+        ▼              │              ▼                   │
+  CIC₃_I R=10        (PM hook       CIC₃_Q R=10           │
+  CIC₄_I R=25         iq_tap_out    Q-boxcar  R=25  ──────┤
+   ↓ I @ 22 b,        @ 25 kS/s)     ↓ 27 b signed         │
+   ↓ 1 kS/s                          ↓ 1 kS/s              │
+   ▼                                 ▼                     │
+  ┌──────────────────┐       ┌─────────────────────┐       │
+  │ env (magnitude)  │       │ dcf77_carrier_pll    │       │
+  │ |I|+(3/8)|Q|     │       │  2nd-order PI loop   │ ──────┘
+  │ (no DSP)         │       │  Kp=7/1024,Ki=3/131k │  phase_inc_offset
+  └──────────────────┘       │  lock_state          │
+        │                    └─────────────────────┘
+        │  26 b unsigned, 1 kS/s              │
+        ▼                                     │
+  ┌──────────────────────────────┐            │
+  │ CIC_ENV  R=10, N=3            │            │
+  └──────────────────────────────┘            │
+        │  env @ 100 S/s                       │
+        ▼                                     │
   ┌─────────────────────────────────────────────────┐
-  │ CIC₃_I, CIC₃_Q   R=10, N=3   multicycle 500     │  250 kS/s in
-  └─────────────────────────────────────────────────┘
-                       │   ── PM hook: iq_tap_out @ 25 kS/s
-                       ▼
-  ┌─────────────────────────────────────────────────┐
-  │ CIC₄_I, CIC₄_Q   R=25, N=3   multicycle 5000    │  25 kS/s in
-  └─────────────────────────────────────────────────┘
-                       │
-                       │  I, Q (22 b each), 1 kS/s
-                       ▼
-              ┌─────────────────────┐
-              │ env = I² + Q²        │ 1 × DSP48E1 MAC, time-shared
-              └─────────────────────┘
-                       │
-                       ▼
-  ┌─────────────────────────────────────────────────┐
-  │ Adaptive threshold (env_max / env_min IIRs)      │
-  │ Noise estimator (mean-abs-deviation IIR)         │
-  │ Hysteretic carrier comparator                    │
-  │ Pulse-width FSM @ 1 kS/s                          │
-  │     - 100 ms ±10 ms low pulse → bit 0            │
-  │     - 200 ms ±10 ms low pulse → bit 1            │
-  │     - no absenkung in expected window → MM       │
+  │ symbol-structural bit_det @ 100 S/s              │
+  │   - anchor on first falling edge, free-running   │
+  │     modulo-BIT_PERIOD (=100) sample counter      │
+  │   - W1 [0..10) acc_W1 > 7·env_max → mm candidate │
+  │   - W2 [10..20) acc_W2 < 0.578·iir_high → bit-1   │
+  │   - W3 [20..100) feeds iir_high carrier reference│
+  │   - 3-in-a-row mm candidates → drop anchor       │
+  │   - mm_counter (0..3) gates mm acceptance        │
+  │ env_max / env_min / noise IIRs feed SNR registers │
+  │ output gating: AND with carrier_pll.lock_state ──┘
   └─────────────────────────────────────────────────┘
                        │
                        ▼
@@ -93,8 +100,9 @@ draw.io XML — open it directly in draw.io / diagrams.net to edit.
   └─────────────────────────────────────────────────┘
 ```
 
-**Total decimation** from ADC (125 MS/s) to AM bit detector (1 kS/s) is
-**125 000** = 500 (pre-mixer) × 250 (post-mixer per channel).
+**Total decimation** from ADC (125 MS/s) to AM bit detector (100 S/s) is
+**1 250 000** = 500 (pre-mixer) × 250 (post-mixer per channel) × 10
+(envelope CIC).
 
 The entire pipeline lives in a single 125 MHz clock domain; inner CIC
 stages advance on clock-enable strobes, and `set_multicycle_path` XDC
