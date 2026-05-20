@@ -47,6 +47,16 @@ entity dcf77_carrier_pll is
         Q_WIDTH        : positive := 30;     -- signed Q post-boxcar
         OFFSET_WIDTH   : positive := 24;     -- signed NCO phase_inc_offset
 
+        -- Proportional path:  P = (q >> KP_HI) - (q >> KP_LO).
+        -- Integral path:      I += (q >> KI_HI) + (q >> KI_LO).
+        -- Defaults give Kp = 1/128 - 1/1024 = 7/1024,
+        --              Ki = 1/65536 + 1/131072 = 3/131072
+        -- => f_n ~ 0.76 Hz, ζ ~ 0.71 at 1 kS/s.
+        KP_HI          : positive := 7;
+        KP_LO          : positive := 10;
+        KI_HI          : positive := 16;
+        KI_LO          : positive := 17;
+
         -- Lock detector parameters.
         K_LOCK_SHIFT   : positive := 6;      -- |q| IIR shift; TC = 2^6 * 1 ms = 64 ms
         LOCK_IN_THR    : natural  := 2**24;  -- |q|_iir below this -> lock-eligible
@@ -83,12 +93,20 @@ architecture rtl of dcf77_carrier_pll is
 
     constant ZERO_IS  : signed(ISTATE_W - 1 downto 0)   := (others => '0');
     constant ZERO_OFF : signed(OFFSET_WIDTH - 1 downto 0):= (others => '0');
-    constant ZERO_QU  : unsigned(Q_WIDTH - 1 downto 0)  := (others => '0');
+
+    -- Preset |q|_iir to LOCK_OUT_THR at reset so the IIR starts in the
+    -- "out of band" half of the hysteresis.  Otherwise a cold IIR (=0)
+    -- would satisfy `in_band` immediately and assert lock_state after
+    -- LOCK_HOLD_TICKS without ever seeing real signal.  Real-mode signal
+    -- arrival drives the IIR upward past LOCK_OUT_THR almost instantly,
+    -- so this seed value is overwritten well before any decision.
+    constant Q_IIR_RESET : unsigned(Q_WIDTH - 1 downto 0) :=
+        to_unsigned(LOCK_OUT_THR, Q_WIDTH);
 
     constant R_RESET : reg_type := (
         i_state    => ZERO_IS,
         offset     => ZERO_OFF,
-        q_abs_iir  => ZERO_QU,
+        q_abs_iir  => Q_IIR_RESET,
         lock_state => '0',
         lock_dur   => 0
     );
@@ -150,10 +168,10 @@ begin
 
         if q_valid = '1' then
             -- ----- Loop filter (PI), shift-only gains -----------------
-            q7  := shift_right(q_sample, 7);
-            q10 := shift_right(q_sample, 10);
-            q16 := shift_right(q_sample, 16);
-            q17 := shift_right(q_sample, 17);
+            q7  := shift_right(q_sample, KP_HI);
+            q10 := shift_right(q_sample, KP_LO);
+            q16 := shift_right(q_sample, KI_HI);
+            q17 := shift_right(q_sample, KI_LO);
 
             p_path := q7  - q10;
             i_step := q16 + q17;

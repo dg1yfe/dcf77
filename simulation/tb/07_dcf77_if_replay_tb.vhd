@@ -294,6 +294,18 @@ begin
         generic map (
             Q_WIDTH         => Q_PLL_W,
             OFFSET_WIDTH    => NCO_OFFSET_W,
+            -- Wider loop than dcf77_core's default (~0.76 Hz): the IF
+            -- replay path drives the PLL on a low-amplitude post-
+            -- 1-stage-boxcar Q whose effective phase-detector gain is
+            -- much smaller than the production receiver's; widening
+            -- by 4x lifts the natural frequency to ~3 Hz, fast enough
+            -- to acquire phase on the synthetic recording inside a
+            -- 130 s smoke window without overcorrecting on signals
+            -- with significant noise.
+            KP_HI           => 5,
+            KP_LO           => 8,
+            KI_HI           => 14,
+            KI_LO           => 15,
             K_LOCK_SHIFT    => 6,
             LOCK_IN_THR     => 2**18,
             LOCK_OUT_THR    => 2**21,
@@ -369,10 +381,16 @@ begin
             edge_accepted => open
         );
 
-    bit_v <= bit_v_raw and pll_lock;
-    minute_mk <= mm_raw and pll_lock;
+    -- The IF replay TB doesn't gate bit_det outputs on pll_lock because
+    -- the lock indicator has only soft signal-energy hysteresis and is
+    -- not reliable on weak/noisy recordings.  The bit_det's anchor +
+    -- run-on-mm-candidate recovery is sufficient for downstream
+    -- frame_dec on its own; carrier_pll's role here is purely to drive
+    -- the NCO so abs(I) is amplitude-only.
+    bit_v <= bit_v_raw;
+    minute_mk <= mm_raw;
     bit_val <= bit_val_raw;
-    sync_st <= sync_search when pll_lock = '0' else sync_st_raw;
+    sync_st <= sync_st_raw;
 
     u_frame : entity dcf77.dcf77_frame_dec
         port map (
@@ -394,12 +412,14 @@ begin
         variable prev_sync   : sync_state_t       := sync_search;
         variable prev_time_v : std_logic          := '0';
         variable prev_time   : dcf77_time_type    := DCF77_TIME_RESET;
+        variable bit_count   : natural            := 0;
     begin
         if rising_edge(clk) then
             if rst = '1' then
                 prev_sync   := sync_search;
                 prev_time_v := '0';
                 prev_time   := DCF77_TIME_RESET;
+                bit_count   := 0;
             else
                 if sync_st /= prev_sync then
                     info("sync_state " & sync_state_str(prev_sync)
@@ -410,10 +430,22 @@ begin
 
                 if bit_v = '1' then
                     bits_seen := bits_seen + 1;
+                    bit_count := bit_count + 1;
                     info("bit " & integer'image(bit_ix)
                          & " = " & std_logic'image(bit_val)
                          & " sync=" & sync_state_str(sync_st)
                          & " (#" & integer'image(bits_seen) & ")");
+                    -- Every 30 bits dump the IIR / threshold state.
+                    if bit_count mod 30 = 0 then
+                        info("  diag: env_max=" & integer'image(
+                                to_integer(signed(to_slv(env_max_s))))
+                             & " env_min=" & integer'image(
+                                to_integer(signed(to_slv(env_min_s))))
+                             & " noise=" & integer'image(
+                                to_integer(signed(to_slv(noise_s))))
+                             & " threshold=" & integer'image(
+                                to_integer(signed(to_slv(thresh_s)))));
+                    end if;
                 end if;
 
                 if minute_mk = '1' then
