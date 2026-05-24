@@ -76,7 +76,12 @@ entity dcf77_carrier_pll is
         -- Lock detector hysteresis thresholds on |q_lock_iir|.
         LOCK_IN_THR    : natural  := 2**18;
         LOCK_OUT_THR   : natural  := 2**21;
-        LOCK_HOLD_TICKS: positive := 256
+        -- Sustained-state requirement.  Must be long enough that
+        -- the lock IIR (Tau = 2^LOCK_IIR_SHIFT samples) has actually
+        -- converged: pick LOCK_HOLD_TICKS ≥ 3 * 2^LOCK_IIR_SHIFT to
+        -- require ≥ 3 Tau of in-band evidence before declaring lock.
+        -- Default LOCK_IIR_SHIFT=14 → 3·Tau ≈ 49k samples (~24 s @ 2 kS/s).
+        LOCK_HOLD_TICKS: positive := 49152
     );
     port (
         clk              : in  std_logic;

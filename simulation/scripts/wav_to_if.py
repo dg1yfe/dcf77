@@ -54,39 +54,16 @@ from wav_to_iq import (
 FS_IF_HZ = 12_000          # output rate for the IF replay TB
 
 
-def estimate_residual_hz(iq_bb_1k: np.ndarray) -> float:
-    """Estimate the residual carrier offset in a 1 kS/s baseband I/Q
-    stream by finding the dominant FFT peak.
-
-    wav_to_iq's downconvert mixes by an EXACT 5 kHz, but the recording's
-    actual IF drifts a few Hz; the residual lands as a tone in the
-    1 kS/s baseband.  AM modulation of DCF77 puts most carrier energy
-    into the DC line (= residual offset), so the FFT peak frequency is
-    a robust estimate of the offset.
-
-    Returned value (in Hz) lets the IF replay testbench pre-tune the
-    receiver's NCO to `if_hz + residual_hz`, simulating a receiver that
-    had time to acquire frequency lock before the decode test starts.
-    """
-    n = len(iq_bb_1k)
-    if n < 1024:
-        return 0.0
-    # 65 536 samples at 1 kS/s -> ~15 mHz bin width.  Plenty for the
-    # narrow-band carrier line.
-    seg = iq_bb_1k[: min(n, 65_536)]
-    spec = np.abs(np.fft.fft(seg))
-    freqs = np.fft.fftfreq(len(seg), 1.0 / 1000.0)
-    return float(freqs[int(np.argmax(spec))])
-
-
 def resample_to_if(x: np.ndarray, fs_in: int,
                    fs_out: int = FS_IF_HZ) -> np.ndarray:
     """Rational resample fs_in -> fs_out preserving the WAV's IF position.
 
     The carrier lands at whatever frequency it sits in the WAV
-    (nominally 5 kHz, with a few Hz of drift); the IF replay TB pre-
-    tunes its NCO to the measured effective IF so the carrier-PLL only
-    has to fine-track, not capture.
+    (nominally 5 kHz, with a few Hz of drift).  The IF replay TB's
+    `acquire` test pulls the residual in via the carrier_pll and
+    writes the converged NCO offset to a .if.lock file; the `decode`
+    test reads that file and uses it to seed the NCO, so we don't
+    need a Python-side residual estimate.
     """
     if fs_in == fs_out:
         return x.copy()
@@ -109,19 +86,15 @@ def write_if_meta(path: Path, *,
                   source_wav: str,
                   fs_in_hz: int,
                   if_hz: float,
-                  residual_hz: float,
                   decoded: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     expect_full = 1 if decoded["locked"] else 0
     sig_present = 1 if decoded["signal_present"] else 0
-    effective_if = if_hz + residual_hz
     lines = [
         f"sample_count={sample_count}",
         f"sample_rate_hz={FS_IF_HZ}",
         f"format=int16_le_real",
         f"if_hz={if_hz:g}",
-        f"residual_hz={residual_hz:+.4f}",
-        f"effective_if_hz={effective_if:.4f}",
         f"fs_in_hz={fs_in_hz}",
         f"source_wav={source_wav}",
         f"signal_present={sig_present}",
@@ -156,23 +129,18 @@ def process_wav(wav: Path, if_s16: Path, if_meta: Path, *,
 
     # Plain rational resample to 12 kS/s -- the WAV's carrier stays
     # wherever it sits (nominally 5 kHz).  No reconstruction or
-    # de-rotation: the IF replay decode test pre-tunes the receiver's
-    # NCO to the measured effective IF (simulating a receiver that
-    # has had time to acquire frequency lock), while the pll_lock test
-    # uses the nominal IF to verify the PLL can capture the residual.
+    # Plain rational resample to 12 kS/s -- the WAV's carrier stays
+    # wherever it sits.  The acquire/decode pair handles any residual
+    # offset via the carrier_pll's lock-file handoff (.if.lock).
     x_if = resample_to_if(x_in, fs_in, FS_IF_HZ)
     print(f"  resampled to {FS_IF_HZ} Hz: {len(x_if)} samples "
           f"({len(x_if) / FS_IF_HZ:.2f} s)")
 
-    # Run the wav_to_iq baseband chain for soft-decoded ground truth
-    # AND to extract the residual carrier offset via FFT-peak.
+    # Run the wav_to_iq baseband chain only for the soft-decoded
+    # ground truth that ends up in the meta sidecar.
     x_bb  = downconvert(x_in, fs_in, if_hz)
     x_lpf = lpf(x_bb, fs_in)
     iq    = decimate_to_1k(x_lpf, fs_in)
-    residual_hz = estimate_residual_hz(iq)
-    print(f"  residual carrier offset: {residual_hz:+.4f} Hz "
-          f"-> effective IF {if_hz + residual_hz:.4f} Hz")
-
     decoded = decode_iq(iq)
     print(f"  {summarize(decoded)}")
     maybe_warn_mismatch(decoded, expect_sidecar)
@@ -182,8 +150,7 @@ def process_wav(wav: Path, if_s16: Path, if_meta: Path, *,
     packed.tofile(if_s16)
     write_if_meta(if_meta, sample_count=len(x_if),
                   source_wav=wav.name, fs_in_hz=fs_in,
-                  if_hz=if_hz, residual_hz=residual_hz,
-                  decoded=decoded)
+                  if_hz=if_hz, decoded=decoded)
     print(f"  wrote {if_s16.name} ({if_s16.stat().st_size} B) "
           f"and {if_meta.name}")
 

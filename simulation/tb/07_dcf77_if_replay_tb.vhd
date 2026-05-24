@@ -65,15 +65,24 @@ entity dcf77_if_replay_tb is
         EXPECT_HOUR    : natural := 0;
         EXPECT_MINUTE  : natural := 0;
         EXPECT_DST     : natural := 0;
+        -- Optional file path for PLL-state handoff between the
+        -- `acquire` and `decode` tests.  `acquire` writes the
+        -- converged phase_inc_offset (as a decimal integer on one
+        -- line) at test exit; `decode` reads it at startup and uses
+        -- it to seed the NCO.  When empty, both tests run with the
+        -- NCO at its nominal IF_HZ-derived value.
+        LOCK_FILE      : string  := "";
         -- 125 MHz clock cycles between successive samples.  At 12 kS/s with
         -- CLOCKS_PER_TICK = 8 the simulator runs ~125 MHz / 12 kHz / 8 =
         -- ~1300x faster than real time.
         CLOCKS_PER_TICK : positive := 8;
         -- Maximum simulated wait (in microseconds of simulated time)
-        -- for the carrier_pll to lock during the pll_lock test.  At
+        -- for the carrier_pll to lock during the acquire test.  At
         -- 8 ns/clock × 8 clocks/sample × 12 kS/s = 768 ns per WAV
-        -- sample, 50_000 us = ~65 s of recording-time.
-        PLL_LOCK_TIMEOUT_MS : positive := 50_000
+        -- sample, 100_000 us = ~130 s of recording-time.  Needs to
+        -- be at least 3-4 × LOCK_IIR Tau (= 8.2 s) plus the loop's
+        -- own acquisition transient.
+        PLL_LOCK_TIMEOUT_MS : positive := 100_000
     );
 end entity;
 
@@ -108,6 +117,9 @@ architecture tb of dcf77_if_replay_tb is
     signal sin_sign      : std_logic;
     signal nco_phase_acc : unsigned(NCO_PHASE_W - 1 downto 0);
     signal nco_offset    : signed(NCO_OFFSET_W - 1 downto 0);
+    signal pll_offset    : signed(NCO_OFFSET_W - 1 downto 0);
+    signal seed_offset   : signed(NCO_OFFSET_W - 1 downto 0)
+                         := (others => '0');
 
     signal i_mix : iq_word_t;
     signal q_mix : iq_word_t;
@@ -294,11 +306,32 @@ begin
             rst              => rst,
             q_sample         => q_box,
             q_valid          => q_box_v,
-            phase_inc_offset => nco_offset,
+            phase_inc_offset => pll_offset,
             lock_state       => pll_lock,
             q_filt_out       => pll_qfilt,
             q_lock_out       => pll_qlock
         );
+
+    -- The NCO sees the live PLL output plus a one-shot seed loaded
+    -- from LOCK_FILE at startup (when present).  Saturating add: if
+    -- pll_offset and seed_offset push the same direction they could
+    -- exceed the NCO_OFFSET_W signed range; clip to the limits.
+    nco_offset <=
+        to_signed(2 ** (NCO_OFFSET_W - 1) - 1, NCO_OFFSET_W)
+            when resize(pll_offset, NCO_OFFSET_W + 1)
+               + resize(seed_offset, NCO_OFFSET_W + 1)
+               > to_signed(2 ** (NCO_OFFSET_W - 1) - 1,
+                           NCO_OFFSET_W + 1)
+        else
+        to_signed(-(2 ** (NCO_OFFSET_W - 1)), NCO_OFFSET_W)
+            when resize(pll_offset, NCO_OFFSET_W + 1)
+               + resize(seed_offset, NCO_OFFSET_W + 1)
+               < to_signed(-(2 ** (NCO_OFFSET_W - 1)),
+                           NCO_OFFSET_W + 1)
+        else
+        resize(resize(pll_offset, NCO_OFFSET_W + 1)
+             + resize(seed_offset, NCO_OFFSET_W + 1),
+               NCO_OFFSET_W);
 
     -- ------------------------------------------------------------------ --
     -- bit_det at 2 kS/s.  Defaults match production; mirror dcf77_core.    --
@@ -491,9 +524,47 @@ begin
     end process;
 
     -- ------------------------------------------------------------------ --
+    -- Seed loader: read LOCK_FILE (if any) at startup and load the
+    -- decimal integer into seed_offset.  Missing file or empty
+    -- LOCK_FILE leaves seed_offset at 0 (= acquisition runs from
+    -- nominal NCO).
+    -- ------------------------------------------------------------------ --
+    seed_loader : process
+        file     f      : text;
+        variable status : file_open_status;
+        variable lbuf   : line;
+        variable v      : integer;
+        variable good   : boolean;
+    begin
+        if LOCK_FILE /= "" then
+            file_open(status, f, LOCK_FILE, read_mode);
+            if status = open_ok then
+                readline(f, lbuf);
+                read(lbuf, v, good);
+                if good then
+                    seed_offset <= to_signed(v, NCO_OFFSET_W);
+                    report "seed_loader: loaded "
+                        & integer'image(v) & " from " & LOCK_FILE;
+                else
+                    report "seed_loader: " & LOCK_FILE
+                        & " present but unparseable; seed = 0";
+                end if;
+                file_close(f);
+            else
+                report "seed_loader: " & LOCK_FILE
+                    & " not present; seed = 0";
+            end if;
+        end if;
+        wait;
+    end process;
+
+    -- ------------------------------------------------------------------ --
     -- Test runner                                                          --
     -- ------------------------------------------------------------------ --
     test_runner : process
+        file     lock_f      : text;
+        variable lock_status : file_open_status;
+        variable lock_buf    : line;
     begin
         test_runner_setup(runner, runner_cfg);
 
@@ -506,22 +577,44 @@ begin
         while test_suite loop
 
             -----------------------------------------------------------------
-            if run("pll_lock") then
+            if run("acquire") then
                 -- Verify the carrier_pll captures the WAV's residual
-                -- carrier offset using the nominal NCO setting.  The TB
-                -- generic IF_HZ is held at the nominal 5 kHz for this
-                -- test; if the recording's actual IF drifts by more
-                -- than the loop's capture range the PLL will fail to
-                -- lock and the test fails.
+                -- carrier offset using the nominal NCO setting.  On
+                -- success, write the converged phase_inc_offset to
+                -- LOCK_FILE so the `decode` test can use it as a
+                -- seed.
                 if REPLAY_FILE = "" then
-                    info("no REPLAY_FILE configured, skipping pll_lock");
+                    info("no REPLAY_FILE configured, skipping acquire");
                 else
-                    -- Wait up to PLL_LOCK_TIMEOUT_MS for lock_state to
-                    -- assert, then end the simulation early (no need
-                    -- to feed the rest of the recording).
                     wait until pll_lock = '1' for PLL_LOCK_TIMEOUT_MS * 1 us;
                     if pll_lock = '1' then
-                        info("carrier_pll locked at " & time'image(now));
+                        info("carrier_pll locked at " & time'image(now)
+                             & ", phase_inc_offset = "
+                             & integer'image(to_integer(pll_offset)));
+                        -- Let the PI loop's integral path settle past
+                        -- a few of the slow lock IIR's Tau (~8.2 s).
+                        -- 30 s of recording @ 12 kS/s with
+                        -- CLOCKS_PER_TICK=8 = 23 ms simulated.  By
+                        -- this point the integral state holds the
+                        -- residual-frequency estimate accurately.
+                        wait for 23 ms;
+                        info("after settle: phase_inc_offset = "
+                             & integer'image(to_integer(pll_offset)));
+                        -- Write the converged offset to LOCK_FILE.
+                        if LOCK_FILE /= "" then
+                            file_open(lock_status, lock_f, LOCK_FILE,
+                                      write_mode);
+                            if lock_status = open_ok then
+                                write(lock_buf,
+                                      integer'(to_integer(pll_offset)));
+                                writeline(lock_f, lock_buf);
+                                file_close(lock_f);
+                                info("wrote lock seed to " & LOCK_FILE);
+                            else
+                                info("could not open " & LOCK_FILE
+                                     & " for writing");
+                            end if;
+                        end if;
                     end if;
                     check_equal(pll_lock, '1',
                         "carrier_pll asserts lock_state within "
@@ -530,10 +623,12 @@ begin
 
             -----------------------------------------------------------------
             elsif run("decode") then
-                -- Decode test: NCO is pre-tuned to the measured
-                -- effective IF (= 5 kHz + recorded residual).  The
-                -- carrier PLL only fine-tracks, so this isolates the
-                -- decoder behaviour from PLL acquisition.
+                -- Decode test: NCO starts at IF_HZ-derived nominal,
+                -- with the seed loaded from LOCK_FILE (if present)
+                -- added to the live PLL output.  The seed comes from
+                -- a prior `acquire` run; if missing the decode runs
+                -- with the PLL alone (= acquisition + tracking in
+                -- one go).
                 if REPLAY_FILE = "" or not EXPECT_FULL_FRAME then
                     info("no REPLAY_FILE configured, skipping decode");
                 else
@@ -567,9 +662,9 @@ begin
         wait;
     end process;
 
-    -- ~12 kS/s * 8 clocks/sample * 8 ns/clock = ~125 MHz / 12 kHz = ~10x
-    -- real-time slower than wall clock, so 500 s recording -> ~5 s ws sim
-    -- time -> ~3-5 min wall.  Keep a generous watchdog for full_decode.
-    test_runner_watchdog(runner, 30 sec);
+    -- Watchdog: simulator-time bound.  500 s of recording @ 12 kS/s
+    -- × 8 clocks/sample × 8 ns/clock = 384 ms simulated.  Keep
+    -- generous for `decode` runs.
+    test_runner_watchdog(runner, 2 sec);
 
 end architecture;

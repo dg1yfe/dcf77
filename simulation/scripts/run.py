@@ -209,15 +209,20 @@ def _configure_if_replay_testbench(lib) -> None:
     """Register IF-replay configurations per WAV with .if.s16/.if.meta.
 
     Two tests per WAV:
-      pll_lock -- nominal NCO at 5 kHz, verify the carrier_pll captures
-                  the recording's residual IF offset
-      decode   -- NCO pre-tuned to the measured effective IF (= 5 kHz
-                  + FFT-measured residual), so the PLL only has to
-                  fine-track and the decoder is exercised in isolation
-                  of PLL acquisition.
+      acquire -- NCO at nominal 5 kHz; verify the carrier_pll captures
+                 the recording's residual IF offset.  On lock, writes
+                 the converged phase_inc_offset to <stem>.if.lock.
+      decode  -- NCO still at nominal 5 kHz, but the TB reads the
+                 seed from <stem>.if.lock at startup and adds it to
+                 the live PLL output.  This makes decode independent
+                 of acquisition dynamics (PLL only fine-tracks from
+                 a known-good seed).
 
-    Run `python3 simulation/scripts/wav_to_if.py --all` to populate the
-    .if.s16/.if.meta artefacts after dropping WAVs into samples/.
+    Test names are alphabetically ordered so `acquire` runs before
+    `decode` -- VUnit walks configs that way by default.
+
+    Run `python3 simulation/scripts/wav_to_if.py --all` to populate
+    the .if.s16/.if.meta artefacts after dropping WAVs into samples/.
     """
     try:
         tb = lib.test_bench("dcf77_if_replay_tb")
@@ -234,6 +239,7 @@ def _configure_if_replay_testbench(lib) -> None:
         stem = wav.stem
         if_s16  = DERIVED_DIR / f"{stem}.if.s16"
         if_meta = DERIVED_DIR / f"{stem}.if.meta"
+        if_lock = DERIVED_DIR / f"{stem}.if.lock"
         if not (if_s16.exists() and if_meta.exists()):
             print(f"[if-replay] {wav.name}: no derived/.if.s16/.if.meta -- "
                   f"run `python3 simulation/scripts/wav_to_if.py --all`")
@@ -242,10 +248,6 @@ def _configure_if_replay_testbench(lib) -> None:
         kv      = _read_meta(if_meta)
         rate    = int(kv.get("sample_rate_hz", 12000))
         if_hz   = int(float(kv.get("if_hz", 5000)))
-        eff_if  = float(kv.get("effective_if_hz", if_hz))
-        # Round to nearest Hz for the integer IF_HZ generic.  Sub-Hz
-        # residuals are within the carrier_pll's tracking range.
-        eff_if_int = int(round(eff_if))
         samples = int(kv["sample_count"])
         has_exp = int(kv.get("expect_full_decode", 0)) == 1
 
@@ -253,6 +255,8 @@ def _configure_if_replay_testbench(lib) -> None:
             REPLAY_FILE    = str(if_s16),
             SAMPLE_COUNT   = samples,
             SAMPLE_RATE_HZ = rate,
+            IF_HZ          = if_hz,
+            LOCK_FILE      = str(if_lock),
             EXPECT_YEAR    = int(kv.get("year",    0)),
             EXPECT_MONTH   = int(kv.get("month",   0)),
             EXPECT_DAY     = int(kv.get("day",     0)),
@@ -262,20 +266,17 @@ def _configure_if_replay_testbench(lib) -> None:
             EXPECT_DST     = int(kv.get("dst_active", 0)),
         )
 
-        # pll_lock test: nominal NCO at 5 kHz.  Feeds at most 130 s of
-        # recording, but the TB ends early once lock asserts (or
-        # PLL_LOCK_TIMEOUT_MS expires, whichever comes first).
-        pll_cfg = dict(common,
-                       IF_HZ                  = if_hz,
+        # acquire: feeds up to 130 s of recording but ends early once
+        # lock_state asserts.  Writes the converged offset to LOCK_FILE.
+        acq_cfg = dict(common,
                        MAX_SAMPLES            = 130 * rate,
                        EXPECT_FULL_FRAME      = False,
                        EXPECT_VALIDATE_TIME   = False,
                        EXPECT_DECODE_PROGRESS = has_exp)
-        tb.test("pll_lock").add_config(name=stem, generics=pll_cfg)
+        tb.test("acquire").add_config(name=stem, generics=acq_cfg)
 
         if has_exp and want_full:
             dec_cfg = dict(common,
-                           IF_HZ                = eff_if_int,
                            MAX_SAMPLES          = 0,
                            EXPECT_FULL_FRAME    = True,
                            EXPECT_VALIDATE_TIME = True)
