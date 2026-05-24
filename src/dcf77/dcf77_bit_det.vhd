@@ -163,6 +163,12 @@ architecture rtl of dcf77_bit_det is
         -- re-anchors at the (presumably) correct bit boundary.
         cand_run_on  : natural range 0 to 7;
 
+        -- Warm-up counter: mm-candidate evaluation is suppressed for
+        -- the first few cycles after anchoring so iir_high (which is
+        -- the reference for mm_thr) can settle to a meaningful value.
+        -- Cleared on every cold/give-up anchor reset.
+        warmup_cnt : natural range 0 to 15;
+
         -- sync_q saturating "seconds anchored" counter.
         sync_q : natural range 0 to SYNC_Q_MAX;
 
@@ -203,6 +209,7 @@ architecture rtl of dcf77_bit_det is
         have_anchor     => '0',
         give_up_cnt     => 0,
         cand_run_on     => 0,
+        warmup_cnt      => 0,
         sync_q          => 0,
         acc_W1          => ZERO_ACC10,
         acc_W2          => ZERO_ACC10,
@@ -407,6 +414,7 @@ begin
             if amp_ok = '1' and r.have_anchor = '0' then
                 v.have_anchor   := '1';
                 v.give_up_cnt   := 0;
+                v.warmup_cnt    := 0;
                 current_bin     := 0;
                 v.sample_in_bit := 1;
                 v.acc_W1        := ZERO_ACC10;
@@ -441,6 +449,7 @@ begin
             if v.give_up_cnt = GIVE_UP_TICKS then
                 v.have_anchor   := '0';
                 v.give_up_cnt   := 0;
+                v.warmup_cnt    := 0;
                 v.sample_in_bit := 0;
                 v.acc_W1        := ZERO_ACC10;
                 v.acc_W2        := ZERO_ACC10;
@@ -488,22 +497,36 @@ begin
                                  fixed_saturate, fixed_truncate);
                 v.threshold_o := th_new;
 
-                -- mm-candidate threshold = 7 * env_max in 10-sample scale.
-                -- 7 = 4 + 2 + 1 = (em<<2) + (em<<1) + em.
-                em_acc := resize(r.env_max,
-                                 acc10_t'high, acc10_t'low,
-                                 fixed_saturate, fixed_truncate);
-                em_x4  := resize(shift_left(em_acc, 2),
-                                 acc10_t'high, acc10_t'low,
-                                 fixed_saturate, fixed_truncate);
-                em_x2  := resize(shift_left(em_acc, 1),
+                -- mm-candidate threshold ~= 0.6875 * iir_high.  iir_high
+                -- tracks acc_W3 / 8 = (W3_END - W2_END) / 8 envelope
+                -- samples; with the W1/W2/W3 ratio kept across rates
+                -- (W1_END * 8 = W3_END - W2_END) this equals one W1
+                -- window of pure carrier.  Old "7 * env_max" worked at
+                -- W1_END=10 because iir_high happened to track 10*env_max;
+                -- expressing the threshold as a fraction of iir_high makes
+                -- it rate-agnostic.
+                em_x4 := resize(shift_right(r.iir_high, 1),
+                                acc10_t'high, acc10_t'low,
+                                fixed_saturate, fixed_truncate);
+                em_x2 := resize(shift_right(r.iir_high, 3),
+                                acc10_t'high, acc10_t'low,
+                                fixed_saturate, fixed_truncate);
+                em_acc := resize(shift_right(r.iir_high, 4),
                                  acc10_t'high, acc10_t'low,
                                  fixed_saturate, fixed_truncate);
                 mm_thr := resize(em_x4 + em_x2 + em_acc,
                                  acc10_t'high, acc10_t'low,
                                  fixed_saturate, fixed_truncate);
+                -- Warm-up counter: bump once per end_of_bit until
+                -- iir_high has had time to converge.  Until then, the
+                -- mm-candidate threshold (a fraction of iir_high) is
+                -- too small and would trigger on bit-cycle W1 dips.
+                if r.warmup_cnt < 15 then
+                    v.warmup_cnt := r.warmup_cnt + 1;
+                end if;
+
                 candidate := '0';
-                if v.acc_W1 > mm_thr then
+                if r.warmup_cnt >= 8 and v.acc_W1 > mm_thr then
                     candidate := '1';
                 end if;
 
