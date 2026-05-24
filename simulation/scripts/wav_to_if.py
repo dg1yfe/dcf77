@@ -63,53 +63,40 @@ def estimate_residual_hz(iq_bb_1k: np.ndarray) -> float:
     1 kS/s baseband.  AM modulation of DCF77 puts most carrier energy
     into the DC line (= residual offset), so the FFT peak frequency is
     a robust estimate of the offset.
+
+    Returned value (in Hz) lets the IF replay testbench pre-tune the
+    receiver's NCO to `if_hz + residual_hz`, simulating a receiver that
+    had time to acquire frequency lock before the decode test starts.
     """
     n = len(iq_bb_1k)
     if n < 1024:
         return 0.0
-    # Use a long-enough segment for sub-Hz resolution at 1 kS/s.
-    # 32 768 samples -> ~30 mHz bin width.
+    # 65 536 samples at 1 kS/s -> ~15 mHz bin width.  Plenty for the
+    # narrow-band carrier line.
     seg = iq_bb_1k[: min(n, 65_536)]
     spec = np.abs(np.fft.fft(seg))
     freqs = np.fft.fftfreq(len(seg), 1.0 / 1000.0)
     return float(freqs[int(np.argmax(spec))])
 
 
-def reconstruct_real_if(iq_bb_1k: np.ndarray,
-                        if_hz: float,
-                        fs_out: int = FS_IF_HZ) -> tuple[np.ndarray, float]:
-    """Re-modulate the 1 kS/s baseband I/Q onto a real-valued fs_out stream
-    with the carrier landing at exactly `if_hz` Hz.
+def resample_to_if(x: np.ndarray, fs_in: int,
+                   fs_out: int = FS_IF_HZ) -> np.ndarray:
+    """Rational resample fs_in -> fs_out preserving the WAV's IF position.
 
-    Two-step process:
-      1. Estimate the residual carrier offset in the baseband I/Q (the
-         recording's actual IF differs from wav_to_iq's nominal 5 kHz by
-         a few Hz of drift; that residual survives the downconvert).
-      2. De-rotate the I/Q by -residual to put the carrier exactly at
-         DC, then upsample to fs_out and multiply by exp(j*2π*if_hz*t).
-         Taking the real part yields a real-valued IF stream where the
-         carrier lands at EXACTLY `if_hz` Hz so the narrow-bandwidth
-         carrier PLL (~ 0.76 Hz BW) doesn't need multi-Hz capture range.
-
-    Returns (real_if_samples, estimated_residual_hz).
+    The carrier lands at whatever frequency it sits in the WAV
+    (nominally 5 kHz, with a few Hz of drift); the IF replay TB pre-
+    tunes its NCO to the measured effective IF so the carrier-PLL only
+    has to fine-track, not capture.
     """
-    if fs_out % 1000 != 0:
-        raise ValueError(f"fs_out={fs_out} must be a multiple of 1000 Hz")
-
-    residual_hz = estimate_residual_hz(iq_bb_1k)
-
-    # De-rotate to bring residual to exactly 0 Hz.
-    t_bb = np.arange(len(iq_bb_1k), dtype=np.float64) / 1000.0
-    iq_corrected = iq_bb_1k * np.exp(-1j * 2.0 * math.pi * residual_hz * t_bb)
-
-    # Upsample to fs_out (complex baseband stays in [-Nyquist_in/2, +N/2]).
-    up = fs_out // 1000
-    iq_up = resample_poly(iq_corrected, up=up, down=1)
-
-    # Up-mix to put the now-DC carrier back at if_hz.
-    t = np.arange(len(iq_up), dtype=np.float64) / fs_out
-    lo = np.exp(1j * 2.0 * math.pi * if_hz * t)
-    return (iq_up * lo).real, residual_hz
+    if fs_in == fs_out:
+        return x.copy()
+    ratio = Fraction(fs_out, fs_in).limit_denominator(1024)
+    up, dn = ratio.numerator, ratio.denominator
+    if up * fs_in != dn * fs_out:
+        print(f"  WARNING: rational approx {up}/{dn} != {fs_out}/{fs_in} "
+              f"exactly; effective rate "
+              f"{up * fs_in / dn:.3f} Hz")
+    return resample_poly(x, up=up, down=dn)
 
 
 def to_int16_real(x: np.ndarray) -> np.ndarray:
@@ -122,15 +109,19 @@ def write_if_meta(path: Path, *,
                   source_wav: str,
                   fs_in_hz: int,
                   if_hz: float,
+                  residual_hz: float,
                   decoded: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     expect_full = 1 if decoded["locked"] else 0
     sig_present = 1 if decoded["signal_present"] else 0
+    effective_if = if_hz + residual_hz
     lines = [
         f"sample_count={sample_count}",
         f"sample_rate_hz={FS_IF_HZ}",
         f"format=int16_le_real",
         f"if_hz={if_hz:g}",
+        f"residual_hz={residual_hz:+.4f}",
+        f"effective_if_hz={effective_if:.4f}",
         f"fs_in_hz={fs_in_hz}",
         f"source_wav={source_wav}",
         f"signal_present={sig_present}",
@@ -163,31 +154,36 @@ def process_wav(wav: Path, if_s16: Path, if_meta: Path, *,
     if fs_in < 2 * if_hz:
         raise ValueError(f"fs_in={fs_in} below Nyquist for IF={if_hz}")
 
-    # Re-use the wav_to_iq baseband path (downconvert -> LPF -> decim to
-    # 1 kS/s) so we share its carrier alignment with the soft decoder.
+    # Plain rational resample to 12 kS/s -- the WAV's carrier stays
+    # wherever it sits (nominally 5 kHz).  No reconstruction or
+    # de-rotation: the IF replay decode test pre-tunes the receiver's
+    # NCO to the measured effective IF (simulating a receiver that
+    # has had time to acquire frequency lock), while the pll_lock test
+    # uses the nominal IF to verify the PLL can capture the residual.
+    x_if = resample_to_if(x_in, fs_in, FS_IF_HZ)
+    print(f"  resampled to {FS_IF_HZ} Hz: {len(x_if)} samples "
+          f"({len(x_if) / FS_IF_HZ:.2f} s)")
+
+    # Run the wav_to_iq baseband chain for soft-decoded ground truth
+    # AND to extract the residual carrier offset via FFT-peak.
     x_bb  = downconvert(x_in, fs_in, if_hz)
     x_lpf = lpf(x_bb, fs_in)
     iq    = decimate_to_1k(x_lpf, fs_in)
+    residual_hz = estimate_residual_hz(iq)
+    print(f"  residual carrier offset: {residual_hz:+.4f} Hz "
+          f"-> effective IF {if_hz + residual_hz:.4f} Hz")
 
     decoded = decode_iq(iq)
     print(f"  {summarize(decoded)}")
     maybe_warn_mismatch(decoded, expect_sidecar)
-
-    # Re-modulate to FS_IF_HZ so DCF77 sits at EXACTLY if_hz.  This
-    # cancels any residual carrier offset that drifted out of the
-    # wav_to_iq downconvert -- the IF replay TB's narrow-bandwidth
-    # carrier PLL would otherwise be unable to capture multi-Hz drift.
-    x_if, residual_hz = reconstruct_real_if(iq, if_hz, FS_IF_HZ)
-    print(f"  reconstructed at {FS_IF_HZ} Hz, IF={if_hz:g} Hz "
-          f"(residual {residual_hz:+.3f} Hz): "
-          f"{len(x_if)} samples ({len(x_if) / FS_IF_HZ:.2f} s)")
 
     packed = to_int16_real(x_if)
     if_s16.parent.mkdir(parents=True, exist_ok=True)
     packed.tofile(if_s16)
     write_if_meta(if_meta, sample_count=len(x_if),
                   source_wav=wav.name, fs_in_hz=fs_in,
-                  if_hz=if_hz, decoded=decoded)
+                  if_hz=if_hz, residual_hz=residual_hz,
+                  decoded=decoded)
     print(f"  wrote {if_s16.name} ({if_s16.stat().st_size} B) "
           f"and {if_meta.name}")
 

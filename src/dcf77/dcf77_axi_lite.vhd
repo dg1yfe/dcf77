@@ -26,16 +26,17 @@ use work.axi4lite_interface_pkg.all;
 
 entity dcf77_axi_lite is
     generic (
-        -- Forward the bit_det timing into the embedded core so the host can
-        -- override them at integration time for fast simulation.  Defaults
-        -- match the real 100 S/s envelope tick rate (post-CIC_ENV).
-        K_ATK         : positive := 3;
-        K_DEC         : positive := 9;
-        K_NOISE       : positive := 9;
-        DERIV_DELAY   : positive := 2;
+        -- Forward the bit_det timing into the embedded core so the host
+        -- can override them at integration time for fast simulation.
+        -- Defaults match the production 2 kS/s envelope tick rate (post-
+        -- boxcar + 20 Hz IIR), not the legacy 100 S/s defaults.
+        K_ATK         : positive := 8;
+        K_DEC         : positive := 14;
+        K_NOISE       : positive := 14;
+        DERIV_DELAY   : positive := 16;
         K_SLOPE       : positive := 2;
         K_REF         : positive := 2;
-        SAMPLE_RATE_HZ: positive := 100;
+        SAMPLE_RATE_HZ: positive := 2000;
         T_HOLD_SEC    : positive := 120;
         T_SEARCH_SEC  : positive := 300;
         NCO_PHASE_INCR: natural  := 10_399_018
@@ -94,7 +95,6 @@ architecture rtl of dcf77_axi_lite is
     -- Core <-> AXI signals.
     signal control     : dcf77_control_type;
     signal status      : dcf77_status_type;
-    signal core_iq_tap : dcf77_iq_tap_type;
 
     -- Combined active-high reset for the core: external !aresetn OR the
     -- host-controllable soft_reset bit.
@@ -197,8 +197,7 @@ begin
             rst        => core_rst,
             in_sample  => adc_sample,
             in_valid   => core_valid,
-            status_out => status,
-            iq_tap_out => core_iq_tap
+            status_out => status
         );
 
 end architecture rtl;

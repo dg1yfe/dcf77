@@ -1,20 +1,19 @@
 -- =========================================================================
--- dcf77_q_boxcar.vhd
+-- dcf77_boxcar.vhd
 --
--- 1-stage CIC / running boxcar on the mixer Q output.  Accumulates `RATE`
--- consecutive in_valid samples then emits the sum (signed) at 1 / RATE the
--- input rate and clears the accumulator.  Equivalent to dcf77_cic_dec with
--- N=1, M=1, DEC_R=RATE, output width = IN_WIDTH + ceil(log2(RATE)) bits.
+-- 1-stage CIC / running boxcar accumulator with decimation.  Sums `RATE`
+-- consecutive in_valid samples then emits the sum (signed) at 1 / RATE
+-- the input rate and clears the accumulator.  Equivalent to
+-- `dcf77_cic_dec` with N=1, M=1, DEC_R=RATE; output width =
+-- IN_WIDTH + ceil(log2(RATE)) bits.
 --
--- Used by the carrier-tracking PLL to bring the 22-b signed Q post-mixer
--- sample from 250 kS/s down to 1 kS/s with a single gentle low-pass that's
--- "good enough" for the small-angle Q phase detector inside the PLL: the
--- bandwidth of the boxcar (~ first null at fs/RATE = 1 kHz) is far above
--- the PLL's ~1 Hz loop bandwidth, so any aliased high-frequency noise is
--- attenuated by the PLL itself.
+-- Used twice in dcf77_core (one I, one Q) with RATE=125 to bring the
+-- 22-b post-mixer signals from 250 kS/s down to 2 kS/s.  The first-null
+-- of the boxcar lands at fs/RATE = 2 kHz; out-of-band rejection comes
+-- from the dcf77_iir_lpf (or PLL) downstream.
 --
--- For IN_WIDTH = 22 (= iq_word_t) and RATE = 250 the accumulator needs
--- 22 + ceil(log2(250)) = 22 + 8 = 30 b.
+-- For IN_WIDTH=22 and RATE=125 the accumulator needs
+-- 22 + ceil(log2(125)) = 22 + 7 = 29 b.
 -- =========================================================================
 
 library ieee;
@@ -23,11 +22,11 @@ use ieee.numeric_std.all;
 use ieee.fixed_float_types.all;
 use ieee.fixed_pkg.all;
 
-entity dcf77_q_boxcar is
+entity dcf77_boxcar is
     generic (
         IN_WIDTH  : positive := 22;
-        RATE      : positive := 250;
-        OUT_WIDTH : positive := 30          -- IN_WIDTH + ceil(log2(RATE))
+        RATE      : positive := 125;
+        OUT_WIDTH : positive := 29          -- IN_WIDTH + ceil(log2(RATE))
     );
     port (
         clk        : in  std_logic;
@@ -39,9 +38,9 @@ entity dcf77_q_boxcar is
         out_sample : out signed(OUT_WIDTH - 1 downto 0);
         out_valid  : out std_logic
     );
-end entity dcf77_q_boxcar;
+end entity dcf77_boxcar;
 
-architecture rtl of dcf77_q_boxcar is
+architecture rtl of dcf77_boxcar is
 
     function clog2(n : positive) return natural is
         variable acc : natural := 0;

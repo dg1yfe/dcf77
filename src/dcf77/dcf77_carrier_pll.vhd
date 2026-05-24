@@ -1,41 +1,52 @@
 -- =========================================================================
 -- dcf77_carrier_pll.vhd
 --
--- Carrier-tracking 2nd-order PI PLL.  Operates on the boxcar-decimated Q
--- channel post-mixer (1 kS/s, signed); produces a signed phase-increment
--- offset that the upstream NCO adds to its nominal step, plus a lock-state
--- indicator the receiver uses to gate downstream bit outputs.
+-- Carrier-tracking 2nd-order PI PLL.  Reads the post-boxcar Q sample
+-- (signed) and produces a signed phase-increment offset that the
+-- upstream NCO adds to its nominal step, plus a lock-state indicator
+-- the receiver uses to gate downstream bit outputs.
 --
 -- Phase detector
 -- --------------
 -- Under small-angle approximation `sin(phi) ~= phi`, the Q sample after
--- the mixer carries the residual carrier-phase error scaled by the I-side
--- amplitude: `q ~= A * phi`.  Driving q -> 0 locks the LO to the carrier.
+-- the mixer carries the residual carrier-phase error scaled by the
+-- I-side amplitude: `q ~= A * phi`.  Driving q -> 0 locks the LO to
+-- the carrier.
+--
+-- Signal chain inside the PLL
+-- ---------------------------
+--   q_sample ─► loop_iir (1st-order IIR, SHIFT=LOOP_IIR_SHIFT, ~20 Hz)
+--                    │
+--                    ▼  q_filt
+--                  PI loop filter  ─►  phase_inc_offset
+--                    │
+--                    ▼
+--                lock_iir (1st-order IIR, SHIFT=LOCK_IIR_SHIFT, ~8 s)
+--                    │
+--                    ▼  q_lock
+--                |q_lock| compared to LOCK_IN_THR / LOCK_OUT_THR with
+--                LOCK_HOLD_TICKS hysteresis -> lock_state
+--
+-- The pre-loop IIR is also the noise filter for the PI loop (effective
+-- 3rd-order overall).  The slow lock IIR sees the same filtered phase
+-- error and decides lock based on whether the long-term mean is small.
 --
 -- Loop filter (shift-only, no multipliers)
 -- ----------------------------------------
--- Sample rate fs = 1 kS/s, target bandwidth ~0.77 Hz, damping ~0.71:
---   Kp = 1/128 - 1/1024 = 7/1024  ~= 0.00684
---   Ki = 1/65536 + 1/131072 = 3/131072  ~= 0.0000229   (~ 1/50_700)
+-- Sample rate fs = 2 kS/s (default), tracking f_n ≈ 55 mHz:
 --
---   P     = (q >> 7) - (q >> 10)         -- proportional path
---   i_step= (q >> 16) + (q >> 17)        -- integral increment
---   i_state += i_step                    -- bounded by saturation
---   phase_inc_offset = sat( P + i_state )
+--   alpha = 2^-KP_SHIFT     (Kp,  proportional gain)
+--   beta  = 2^-KI_SHIFT     (Ki,  integral gain)
 --
--- Equivalent continuous-time natural frequency f_n = sqrt(Ki*fs^2)/(2pi)
--- ~= 0.76 Hz; well below the boxcar's first null at 1 kHz and well above
--- DCF77's bit-rate frequencies.
+--   P      = q_filt >> KP_SHIFT
+--   i_step = q_filt >> KI_SHIFT
+--   i_state += i_step                        (24+4-bit headroom)
+--   phase_inc_offset = sat( P + i_state )    (saturate to OFFSET_WIDTH)
 --
--- Lock detector
--- -------------
--- |q| is fed into a 1st-order IIR (right-shift K_LOCK_SHIFT) and compared
--- against two hysteretic thresholds.  Below LOCK_IN_THR for at least
--- LOCK_HOLD_TICKS consecutive q_valid pulses -> lock_state asserts.
--- Above LOCK_OUT_THR for the same duration -> de-asserts.  Thresholds
--- are absolute (q is in iq_word_t * RATE scale = ~2^29 range), pick them
--- as a fraction of the expected post-lock noise floor for the deployment
--- carrier amplitude.
+-- Acquisition vs tracking: while ever_locked='0', the loop uses the
+-- wider *_ACQ shift values (faster, captures phase quickly); once the
+-- loop has locked at least once the ever_locked latch holds and the
+-- narrower tracking shifts dominate.
 -- =========================================================================
 
 library ieee;
@@ -44,24 +55,28 @@ use ieee.numeric_std.all;
 
 entity dcf77_carrier_pll is
     generic (
-        Q_WIDTH        : positive := 30;     -- signed Q post-boxcar
+        Q_WIDTH        : positive := 29;     -- signed Q post-boxcar
         OFFSET_WIDTH   : positive := 24;     -- signed NCO phase_inc_offset
 
-        -- Proportional path:  P = (q >> KP_HI) - (q >> KP_LO).
-        -- Integral path:      I += (q >> KI_HI) + (q >> KI_LO).
-        -- Defaults give Kp = 1/128 - 1/1024 = 7/1024,
-        --              Ki = 1/65536 + 1/131072 = 3/131072
-        -- => f_n ~ 0.76 Hz, ζ ~ 0.71 at 1 kS/s.
-        KP_HI          : positive := 7;
-        KP_LO          : positive := 10;
-        KI_HI          : positive := 16;
-        KI_LO          : positive := 17;
+        -- Tracking PI gains:  alpha = 2^-KP_SHIFT, beta = 2^-KI_SHIFT.
+        -- Defaults at 2 kS/s give f_n ≈ 55 mHz, dominant proportional
+        -- term (very overdamped).
+        KP_SHIFT       : positive := 7;       -- tracking alpha = 2^-7
+        KI_SHIFT       : positive := 25;      -- tracking beta  = 2^-25
 
-        -- Lock detector parameters.
-        K_LOCK_SHIFT   : positive := 6;      -- |q| IIR shift; TC = 2^6 * 1 ms = 64 ms
-        LOCK_IN_THR    : natural  := 2**24;  -- |q|_iir below this -> lock-eligible
-        LOCK_OUT_THR   : natural  := 2**26;  -- |q|_iir above this -> unlock-eligible
-        LOCK_HOLD_TICKS: positive := 256     -- consecutive in/out-of-band ticks
+        -- Acquisition PI gains (used until ever_locked latches).
+        KP_SHIFT_ACQ   : positive := 5;       -- acquisition alpha = 2^-5
+        KI_SHIFT_ACQ   : positive := 14;      -- acquisition beta  = 2^-14
+
+        -- Pre-loop IIR low-pass (cutoff ≈ fs / (2π · 2^SHIFT)).
+        LOOP_IIR_SHIFT : positive := 4;       -- ~ 20 Hz @ 2 kS/s
+        -- Slow IIR for lock detection (Tau = 2^SHIFT / fs seconds).
+        LOCK_IIR_SHIFT : positive := 14;      -- ~ 8.2 s @ 2 kS/s
+
+        -- Lock detector hysteresis thresholds on |q_lock_iir|.
+        LOCK_IN_THR    : natural  := 2**18;
+        LOCK_OUT_THR   : natural  := 2**21;
+        LOCK_HOLD_TICKS: positive := 256
     );
     port (
         clk              : in  std_logic;
@@ -73,47 +88,52 @@ entity dcf77_carrier_pll is
         phase_inc_offset : out signed(OFFSET_WIDTH - 1 downto 0);
         lock_state       : out std_logic;
 
-        -- Diagnostic: filtered |q|, expose top bits for AXI status if
-        -- useful.  Drive `open` when not needed.
-        q_iir_out        : out unsigned(Q_WIDTH - 1 downto 0)
+        -- Diagnostic outputs.
+        q_filt_out       : out signed(Q_WIDTH - 1 downto 0);
+        q_lock_out       : out signed(Q_WIDTH - 1 downto 0)
     );
 end entity dcf77_carrier_pll;
 
 architecture rtl of dcf77_carrier_pll is
 
-    constant ISTATE_W : positive := OFFSET_WIDTH + 4;     -- headroom over OFFSET_WIDTH
+    constant ISTATE_W : positive := OFFSET_WIDTH + 4;   -- headroom over OFFSET_WIDTH
 
     type reg_type is record
+        q_loop_iir   : signed(Q_WIDTH - 1 downto 0);
+        q_lock_iir   : signed(Q_WIDTH - 1 downto 0);
         i_state      : signed(ISTATE_W - 1 downto 0);
         offset       : signed(OFFSET_WIDTH - 1 downto 0);
-        q_abs_iir    : unsigned(Q_WIDTH - 1 downto 0);
         lock_state   : std_logic;
+        ever_locked  : std_logic;
         lock_dur     : natural range 0 to LOCK_HOLD_TICKS;
     end record;
 
-    constant ZERO_IS  : signed(ISTATE_W - 1 downto 0)   := (others => '0');
-    constant ZERO_OFF : signed(OFFSET_WIDTH - 1 downto 0):= (others => '0');
+    constant ZERO_IS : signed(ISTATE_W - 1 downto 0)     := (others => '0');
+    constant ZERO_OFF: signed(OFFSET_WIDTH - 1 downto 0) := (others => '0');
+    constant ZERO_Q  : signed(Q_WIDTH - 1 downto 0)      := (others => '0');
 
-    -- Preset |q|_iir to LOCK_OUT_THR at reset so the IIR starts in the
-    -- "out of band" half of the hysteresis.  Otherwise a cold IIR (=0)
-    -- would satisfy `in_band` immediately and assert lock_state after
-    -- LOCK_HOLD_TICKS without ever seeing real signal.  Real-mode signal
-    -- arrival drives the IIR upward past LOCK_OUT_THR almost instantly,
-    -- so this seed value is overwritten well before any decision.
-    constant Q_IIR_RESET : unsigned(Q_WIDTH - 1 downto 0) :=
-        to_unsigned(LOCK_OUT_THR, Q_WIDTH);
+    -- Seed the slow lock IIR at LOCK_OUT_THR so a cold start doesn't
+    -- satisfy `in_band` immediately and false-lock.  Real signal pushes
+    -- the IIR off this seed within one TC.
+    function lock_iir_reset return signed is
+        variable v : signed(Q_WIDTH - 1 downto 0);
+    begin
+        v := to_signed(LOCK_OUT_THR, Q_WIDTH);
+        return v;
+    end function;
 
     constant R_RESET : reg_type := (
-        i_state    => ZERO_IS,
-        offset     => ZERO_OFF,
-        q_abs_iir  => Q_IIR_RESET,
-        lock_state => '0',
-        lock_dur   => 0
+        q_loop_iir  => ZERO_Q,
+        q_lock_iir  => lock_iir_reset,
+        i_state     => ZERO_IS,
+        offset      => ZERO_OFF,
+        lock_state  => '0',
+        ever_locked => '0',
+        lock_dur    => 0
     );
 
     signal r, rin : reg_type;
 
-    -- Saturate an arbitrary signed `x` into OFFSET_WIDTH bits.
     function sat_offset(x : signed) return signed is
         constant W   : natural := OFFSET_WIDTH;
         variable hi  : signed(W - 1 downto 0);
@@ -142,75 +162,91 @@ architecture rtl of dcf77_carrier_pll is
         return xs(W - 1 downto 0);
     end function;
 
+    function abs_signed(x : signed) return unsigned is
+    begin
+        if x(x'high) = '1' then
+            return unsigned(-x);
+        else
+            return unsigned(x);
+        end if;
+    end function;
+
 begin
 
     phase_inc_offset <= r.offset;
     lock_state       <= r.lock_state;
-    q_iir_out        <= r.q_abs_iir;
+    q_filt_out       <= r.q_loop_iir;
+    q_lock_out       <= r.q_lock_iir;
 
     comb : process (all)
-        variable v        : reg_type;
-        variable p_path   : signed(Q_WIDTH - 1 downto 0);
-        variable i_step   : signed(Q_WIDTH - 1 downto 0);
-        variable q7       : signed(Q_WIDTH - 1 downto 0);
-        variable q10      : signed(Q_WIDTH - 1 downto 0);
-        variable q16      : signed(Q_WIDTH - 1 downto 0);
-        variable q17      : signed(Q_WIDTH - 1 downto 0);
-        variable sum_ext  : signed(ISTATE_W - 1 downto 0);
-        variable q_abs    : unsigned(Q_WIDTH - 1 downto 0);
-        variable abs_delta: signed(Q_WIDTH downto 0);
-        variable iir_step : signed(Q_WIDTH downto 0);
-        variable new_iir  : signed(Q_WIDTH downto 0);
-        variable in_band  : boolean;
-        variable out_band : boolean;
+        variable v          : reg_type;
+
+        -- IIR scratch (one extra bit for the diff).
+        variable loop_diff  : signed(Q_WIDTH downto 0);
+        variable loop_step  : signed(Q_WIDTH downto 0);
+        variable loop_new   : signed(Q_WIDTH downto 0);
+
+        variable lock_diff  : signed(Q_WIDTH downto 0);
+        variable lock_step  : signed(Q_WIDTH downto 0);
+        variable lock_new   : signed(Q_WIDTH downto 0);
+
+        -- PI loop scratch.
+        variable kp_shift   : positive;
+        variable ki_shift   : positive;
+        variable p_path     : signed(Q_WIDTH - 1 downto 0);
+        variable i_step     : signed(Q_WIDTH - 1 downto 0);
+        variable sum_ext    : signed(ISTATE_W - 1 downto 0);
+
+        -- Lock detector scratch.
+        variable q_lock_abs : unsigned(Q_WIDTH - 1 downto 0);
+        variable in_band    : boolean;
+        variable out_band   : boolean;
     begin
         v := r;
 
         if q_valid = '1' then
-            -- ----- Loop filter (PI), shift-only gains -----------------
-            q7  := shift_right(q_sample, KP_HI);
-            q10 := shift_right(q_sample, KP_LO);
-            q16 := shift_right(q_sample, KI_HI);
-            q17 := shift_right(q_sample, KI_LO);
 
-            p_path := q7  - q10;
-            i_step := q16 + q17;
+            -- ===== Pre-loop IIR (20 Hz LPF on q_sample) =================
+            loop_diff := resize(q_sample, Q_WIDTH + 1)
+                       - resize(r.q_loop_iir, Q_WIDTH + 1);
+            loop_step := shift_right(loop_diff, LOOP_IIR_SHIFT);
+            loop_new  := resize(r.q_loop_iir, Q_WIDTH + 1) + loop_step;
+            v.q_loop_iir := resize(loop_new, Q_WIDTH);
 
-            -- Integral accumulator with headroom; saturate when
-            -- collapsing to OFFSET_WIDTH.
+            -- ===== PI loop filter (shift-only) ==========================
+            -- ever_locked latches narrow tracking gains after first lock.
+            if r.ever_locked = '0' then
+                kp_shift := KP_SHIFT_ACQ;
+                ki_shift := KI_SHIFT_ACQ;
+            else
+                kp_shift := KP_SHIFT;
+                ki_shift := KI_SHIFT;
+            end if;
+            p_path := shift_right(v.q_loop_iir, kp_shift);
+            i_step := shift_right(v.q_loop_iir, ki_shift);
+
             v.i_state := r.i_state + resize(i_step, ISTATE_W);
             sum_ext   := v.i_state + resize(p_path, ISTATE_W);
             v.offset  := sat_offset(sum_ext);
 
-            -- ----- |q| IIR ------------------------------------------
-            if q_sample(Q_WIDTH - 1) = '1' then
-                q_abs := unsigned(-q_sample);
-            else
-                q_abs := unsigned(q_sample);
-            end if;
+            -- ===== Slow lock IIR ========================================
+            lock_diff := resize(v.q_loop_iir, Q_WIDTH + 1)
+                       - resize(r.q_lock_iir, Q_WIDTH + 1);
+            lock_step := shift_right(lock_diff, LOCK_IIR_SHIFT);
+            lock_new  := resize(r.q_lock_iir, Q_WIDTH + 1) + lock_step;
+            v.q_lock_iir := resize(lock_new, Q_WIDTH);
 
-            -- new_iir = iir + (|q| - iir) >> K_LOCK_SHIFT
-            abs_delta := signed('0' & std_logic_vector(q_abs))
-                       - signed('0' & std_logic_vector(r.q_abs_iir));
-            iir_step  := shift_right(abs_delta, K_LOCK_SHIFT);
-            new_iir   := signed('0' & std_logic_vector(r.q_abs_iir))
-                       + iir_step;
-            -- new_iir is non-negative under correct shifting; clamp.
-            if new_iir(new_iir'high) = '1' then
-                v.q_abs_iir := (others => '0');
-            else
-                v.q_abs_iir := unsigned(new_iir(Q_WIDTH - 1 downto 0));
-            end if;
-
-            -- ----- Lock-state hysteresis ----------------------------
-            in_band  := v.q_abs_iir <  to_unsigned(LOCK_IN_THR,  Q_WIDTH);
-            out_band := v.q_abs_iir >= to_unsigned(LOCK_OUT_THR, Q_WIDTH);
+            -- ===== Lock-state hysteresis ===============================
+            q_lock_abs := abs_signed(v.q_lock_iir);
+            in_band    := q_lock_abs <  to_unsigned(LOCK_IN_THR,  Q_WIDTH);
+            out_band   := q_lock_abs >= to_unsigned(LOCK_OUT_THR, Q_WIDTH);
 
             if r.lock_state = '0' then
                 if in_band then
                     if r.lock_dur >= LOCK_HOLD_TICKS - 1 then
-                        v.lock_state := '1';
-                        v.lock_dur   := 0;
+                        v.lock_state  := '1';
+                        v.ever_locked := '1';
+                        v.lock_dur    := 0;
                     else
                         v.lock_dur := r.lock_dur + 1;
                     end if;
@@ -229,6 +265,7 @@ begin
                     v.lock_dur := 0;
                 end if;
             end if;
+
         end if;
 
         rin <= v;

@@ -185,7 +185,23 @@ begin
             out_valid  => env_dec_v
         );
 
+    -- Baseband replay still runs at 100 S/s through CIC_ENV.  Override
+    -- the 2 kS/s-scaled production defaults back to the legacy timings.
     u_bit_det : entity dcf77.dcf77_bit_det
+        generic map (
+            K_ATK          => 3,
+            K_DEC          => 9,
+            K_NOISE        => 9,
+            DERIV_DELAY    => 2,
+            K_SLOPE        => 2,
+            K_REF          => 2,
+            BIT_PERIOD     => 100,
+            W1_END         => 10,
+            W2_END         => 20,
+            W3_END         => 100,
+            GIVE_UP_TICKS  => 1000,
+            SAMPLE_RATE_HZ => 100
+        )
         port map (
             clk           => clk,
             rst           => rst,

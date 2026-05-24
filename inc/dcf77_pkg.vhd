@@ -56,22 +56,6 @@ package dcf77_pkg is
     );
 
     ---------------------------------------------------------------------------
-    -- Post-decimation I/Q tap (244 kS/s).  Exposed at the core boundary so a
-    -- future PM correlator can attach without reaching inside the receiver.
-    ---------------------------------------------------------------------------
-    type dcf77_iq_tap_type is record
-        i_data : iq_word_t;
-        q_data : iq_word_t;
-        valid  : std_logic;
-    end record;
-
-    constant DCF77_IQ_TAP_RESET : dcf77_iq_tap_type := (
-        i_data => (others => '0'),
-        q_data => (others => '0'),
-        valid  => '0'
-    );
-
-    ---------------------------------------------------------------------------
     -- Decoded time-of-frame.  All fields are BCD-decoded integer values.
     -- The transmitted time is the wall-clock minute that begins at the
     -- next minute mark (see dcf77_format_spec.md §1.5).
@@ -146,18 +130,15 @@ package dcf77_pkg is
     );
 
     ---------------------------------------------------------------------------
-    -- Aggregate core output: the full decoded status plus the raw post-mixer
-    -- I/Q tap (kept separate because it is the analog data stream feeding a
-    -- future PM correlator, not part of the AM decoder's status).
+    -- Aggregate core output: just the decoded status (the post-mixer I/Q
+    -- tap that used to live here was removed alongside the CIC3 stage).
     ---------------------------------------------------------------------------
     type dcf77_out_type is record
         status : dcf77_status_type;
-        iq_tap : dcf77_iq_tap_type;
     end record;
 
     constant DCF77_OUT_RESET : dcf77_out_type := (
-        status => DCF77_STATUS_RESET,
-        iq_tap => DCF77_IQ_TAP_RESET
+        status => DCF77_STATUS_RESET
     );
 
     ---------------------------------------------------------------------------

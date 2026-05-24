@@ -51,7 +51,6 @@ architecture tb of dcf77_core_tb is
     signal in_valid   : std_logic := '0';
 
     signal status_out : dcf77_status_type;
-    signal iq_tap_out : dcf77_iq_tap_type;
 
     -- Shared "carrier" amplitude, driven by the stimulus process.
     shared variable amp_high : boolean := true;
@@ -73,8 +72,7 @@ begin
             rst        => rst,
             in_sample  => in_sample,
             in_valid   => in_valid,
-            status_out => status_out,
-            iq_tap_out => iq_tap_out
+            status_out => status_out
         );
 
     -- Synthetic AM-modulated 77.5 kHz waveform.
@@ -134,14 +132,7 @@ begin
             for i in 1 to n_ticks loop
                 for j in 1 to CLOCKS_PER_TICK loop
                     wait until rising_edge(clk);
-                    -- Check whether bit_det fired; the strobes are 1 clock wide.
-                    if iq_tap_out.valid = '1' then
-                        -- noop, just for visibility
-                    end if;
                 end loop;
-                -- bit_det checks happen on env_valid ticks.  The bit_valid
-                -- and minute_mark strobes are registered, so we sample them
-                -- here once per logical tick (after CLOCKS_PER_TICK clocks).
                 if status_out.time_valid = '1' then
                     -- no-op; time_valid is not the strobe we want
                 end if;
@@ -176,7 +167,6 @@ begin
 
         variable seen_bit, seen_mm : boolean;
         variable cap_bit : std_logic;
-        variable saw_nonzero : boolean;
 
     begin
         test_runner_setup(runner, runner_cfg);
@@ -189,27 +179,7 @@ begin
         while test_suite loop
 
             -----------------------------------------------------------------
-            if run("smoke_iq_tap") then
-                -- Drive 80 env_valid ticks of carrier and observe at least
-                -- one valid strobe with a non-zero I/Q sample.  Polling per
-                -- valid pulse is more robust than a single instantaneous
-                -- check because the post-mixer I/Q swings through zero.
-                amp_high := true;
-                saw_nonzero := false;
-                for k in 1 to 80 loop
-                    loop
-                        wait until rising_edge(clk);
-                        exit when iq_tap_out.valid = '1';
-                    end loop;
-                    if iq_tap_out.i_data /= to_sfixed(0, iq_word_t'high, iq_word_t'low)
-                       or iq_tap_out.q_data /= to_sfixed(0, iq_word_t'high, iq_word_t'low) then
-                        saw_nonzero := true;
-                    end if;
-                end loop;
-                check(saw_nonzero, "I/Q tap produced at least one non-zero sample");
-
-            -----------------------------------------------------------------
-            elsif run("decode_bit1") then
+            if run("decode_bit1") then
                 -- 1) Settle env_max with full carrier
                 amp_high := true;
                 wait_clocks(80 * CLOCKS_PER_TICK);

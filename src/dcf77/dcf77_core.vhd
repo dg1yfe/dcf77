@@ -36,14 +36,16 @@ use work.dcf77_cic_widths_pkg.all;
 
 entity dcf77_core is
     generic (
-        -- bit_det defaults: 100 S/s tick rate (one envelope sample per 10 ms).
-        K_ATK          : positive := 3;
-        K_DEC          : positive := 9;
-        K_NOISE        : positive := 9;
-        DERIV_DELAY    : positive := 2;
+        -- bit_det defaults: 2 kS/s tick rate (one envelope sample per
+        -- 500 us).  All time-constant generics scaled vs the legacy
+        -- 100 S/s defaults so continuous-time TCs are unchanged.
+        K_ATK          : positive := 8;
+        K_DEC          : positive := 14;
+        K_NOISE        : positive := 14;
+        DERIV_DELAY    : positive := 16;
         K_SLOPE        : positive := 2;
         K_REF          : positive := 2;
-        SAMPLE_RATE_HZ : positive := 100;
+        SAMPLE_RATE_HZ : positive := 2000;
         T_HOLD_SEC     : positive := 120;
         T_SEARCH_SEC   : positive := 300;
 
@@ -60,8 +62,7 @@ entity dcf77_core is
 
         -- Comprehensive decoder status: time, validity, last frame, RSSI,
         -- sync state, current bit index.  See dcf77_pkg.dcf77_status_type.
-        status_out: out dcf77_status_type;
-        iq_tap_out: out dcf77_iq_tap_type
+        status_out: out dcf77_status_type
     );
 end entity dcf77_core;
 
@@ -89,38 +90,33 @@ architecture rtl of dcf77_core is
     signal q_mix      : iq_word_t;
     signal mix_v      : std_logic;
 
-    -- Post-mixer per-channel decimators.
-    signal cic3_i_out : sfixed(CIC3_OUT_W - 1 downto 0);  -- 22 b @ 25 kS/s
-    signal cic3_q_out : sfixed(CIC3_OUT_W - 1 downto 0);
-    signal cic3_i_v   : std_logic;
-    signal cic3_q_v   : std_logic;
-    signal cic4_i_out : sfixed(CIC4_OUT_W - 1 downto 0);  -- 22 b @ 1 kS/s
-    signal cic4_i_v   : std_logic;
-    -- CIC4_Q removed: the carrier PLL consumes the post-mixer Q via a
-    -- 1-stage boxcar on cic3_q_out (25 kS/s -> 1 kS/s), not via a
-    -- second 3-stage CIC.  AM envelope after PLL lock is abs(I).
+    -- Post-mixer flat boxcar (R=125, 250 kS/s -> 2 kS/s).  Width =
+    -- iq_word_t'length + ceil(log2(125)) = 22 + 7 = 29 b signed.
+    constant POST_BOX_RATE : positive := 125;
+    constant POST_W        : positive := iq_word_t'length + 7;  -- 29
+    signal i_box      : signed(POST_W - 1 downto 0);
+    signal q_box      : signed(POST_W - 1 downto 0);
+    signal i_box_v    : std_logic;
+    signal q_box_v    : std_logic;
 
-    -- Q-channel boxcar @ 1 kS/s feeding the carrier PLL.  R=25 from
-    -- cic3_q_out @ 25 kS/s; width = 22 + ceil(log2(25)) = 27 b signed.
-    constant Q_PLL_W  : positive := 27;
-    signal q_pll      : signed(Q_PLL_W - 1 downto 0);
-    signal q_pll_v    : std_logic;
+    -- 20 Hz IIR LPF on the I channel (matches the IIR inside
+    -- carrier_pll on the Q channel).  lambda = 2^-4 at 2 kS/s.
+    constant LOOP_IIR_SHIFT : positive := 4;
+    signal i_iir      : signed(POST_W - 1 downto 0);
+    signal i_iir_v    : std_logic;
 
-    -- Carrier-PLL lock indicator (real-mode output gating).
-    signal pll_lock   : std_logic;
-    signal pll_qiir   : unsigned(Q_PLL_W - 1 downto 0);
-
+    -- Synchronously-detected envelope at 2 kS/s.  abs(i_iir) post-
+    -- boxcar can reach ~ 2^28; we right-shift by 4 before resizing into
+    -- env_word_t so the IIR's slow trackers stay inside the 26-b range
+    -- without saturation.
+    constant ENV_RSHIFT : natural := 4;
     signal env_pwr    : env_word_t;
     signal env_v      : std_logic;
 
-    -- Envelope decimator (CIC_ENV): 1 kS/s -> 100 S/s.  Reinterprets the
-    -- env_word_t (sfixed(35..10)) bit pattern as sfixed(IN_W-1..0) on the
-    -- way in and back to env_word_t on the way out.  The CIC's arithmetic
-    -- doesn't depend on LSB position, only on bit count.
-    signal env_pwr_cic    : sfixed(CIC_ENV_IN_W - 1 downto 0);
-    signal env_dec_raw    : sfixed(CIC_ENV_OUT_W - 1 downto 0);
-    signal env_dec_out    : env_word_t;
-    signal env_dec_v      : std_logic;
+    -- Carrier-PLL lock indicator (real-mode output gating).
+    signal pll_lock   : std_logic;
+    signal pll_qfilt  : signed(POST_W - 1 downto 0);
+    signal pll_qlock  : signed(POST_W - 1 downto 0);
 
     signal bit_val    : std_logic;
     signal bit_v      : std_logic;
@@ -253,165 +249,114 @@ begin
         );
 
     -- ------------------------------------------------------------------ --
-    -- Post-mixer cascade (per I/Q channel): R=10 then R=25 = 250            --
-    -- 250 kS/s -> 25 kS/s (PM tap) -> 1 kS/s                                --
+    -- Post-mixer chain (flat single-stage): boxcar R=125 collapses both
+    -- channels from 250 kS/s to 2 kS/s in one decimation step.  The
+    -- previous 4-stage CIC3/CIC4/CIC_ENV cascade is gone.
     -- ------------------------------------------------------------------ --
-    u_cic3_i : entity work.dcf77_cic_dec
+    u_i_boxcar : entity work.dcf77_boxcar
         generic map (
-            N          => CIC_N,
-            DEC_R      => CIC3_R,
-            M          => CIC_M,
-            IN_WIDTH   => CIC3_IN_W,
-            INT_WIDTH  => CIC3_INT_W,
-            COMB_WIDTH => CIC3_COMB_W,
-            OUT_WIDTH  => CIC3_OUT_W
+            IN_WIDTH  => iq_word_t'length,
+            RATE      => POST_BOX_RATE,
+            OUT_WIDTH => POST_W
         )
         port map (
             clk        => clk,
             rst        => rst,
             in_sample  => i_mix,
             in_valid   => mix_v,
-            out_sample => cic3_i_out,
-            out_valid  => cic3_i_v
+            out_sample => i_box,
+            out_valid  => i_box_v
         );
 
-    u_cic3_q : entity work.dcf77_cic_dec
+    u_q_boxcar : entity work.dcf77_boxcar
         generic map (
-            N          => CIC_N,
-            DEC_R      => CIC3_R,
-            M          => CIC_M,
-            IN_WIDTH   => CIC3_IN_W,
-            INT_WIDTH  => CIC3_INT_W,
-            COMB_WIDTH => CIC3_COMB_W,
-            OUT_WIDTH  => CIC3_OUT_W
+            IN_WIDTH  => iq_word_t'length,
+            RATE      => POST_BOX_RATE,
+            OUT_WIDTH => POST_W
         )
         port map (
             clk        => clk,
             rst        => rst,
             in_sample  => q_mix,
             in_valid   => mix_v,
-            out_sample => cic3_q_out,
-            out_valid  => cic3_q_v
+            out_sample => q_box,
+            out_valid  => q_box_v
         );
 
-    -- PM hook: post-CIC3 I/Q at 25 kS/s.  Either channel's valid will do
-    -- (they tick together on the same mix_v stream).
-    iq_tap_out.i_data <= cic3_i_out;
-    iq_tap_out.q_data <= cic3_q_out;
-    iq_tap_out.valid  <= cic3_i_v;
-
-    u_cic4_i : entity work.dcf77_cic_dec
+    -- ------------------------------------------------------------------ --
+    -- I-channel 20 Hz IIR (lambda = 2^-4 at 2 kS/s) -> abs() ->          --
+    -- env_word_t.  The IIR provides the noise-bandwidth limit before     --
+    -- envelope detection.                                                 --
+    -- ------------------------------------------------------------------ --
+    u_i_iir : entity work.dcf77_iir_lpf
         generic map (
-            N          => CIC_N,
-            DEC_R      => CIC4_R,
-            M          => CIC_M,
-            IN_WIDTH   => CIC4_IN_W,
-            INT_WIDTH  => CIC4_INT_W,
-            COMB_WIDTH => CIC4_COMB_W,
-            OUT_WIDTH  => CIC4_OUT_W
+            WIDTH => POST_W,
+            SHIFT => LOOP_IIR_SHIFT
         )
         port map (
             clk        => clk,
             rst        => rst,
-            in_sample  => cic3_i_out,
-            in_valid   => cic3_i_v,
-            out_sample => cic4_i_out,
-            out_valid  => cic4_i_v
+            in_sample  => i_box,
+            in_valid   => i_box_v,
+            out_sample => i_iir,
+            out_valid  => i_iir_v
         );
 
-    -- CIC4_Q is intentionally absent: after carrier-PLL lock the AM
-    -- envelope is synchronously detected as abs(I) on the I-channel
-    -- alone, and the PLL itself consumes the Q channel via the boxcar
-    -- (cic3_q_out @ 25 kS/s) below.  The replay testbench instantiates
-    -- its own dcf77_env (magnitude |I|+(3/8)|Q|) directly on the file
-    -- I/Q because no NCO loop closure happens there.
+    -- abs(i_iir) right-shifted by ENV_RSHIFT lands inside env_word_t.
+    -- Carrier-PLL lock ambiguity (lock at phi=0 or phi=pi) is absorbed
+    -- by the absolute value -- both stable points produce the same
+    -- envelope.  ENV_RSHIFT = 4 keeps env_pwr's peak around 2^24 so the
+    -- bit_det's slow IIR running headroom is preserved.
+    env_proc : process (i_iir)
+        variable a_signed : signed(POST_W downto 0);
+        variable a_unsigned : unsigned(POST_W - 1 downto 0);
+        variable a_shifted  : unsigned(POST_W - 1 downto 0);
+    begin
+        a_signed := resize(i_iir, POST_W + 1);
+        if a_signed(POST_W) = '1' then
+            a_signed := -a_signed;
+        end if;
+        a_unsigned := unsigned(a_signed(POST_W - 1 downto 0));
+        a_shifted  := shift_right(a_unsigned, ENV_RSHIFT);
+        env_pwr    <= resize(to_sfixed(std_logic_vector(a_shifted),
+                                       POST_W - 1, 0),
+                             env_word_t'high, env_word_t'low,
+                             fixed_saturate, fixed_truncate);
+    end process;
+    env_v <= i_iir_v;
 
     -- ------------------------------------------------------------------ --
-    -- Q-channel boxcar + carrier-tracking PLL.
-    -- 1-stage boxcar (R=25) on cic3_q_out @ 25 kS/s -> 1 kS/s, 27 b
-    -- signed Q sample drives the 2nd-order PI loop, which feeds a 24 b
-    -- signed phase-increment offset back into the NCO.  Lock state gates
-    -- the bit-detector's outputs.
+    -- Q-channel -> carrier PLL.  The PLL's internal IIRs handle both
+    -- noise filtering (LOOP_IIR_SHIFT) and lock detection (LOCK_IIR_SHIFT).
     -- ------------------------------------------------------------------ --
-    u_q_boxcar : entity work.dcf77_q_boxcar
-        generic map (
-            IN_WIDTH  => CIC3_OUT_W,        -- 22
-            RATE      => CIC4_R,            -- 25
-            OUT_WIDTH => Q_PLL_W            -- 27
-        )
-        port map (
-            clk        => clk,
-            rst        => rst,
-            in_sample  => cic3_q_out,
-            in_valid   => cic3_q_v,
-            out_sample => q_pll,
-            out_valid  => q_pll_v
-        );
-
     u_carrier_pll : entity work.dcf77_carrier_pll
         generic map (
-            Q_WIDTH         => Q_PLL_W,         -- 27
+            Q_WIDTH         => POST_W,          -- 29
             OFFSET_WIDTH    => NCO_OFFSET_W,    -- 24
-            -- Lock thresholds in |q|_iir units; |q| peaks at ~ A * RATE
-            -- where A is the post-CIC carrier amplitude.  For a strong
-            -- carrier A ~ 2^20, |q|_peak ~ 25*2^20 = 2^24.6.  In-band
-            -- ~ 1/16 of peak = 2^20; out-of-band ~ 1/4 = 2^23.  These
-            -- defaults are starting points; tune per deployment.
-            K_LOCK_SHIFT    => 6,
-            LOCK_IN_THR     => 2**20,
-            LOCK_OUT_THR    => 2**23,
+            -- Tracking gains (alpha = 2^-7, beta = 2^-25).
+            KP_SHIFT        => 7,
+            KI_SHIFT        => 25,
+            -- Acquisition gains (wider for fast initial pull-in).
+            KP_SHIFT_ACQ    => 5,
+            KI_SHIFT_ACQ    => 14,
+            -- Internal IIRs.
+            LOOP_IIR_SHIFT  => LOOP_IIR_SHIFT,  -- 4 -> ~ 20 Hz
+            LOCK_IIR_SHIFT  => 14,              -- ~ 8.2 s
+            -- Lock thresholds on the slow-IIR |phase error|.  Tune per
+            -- deployment SNR; defaults sized for ~2^20 carrier amplitude.
+            LOCK_IN_THR     => 2**18,
+            LOCK_OUT_THR    => 2**21,
             LOCK_HOLD_TICKS => 256
         )
         port map (
             clk              => clk,
             rst              => rst,
-            q_sample         => q_pll,
-            q_valid          => q_pll_v,
+            q_sample         => q_box,
+            q_valid          => q_box_v,
             phase_inc_offset => nco_phase_inc_offset,
             lock_state       => pll_lock,
-            q_iir_out        => pll_qiir
-        );
-
-    -- ------------------------------------------------------------------ --
-    -- Synchronously-detected AM envelope.
-    --
-    -- After carrier-PLL lock, Q -> 0 and all AM-modulation amplitude
-    -- collapses onto I.  abs(I) is then the envelope, with the +3 dB
-    -- SNR benefit of synchronous detection over magnitude detection.
-    -- The 180-deg phase ambiguity (PLL locks at either of two phase-
-    -- stable points) is handled by taking the absolute value.  No DSP,
-    -- LUT-only.
-    -- ------------------------------------------------------------------ --
-    env_pwr <= resize(abs(cic4_i_out),
-                      env_word_t'high, env_word_t'low,
-                      fixed_saturate, fixed_truncate);
-    env_v   <= cic4_i_v;
-
-    -- env_word_t has LSB at 2^10 while dcf77_cic_dec's ports use LSB at 0;
-    -- the bits transfer 1-for-1.  The CIC's Hogenauer-pruned output drops
-    -- the gain's LSBs, so OUT_W=26 holds the natural value and no input
-    -- pre-scaling is needed.
-    env_pwr_cic <= to_sfixed(to_slv(env_pwr), CIC_ENV_IN_W - 1, 0);
-    env_dec_out <= to_sfixed(to_slv(env_dec_raw),
-                             env_word_t'high, env_word_t'low);
-
-    u_env_dec : entity work.dcf77_cic_dec
-        generic map (
-            N          => CIC_N,
-            DEC_R      => CIC_ENV_R,
-            M          => CIC_M,
-            IN_WIDTH   => CIC_ENV_IN_W,
-            INT_WIDTH  => CIC_ENV_INT_W,
-            COMB_WIDTH => CIC_ENV_COMB_W,
-            OUT_WIDTH  => CIC_ENV_OUT_W
-        )
-        port map (
-            clk        => clk,
-            rst        => rst,
-            in_sample  => env_pwr_cic,
-            in_valid   => env_v,
-            out_sample => env_dec_raw,
-            out_valid  => env_dec_v
+            q_filt_out       => pll_qfilt,
+            q_lock_out       => pll_qlock
         );
 
     u_bit_det : entity work.dcf77_bit_det
@@ -429,8 +374,8 @@ begin
         port map (
             clk           => clk,
             rst           => rst,
-            env_in        => env_dec_out,
-            env_valid     => env_dec_v,
+            env_in        => env_pwr,
+            env_valid     => env_v,
             bit_value     => bit_val,
             bit_valid     => bit_v,
             minute_mark   => minute_mk,

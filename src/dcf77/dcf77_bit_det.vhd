@@ -40,27 +40,32 @@ use work.dcf77_pkg.all;
 
 entity dcf77_bit_det is
     generic (
-        -- Slow trackers (SNR estimator).
-        K_ATK          : positive := 3;
-        K_DEC          : positive := 9;
-        K_NOISE        : positive := 9;
+        -- Slow trackers (SNR estimator) -- shifts at the env_valid rate.
+        -- Defaults below are scaled for SAMPLE_RATE_HZ = 2000 (= +5 over
+        -- the legacy 100 S/s defaults so the continuous-time TCs match).
+        K_ATK          : positive := 8;
+        K_DEC          : positive := 14;
+        K_NOISE        : positive := 14;
 
         -- Falling-edge amplitude detector.
-        DERIV_DELAY    : positive := 2;
+        -- DERIV_DELAY = ~ one IIR-TC of the upstream 20 Hz LPF.
+        DERIV_DELAY    : positive := 16;
         K_SLOPE        : positive := 2;
 
-        -- Symbol windows (in env_valid ticks).
-        BIT_PERIOD     : positive := 100;
-        W1_END         : positive := 10;
-        W2_END         : positive := 20;
-        W3_END         : positive := 100;
+        -- Symbol windows (in env_valid ticks at SAMPLE_RATE_HZ).
+        -- 100 ms / 200 ms windows at 2 kS/s.
+        BIT_PERIOD     : positive := 2000;
+        W1_END         : positive := 200;
+        W2_END         : positive := 400;
+        W3_END         : positive := 2000;
 
-        -- Structural bit decision.
+        -- Structural bit decision.  K_REF is per-bit (= per-second),
+        -- independent of SAMPLE_RATE_HZ.
         K_REF          : positive := 2;
 
         -- Anchor give-up: clear have_anchor after this many env_valid
-        -- ticks with no falling edge (= ~10 s @ 100 S/s).
-        GIVE_UP_TICKS  : positive := 1000;
+        -- ticks with no falling edge (~10 s @ SAMPLE_RATE_HZ).
+        GIVE_UP_TICKS  : positive := 20000;
 
         -- Diagnostic counter caps.
         SYNC_Q_MAX     : positive := 63;
@@ -68,7 +73,7 @@ entity dcf77_bit_det is
 
         -- Legacy generics retained for compatibility with the dcf77_core
         -- generic forwarding; unused under the simplified anchor design.
-        SAMPLE_RATE_HZ : positive := 100;
+        SAMPLE_RATE_HZ : positive := 2000;
         T_HOLD_SEC     : positive := 120;
         T_SEARCH_SEC   : positive := 300
     );
@@ -97,9 +102,38 @@ end entity dcf77_bit_det;
 
 architecture rtl of dcf77_bit_det is
 
-    -- 10-sample-sum / 80-sample-sum scales for the window accumulators.
-    subtype acc10_t is sfixed(env_word_t'high + 4 downto env_word_t'low);
-    subtype acc80_t is sfixed(env_word_t'high + 7 downto env_word_t'low);
+    function clog2(n : positive) return natural is
+        variable acc : natural := 0;
+        variable v   : natural := n - 1;
+    begin
+        while v > 0 loop
+            acc := acc + 1;
+            v   := v / 2;
+        end loop;
+        return acc;
+    end function;
+
+    function maxp(a, b : positive) return positive is
+    begin
+        if a > b then return a; else return b; end if;
+    end function;
+
+    -- Window accumulator widths grow with the number of samples
+    -- summed.  acc12_t (W1, W2) sized for the longer of the two
+    -- windows.  acc3_t (W3) sized for BIT_PERIOD - W2_END samples.
+    constant ACC12_GROWTH : natural := clog2(maxp(W1_END,
+                                                  W2_END - W1_END));
+    constant ACC3_GROWTH  : natural := clog2(W3_END - W2_END);
+
+    subtype acc12_t is sfixed(env_word_t'high + ACC12_GROWTH
+                              downto env_word_t'low);
+    subtype acc3_t  is sfixed(env_word_t'high + ACC3_GROWTH
+                              downto env_word_t'low);
+
+    -- Compatibility aliases: the rest of the architecture used to
+    -- reference acc10_t (W1/W2 scale) and acc80_t (W3 scale).
+    subtype acc10_t is acc12_t;
+    subtype acc80_t is acc3_t;
 
     constant DELAY_DEPTH : natural := DERIV_DELAY + 1;
     type env_delay_t is array (0 to DELAY_DEPTH - 1) of env_word_t;

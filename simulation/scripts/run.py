@@ -206,13 +206,15 @@ def _configure_replay_testbench(lib) -> None:
 
 
 def _configure_if_replay_testbench(lib) -> None:
-    """Register one IF-replay-TB configuration per WAV with .if.s16/.if.meta.
+    """Register IF-replay configurations per WAV with .if.s16/.if.meta.
 
-    For each samples/<stem>.wav the runner looks for derived/<stem>.if.s16
-    + .if.meta produced by wav_to_if.py.  The IF testbench feeds the
-    real-valued WAV samples (at 12 kS/s, DCF77 still at its IF) straight
-    into the receiver's mixer with the NCO retuned, so the carrier-PLL
-    loop closes end-to-end.
+    Two tests per WAV:
+      pll_lock -- nominal NCO at 5 kHz, verify the carrier_pll captures
+                  the recording's residual IF offset
+      decode   -- NCO pre-tuned to the measured effective IF (= 5 kHz
+                  + FFT-measured residual), so the PLL only has to
+                  fine-track and the decoder is exercised in isolation
+                  of PLL acquisition.
 
     Run `python3 simulation/scripts/wav_to_if.py --all` to populate the
     .if.s16/.if.meta artefacts after dropping WAVs into samples/.
@@ -226,7 +228,7 @@ def _configure_if_replay_testbench(lib) -> None:
         return
 
     want_full = os.environ.get("DCF77_FULL_REPLAY") == "1"
-    full_configured = False
+    decode_configured = False
 
     for wav in sorted(SAMPLES_DIR.glob("*.wav")):
         stem = wav.stem
@@ -240,18 +242,17 @@ def _configure_if_replay_testbench(lib) -> None:
         kv      = _read_meta(if_meta)
         rate    = int(kv.get("sample_rate_hz", 12000))
         if_hz   = int(float(kv.get("if_hz", 5000)))
+        eff_if  = float(kv.get("effective_if_hz", if_hz))
+        # Round to nearest Hz for the integer IF_HZ generic.  Sub-Hz
+        # residuals are within the carrier_pll's tracking range.
+        eff_if_int = int(round(eff_if))
         samples = int(kv["sample_count"])
         has_exp = int(kv.get("expect_full_decode", 0)) == 1
-
-        if not has_exp:
-            print(f"[if-replay] {wav.name}: Python decoder did not lock -- "
-                  f"smoke runs without decode-progress assertion")
 
         common = dict(
             REPLAY_FILE    = str(if_s16),
             SAMPLE_COUNT   = samples,
             SAMPLE_RATE_HZ = rate,
-            IF_HZ          = if_hz,
             EXPECT_YEAR    = int(kv.get("year",    0)),
             EXPECT_MONTH   = int(kv.get("month",   0)),
             EXPECT_DAY     = int(kv.get("day",     0)),
@@ -261,26 +262,31 @@ def _configure_if_replay_testbench(lib) -> None:
             EXPECT_DST     = int(kv.get("dst_active", 0)),
         )
 
-        smoke = dict(common,
-                     MAX_SAMPLES = 130 * rate,
-                     EXPECT_FULL_FRAME      = False,
-                     EXPECT_VALIDATE_TIME   = False,
-                     EXPECT_DECODE_PROGRESS = has_exp)
-        tb.test("smoke").add_config(name=stem, generics=smoke)
+        # pll_lock test: nominal NCO at 5 kHz.  Feeds at most 130 s of
+        # recording, but the TB ends early once lock asserts (or
+        # PLL_LOCK_TIMEOUT_MS expires, whichever comes first).
+        pll_cfg = dict(common,
+                       IF_HZ                  = if_hz,
+                       MAX_SAMPLES            = 130 * rate,
+                       EXPECT_FULL_FRAME      = False,
+                       EXPECT_VALIDATE_TIME   = False,
+                       EXPECT_DECODE_PROGRESS = has_exp)
+        tb.test("pll_lock").add_config(name=stem, generics=pll_cfg)
 
         if has_exp and want_full:
-            full = dict(common,
-                        MAX_SAMPLES = 0,
-                        EXPECT_FULL_FRAME    = True,
-                        EXPECT_VALIDATE_TIME = True)
-            tb.test("full_decode").add_config(name=stem, generics=full)
-            full_configured = True
+            dec_cfg = dict(common,
+                           IF_HZ                = eff_if_int,
+                           MAX_SAMPLES          = 0,
+                           EXPECT_FULL_FRAME    = True,
+                           EXPECT_VALIDATE_TIME = True)
+            tb.test("decode").add_config(name=stem, generics=dec_cfg)
+            decode_configured = True
 
-    if not full_configured:
+    if not decode_configured:
         reason = ("set_DCF77_FULL_REPLAY_to_1"
                   if not want_full
                   else "no_WAV_with_expect_full_decode")
-        tb.test("full_decode").add_config(
+        tb.test("decode").add_config(
             name=reason,
             generics=dict(EXPECT_FULL_FRAME=False))
 

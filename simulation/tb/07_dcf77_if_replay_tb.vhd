@@ -68,7 +68,12 @@ entity dcf77_if_replay_tb is
         -- 125 MHz clock cycles between successive samples.  At 12 kS/s with
         -- CLOCKS_PER_TICK = 8 the simulator runs ~125 MHz / 12 kHz / 8 =
         -- ~1300x faster than real time.
-        CLOCKS_PER_TICK : positive := 8
+        CLOCKS_PER_TICK : positive := 8;
+        -- Maximum simulated wait (in microseconds of simulated time)
+        -- for the carrier_pll to lock during the pll_lock test.  At
+        -- 8 ns/clock × 8 clocks/sample × 12 kS/s = 768 ns per WAV
+        -- sample, 50_000 us = ~65 s of recording-time.
+        PLL_LOCK_TIMEOUT_MS : positive := 50_000
     );
 end entity;
 
@@ -84,18 +89,13 @@ architecture tb of dcf77_if_replay_tb is
     constant NCO_PHASE_INCR_VAL : natural :=
         natural(real(2 ** NCO_PHASE_W) * real(IF_HZ) / real(SAMPLE_RATE_HZ));
 
-    constant CIC3_DEC : positive := 4;
-    constant CIC4_DEC : positive := 3;
-
-    -- Generous integrator / comb widths; R=4 and R=3 are gentler than the
-    -- production R=10/R=25 so the production widths are safe over-provisions.
-    constant POST_IN_W   : positive := iq_word_t'length;   -- 22
-    constant POST_INT_W  : positive := 33;
-    constant POST_COMB_W : positive := 26;
-    constant POST_OUT_W  : positive := iq_word_t'length;   -- 22
-
-    -- Q boxcar width: 22 + ceil(log2(3)) = 22 + 2 = 24.
-    constant Q_PLL_W : positive := 24;
+    -- Single-stage boxcar matching dcf77_core: R = SAMPLE_RATE_HZ / 2000
+    -- to land at 2 kS/s post-mixer (= 6 at the default 12 kS/s).
+    -- OUT_WIDTH = IN_WIDTH + ceil(log2(RATE)).  For R=6 that's 22+3=25.
+    constant POST_BOX_RATE : positive := SAMPLE_RATE_HZ / 2000;
+    constant POST_W        : positive := iq_word_t'length + 3;
+    constant LOOP_IIR_SHIFT : positive := 4;
+    constant ENV_RSHIFT     : natural  := 4;
 
     signal clk : std_logic := '0';
     signal rst : std_logic := '1';
@@ -113,27 +113,22 @@ architecture tb of dcf77_if_replay_tb is
     signal q_mix : iq_word_t;
     signal mix_v : std_logic;
 
-    -- Post-mixer per-channel decimators.
-    signal cic3_i_out : sfixed(POST_OUT_W - 1 downto 0);
-    signal cic3_q_out : sfixed(POST_OUT_W - 1 downto 0);
-    signal cic3_i_v   : std_logic;
-    signal cic3_q_v   : std_logic;
-    signal cic4_i_out : sfixed(POST_OUT_W - 1 downto 0);
-    signal cic4_i_v   : std_logic;
+    -- Post-mixer boxcar + IIR, mirroring dcf77_core.
+    signal i_box   : signed(POST_W - 1 downto 0);
+    signal q_box   : signed(POST_W - 1 downto 0);
+    signal i_box_v : std_logic;
+    signal q_box_v : std_logic;
+    signal i_iir   : signed(POST_W - 1 downto 0);
+    signal i_iir_v : std_logic;
 
-    -- Q -> PLL.
-    signal q_pll   : signed(Q_PLL_W - 1 downto 0);
-    signal q_pll_v : std_logic;
-    signal pll_lock: std_logic;
-    signal pll_qiir: unsigned(Q_PLL_W - 1 downto 0);
+    -- Carrier PLL diagnostics.
+    signal pll_lock  : std_logic;
+    signal pll_qfilt : signed(POST_W - 1 downto 0);
+    signal pll_qlock : signed(POST_W - 1 downto 0);
 
-    -- Envelope @ 1 kS/s -> CIC_ENV -> 100 S/s.
-    signal env_pwr     : env_word_t;
-    signal env_v       : std_logic;
-    signal env_pwr_cic : sfixed(CIC_ENV_IN_W - 1 downto 0);
-    signal env_dec_raw : sfixed(CIC_ENV_OUT_W - 1 downto 0);
-    signal env_dec_out : env_word_t;
-    signal env_dec_v   : std_logic;
+    -- Synchronously-detected envelope @ 2 kS/s -> bit_det.
+    signal env_pwr : env_word_t;
+    signal env_v   : std_logic;
 
     -- bit_det / frame_dec outputs.
     signal bit_val_raw, mm_raw   : std_logic;
@@ -215,98 +210,81 @@ begin
         );
 
     -- ------------------------------------------------------------------ --
-    -- Post-mixer: I/Q -> 3 kS/s -> 1 kS/s.                                 --
-    -- I lands on the envelope path; Q feeds the carrier PLL via a boxcar.  --
+    -- Post-mixer: I/Q -> 2 kS/s via single-stage boxcar (mirrors core).    --
     -- ------------------------------------------------------------------ --
-    u_cic3_i : entity dcf77.dcf77_cic_dec
+    u_i_boxcar : entity dcf77.dcf77_boxcar
         generic map (
-            N          => CIC_N,
-            DEC_R      => CIC3_DEC,
-            M          => CIC_M,
-            IN_WIDTH   => POST_IN_W,
-            INT_WIDTH  => POST_INT_W,
-            COMB_WIDTH => POST_COMB_W,
-            OUT_WIDTH  => POST_OUT_W
+            IN_WIDTH  => iq_word_t'length,
+            RATE      => POST_BOX_RATE,
+            OUT_WIDTH => POST_W
         )
         port map (
             clk        => clk,
             rst        => rst,
             in_sample  => i_mix,
             in_valid   => mix_v,
-            out_sample => cic3_i_out,
-            out_valid  => cic3_i_v
+            out_sample => i_box,
+            out_valid  => i_box_v
         );
 
-    u_cic3_q : entity dcf77.dcf77_cic_dec
+    u_q_boxcar : entity dcf77.dcf77_boxcar
         generic map (
-            N          => CIC_N,
-            DEC_R      => CIC3_DEC,
-            M          => CIC_M,
-            IN_WIDTH   => POST_IN_W,
-            INT_WIDTH  => POST_INT_W,
-            COMB_WIDTH => POST_COMB_W,
-            OUT_WIDTH  => POST_OUT_W
+            IN_WIDTH  => iq_word_t'length,
+            RATE      => POST_BOX_RATE,
+            OUT_WIDTH => POST_W
         )
         port map (
             clk        => clk,
             rst        => rst,
             in_sample  => q_mix,
             in_valid   => mix_v,
-            out_sample => cic3_q_out,
-            out_valid  => cic3_q_v
+            out_sample => q_box,
+            out_valid  => q_box_v
         );
 
-    u_cic4_i : entity dcf77.dcf77_cic_dec
+    u_i_iir : entity dcf77.dcf77_iir_lpf
         generic map (
-            N          => CIC_N,
-            DEC_R      => CIC4_DEC,
-            M          => CIC_M,
-            IN_WIDTH   => POST_IN_W,
-            INT_WIDTH  => POST_INT_W,
-            COMB_WIDTH => POST_COMB_W,
-            OUT_WIDTH  => POST_OUT_W
+            WIDTH => POST_W,
+            SHIFT => LOOP_IIR_SHIFT
         )
         port map (
             clk        => clk,
             rst        => rst,
-            in_sample  => cic3_i_out,
-            in_valid   => cic3_i_v,
-            out_sample => cic4_i_out,
-            out_valid  => cic4_i_v
+            in_sample  => i_box,
+            in_valid   => i_box_v,
+            out_sample => i_iir,
+            out_valid  => i_iir_v
         );
 
-    u_q_boxcar : entity dcf77.dcf77_q_boxcar
-        generic map (
-            IN_WIDTH  => POST_OUT_W,
-            RATE      => CIC4_DEC,
-            OUT_WIDTH => Q_PLL_W
-        )
-        port map (
-            clk        => clk,
-            rst        => rst,
-            in_sample  => cic3_q_out,
-            in_valid   => cic3_q_v,
-            out_sample => q_pll,
-            out_valid  => q_pll_v
-        );
+    -- abs(i_iir) right-shifted by ENV_RSHIFT into env_word_t.
+    env_proc : process (i_iir)
+        variable a_signed   : signed(POST_W downto 0);
+        variable a_unsigned : unsigned(POST_W - 1 downto 0);
+        variable a_shifted  : unsigned(POST_W - 1 downto 0);
+    begin
+        a_signed := resize(i_iir, POST_W + 1);
+        if a_signed(POST_W) = '1' then
+            a_signed := -a_signed;
+        end if;
+        a_unsigned := unsigned(a_signed(POST_W - 1 downto 0));
+        a_shifted  := shift_right(a_unsigned, ENV_RSHIFT);
+        env_pwr    <= resize(to_sfixed(std_logic_vector(a_shifted),
+                                       POST_W - 1, 0),
+                             env_word_t'high, env_word_t'low,
+                             fixed_saturate, fixed_truncate);
+    end process;
+    env_v <= i_iir_v;
 
     u_carrier_pll : entity dcf77.dcf77_carrier_pll
         generic map (
-            Q_WIDTH         => Q_PLL_W,
+            Q_WIDTH         => POST_W,
             OFFSET_WIDTH    => NCO_OFFSET_W,
-            -- Wider loop than dcf77_core's default (~0.76 Hz): the IF
-            -- replay path drives the PLL on a low-amplitude post-
-            -- 1-stage-boxcar Q whose effective phase-detector gain is
-            -- much smaller than the production receiver's; widening
-            -- by 4x lifts the natural frequency to ~3 Hz, fast enough
-            -- to acquire phase on the synthetic recording inside a
-            -- 130 s smoke window without overcorrecting on signals
-            -- with significant noise.
-            KP_HI           => 5,
-            KP_LO           => 8,
-            KI_HI           => 14,
-            KI_LO           => 15,
-            K_LOCK_SHIFT    => 6,
+            KP_SHIFT        => 7,
+            KI_SHIFT        => 25,
+            KP_SHIFT_ACQ    => 5,
+            KI_SHIFT_ACQ    => 14,
+            LOOP_IIR_SHIFT  => LOOP_IIR_SHIFT,
+            LOCK_IIR_SHIFT  => 14,
             LOCK_IN_THR     => 2**18,
             LOCK_OUT_THR    => 2**21,
             LOCK_HOLD_TICKS => 256
@@ -314,59 +292,23 @@ begin
         port map (
             clk              => clk,
             rst              => rst,
-            q_sample         => q_pll,
-            q_valid          => q_pll_v,
+            q_sample         => q_box,
+            q_valid          => q_box_v,
             phase_inc_offset => nco_offset,
             lock_state       => pll_lock,
-            q_iir_out        => pll_qiir
+            q_filt_out       => pll_qfilt,
+            q_lock_out       => pll_qlock
         );
 
     -- ------------------------------------------------------------------ --
-    -- Synchronously-detected envelope: abs(I) at 1 kS/s.                   --
-    -- After PLL lock, all AM amplitude lands on I and abs(I) is the
-    -- envelope.  The 180-deg phase ambiguity is absorbed by the abs.
-    -- ------------------------------------------------------------------ --
-    env_pwr <= resize(abs(cic4_i_out),
-                      env_word_t'high, env_word_t'low,
-                      fixed_saturate, fixed_truncate);
-    env_v   <= cic4_i_v;
-
-    -- ------------------------------------------------------------------ --
-    -- CIC_ENV (R=10) -> 100 S/s.  Same bit-pattern reinterpretation as
-    -- dcf77_core.
-    -- ------------------------------------------------------------------ --
-    env_pwr_cic <= to_sfixed(to_slv(env_pwr), CIC_ENV_IN_W - 1, 0);
-    env_dec_out <= to_sfixed(to_slv(env_dec_raw),
-                             env_word_t'high, env_word_t'low);
-
-    u_env_dec : entity dcf77.dcf77_cic_dec
-        generic map (
-            N          => CIC_N,
-            DEC_R      => CIC_ENV_R,
-            M          => CIC_M,
-            IN_WIDTH   => CIC_ENV_IN_W,
-            INT_WIDTH  => CIC_ENV_INT_W,
-            COMB_WIDTH => CIC_ENV_COMB_W,
-            OUT_WIDTH  => CIC_ENV_OUT_W
-        )
-        port map (
-            clk        => clk,
-            rst        => rst,
-            in_sample  => env_pwr_cic,
-            in_valid   => env_v,
-            out_sample => env_dec_raw,
-            out_valid  => env_dec_v
-        );
-
-    -- ------------------------------------------------------------------ --
-    -- bit_det + carrier-PLL output gating (same as dcf77_core).            --
+    -- bit_det at 2 kS/s.  Defaults match production; mirror dcf77_core.    --
     -- ------------------------------------------------------------------ --
     u_bit_det : entity dcf77.dcf77_bit_det
         port map (
             clk           => clk,
             rst           => rst,
-            env_in        => env_dec_out,
-            env_valid     => env_dec_v,
+            env_in        => env_pwr,
+            env_valid     => env_v,
             bit_value     => bit_val_raw,
             bit_valid     => bit_v_raw,
             minute_mark   => mm_raw,
@@ -564,32 +506,36 @@ begin
         while test_suite loop
 
             -----------------------------------------------------------------
-            if run("smoke") then
+            if run("pll_lock") then
+                -- Verify the carrier_pll captures the WAV's residual
+                -- carrier offset using the nominal NCO setting.  The TB
+                -- generic IF_HZ is held at the nominal 5 kHz for this
+                -- test; if the recording's actual IF drifts by more
+                -- than the loop's capture range the PLL will fail to
+                -- lock and the test fails.
                 if REPLAY_FILE = "" then
-                    info("no REPLAY_FILE configured, skipping if-replay smoke");
+                    info("no REPLAY_FILE configured, skipping pll_lock");
                 else
-                    wait until stim_done = '1';
-                    wait for 1 ms;
-                    if EXPECT_DECODE_PROGRESS then
-                        check(bits_seen >= 30,
-                              "bit_valid fired enough times (" &
-                              integer'image(bits_seen) & " >= 30)");
-                        check(minutes_seen >= 1,
-                              "at least one minute_mark fired (" &
-                              integer'image(minutes_seen) & ")");
-                    else
-                        info("EXPECT_DECODE_PROGRESS=false; "
-                             & "no decode assertion (bits_seen="
-                             & integer'image(bits_seen)
-                             & " minutes_seen="
-                             & integer'image(minutes_seen) & ")");
+                    -- Wait up to PLL_LOCK_TIMEOUT_MS for lock_state to
+                    -- assert, then end the simulation early (no need
+                    -- to feed the rest of the recording).
+                    wait until pll_lock = '1' for PLL_LOCK_TIMEOUT_MS * 1 us;
+                    if pll_lock = '1' then
+                        info("carrier_pll locked at " & time'image(now));
                     end if;
+                    check_equal(pll_lock, '1',
+                        "carrier_pll asserts lock_state within "
+                        & integer'image(PLL_LOCK_TIMEOUT_MS) & " us simulated");
                 end if;
 
             -----------------------------------------------------------------
-            elsif run("full_decode") then
+            elsif run("decode") then
+                -- Decode test: NCO is pre-tuned to the measured
+                -- effective IF (= 5 kHz + recorded residual).  The
+                -- carrier PLL only fine-tracks, so this isolates the
+                -- decoder behaviour from PLL acquisition.
                 if REPLAY_FILE = "" or not EXPECT_FULL_FRAME then
-                    info("no REPLAY_FILE configured, skipping if-replay full_decode");
+                    info("no REPLAY_FILE configured, skipping decode");
                 else
                     wait until stim_done = '1';
                     wait for 1 ms;
