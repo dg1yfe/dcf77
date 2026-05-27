@@ -77,8 +77,13 @@ def resample_to_if(x: np.ndarray, fs_in: int,
 
 
 def to_int16_real(x: np.ndarray) -> np.ndarray:
-    peak = float(np.max(np.abs(x))) or 1.0
-    return np.clip(x / peak * INT16_PEAK, -32_768, 32_767).astype(np.int16)
+    # Robust normalisation: use the 99.9th percentile rather than the
+    # true peak so that a handful of clipped/spike samples (e.g. when
+    # the source recording briefly hit the ADC rail) cannot scale the
+    # rest of the signal into the noise floor.  The final clip catches
+    # whatever sits above the percentile.
+    ref = float(np.percentile(np.abs(x), 99.9)) or 1.0
+    return np.clip(x / ref * INT16_PEAK, -32_768, 32_767).astype(np.int16)
 
 
 def write_if_meta(path: Path, *,

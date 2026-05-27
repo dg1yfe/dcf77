@@ -193,11 +193,14 @@ begin
             NCO_PHASE_INCR => NCO_PHASE_INCR
         )
         port map (
-            clk        => s_axi_aclk,
-            rst        => core_rst,
-            in_sample  => adc_sample,
-            in_valid   => core_valid,
-            status_out => status
+            clk             => s_axi_aclk,
+            rst             => core_rst,
+            in_sample       => adc_sample,
+            in_valid        => core_valid,
+            env_mode        => control.env_mode,
+            phase_err_out   => open,
+            phase_err_valid => open,
+            status_out      => status
         );
 
 end architecture rtl;

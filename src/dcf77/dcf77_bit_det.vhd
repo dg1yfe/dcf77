@@ -75,7 +75,12 @@ entity dcf77_bit_det is
         -- generic forwarding; unused under the simplified anchor design.
         SAMPLE_RATE_HZ : positive := 2000;
         T_HOLD_SEC     : positive := 120;
-        T_SEARCH_SEC   : positive := 300
+        T_SEARCH_SEC   : positive := 300;
+
+        -- Per-cycle diagnostic dump at every end_of_bit (acc_W1, acc_W2,
+        -- mm_thr, th_new, candidate, bit_value).  Off by default; flip
+        -- to true in a TB when chasing false candidate / wrong bit value.
+        DEBUG_TRACE    : boolean := false
     );
     port (
         clk         : in  std_logic;
@@ -580,6 +585,20 @@ begin
 
                 v.bit_valid   := do_fire_bit;
                 v.minute_mark := do_fire_mm;
+
+                if DEBUG_TRACE then
+                    report "trace cyc_in_min=" & integer'image(r.cycle_in_min)
+                        & " mm_cnt=" & integer'image(r.mm_counter)
+                        & " acc_W1=" & integer'image(to_integer(signed(to_slv(v.acc_W1))))
+                        & " acc_W2=" & integer'image(to_integer(signed(to_slv(v.acc_W2))))
+                        & " mm_thr=" & integer'image(to_integer(signed(to_slv(mm_thr))))
+                        & " th_new=" & integer'image(to_integer(signed(to_slv(th_new))))
+                        & " iir_high=" & integer'image(to_integer(signed(to_slv(r.iir_high))))
+                        & " cand=" & std_logic'image(candidate)
+                        & " fire_mm=" & std_logic'image(do_fire_mm)
+                        & " bit_val=" & std_logic'image(v.bit_value)
+                        severity note;
+                end if;
 
                 -- iir_high update (W3 is full carrier on every cycle type).
                 acc_W3_d3 := resize(shift_right(v.acc_W3, 3),

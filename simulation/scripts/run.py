@@ -256,7 +256,7 @@ def _configure_if_replay_testbench(lib) -> None:
             SAMPLE_COUNT   = samples,
             SAMPLE_RATE_HZ = rate,
             IF_HZ          = if_hz,
-            LOCK_FILE      = str(if_lock),
+            PE_LOOP        = os.environ.get("DCF77_PE_LOOP") == "1",
             EXPECT_YEAR    = int(kv.get("year",    0)),
             EXPECT_MONTH   = int(kv.get("month",   0)),
             EXPECT_DAY     = int(kv.get("day",     0)),
@@ -266,10 +266,12 @@ def _configure_if_replay_testbench(lib) -> None:
             EXPECT_DST     = int(kv.get("dst_active", 0)),
         )
 
-        # acquire: feeds up to 130 s of recording but ends early once
-        # lock_state asserts.  Writes the converged offset to LOCK_FILE.
+        # acquire: feeds the WHOLE recording from a clean NCO (no
+        # seed read).  Writes the final converged phase_inc_offset to
+        # LOCK_FILE_OUT for decode to pick up.
         acq_cfg = dict(common,
-                       MAX_SAMPLES            = 130 * rate,
+                       LOCK_FILE_OUT          = str(if_lock),
+                       MAX_SAMPLES            = 0,
                        EXPECT_FULL_FRAME      = False,
                        EXPECT_VALIDATE_TIME   = False,
                        EXPECT_DECODE_PROGRESS = has_exp)
@@ -277,9 +279,13 @@ def _configure_if_replay_testbench(lib) -> None:
 
         if has_exp and want_full:
             dec_cfg = dict(common,
+                           LOCK_FILE_IN         = str(if_lock),
                            MAX_SAMPLES          = 0,
                            EXPECT_FULL_FRAME    = True,
                            EXPECT_VALIDATE_TIME = True)
+            # Opt-in env_pwr time-series dump (set DCF77_ENV_DUMP=1 to enable).
+            if os.environ.get("DCF77_ENV_DUMP") == "1":
+                dec_cfg["ENV_DUMP_FILE"] = str(DERIVED_DIR / f"{stem}.env.tsv")
             tb.test("decode").add_config(name=stem, generics=dec_cfg)
             decode_configured = True
 

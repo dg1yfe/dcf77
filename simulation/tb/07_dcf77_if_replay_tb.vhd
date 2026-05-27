@@ -58,6 +58,13 @@ entity dcf77_if_replay_tb is
         EXPECT_FULL_FRAME    : boolean := false;
         EXPECT_VALIDATE_TIME : boolean := false;
         EXPECT_DECODE_PROGRESS : boolean := true;
+        BIT_DET_DEBUG_TRACE  : boolean := false;
+        ENV_DUMP_FILE        : string  := "";
+        -- 0 = abs(I), 1 = |I| + 3/8|Q| (magnitude approximation).
+        ENV_MODE             : std_logic := '1';
+        -- false = PLL sees raw Q_box (classic loop).
+        -- true  = PLL sees phase_err = sign(I_iir)*Q_box.
+        PE_LOOP              : boolean := false;
         EXPECT_YEAR    : natural := 0;
         EXPECT_MONTH   : natural := 0;
         EXPECT_DAY     : natural := 0;
@@ -65,13 +72,16 @@ entity dcf77_if_replay_tb is
         EXPECT_HOUR    : natural := 0;
         EXPECT_MINUTE  : natural := 0;
         EXPECT_DST     : natural := 0;
-        -- Optional file path for PLL-state handoff between the
-        -- `acquire` and `decode` tests.  `acquire` writes the
-        -- converged phase_inc_offset (as a decimal integer on one
-        -- line) at test exit; `decode` reads it at startup and uses
-        -- it to seed the NCO.  When empty, both tests run with the
-        -- NCO at its nominal IF_HZ-derived value.
-        LOCK_FILE      : string  := "";
+        -- PLL-state handoff between the `acquire` and `decode`
+        -- tests.  `acquire` runs from a clean NCO and writes the
+        -- converged phase_inc_offset (decimal integer, one line) to
+        -- LOCK_FILE_OUT at end of test.  `decode` reads LOCK_FILE_IN
+        -- at startup and adds the value to the live PLL output, so
+        -- the NCO effectively starts at the locked frequency.
+        -- Acquire sets LOCK_FILE_OUT only (LOCK_FILE_IN = "" means
+        -- no seed); decode sets LOCK_FILE_IN only.
+        LOCK_FILE_IN   : string  := "";
+        LOCK_FILE_OUT  : string  := "";
         -- 125 MHz clock cycles between successive samples.  At 12 kS/s with
         -- CLOCKS_PER_TICK = 8 the simulator runs ~125 MHz / 12 kHz / 8 =
         -- ~1300x faster than real time.
@@ -132,6 +142,14 @@ architecture tb of dcf77_if_replay_tb is
     signal q_box_v : std_logic;
     signal i_iir   : signed(POST_W - 1 downto 0);
     signal i_iir_v : std_logic;
+
+    -- Phase-error: sign(I_iir) * Q_box, mirrors dcf77_core's path.
+    signal phase_err   : signed(POST_W - 1 downto 0);
+    signal phase_err_v : std_logic;
+
+    -- Multiplexed PLL input: q_box (classic) or phase_err (PE_LOOP).
+    signal pll_q_in   : signed(POST_W - 1 downto 0);
+    signal pll_q_in_v : std_logic;
 
     -- Carrier PLL diagnostics.
     signal pll_lock  : std_logic;
@@ -268,33 +286,117 @@ begin
             out_valid  => i_iir_v
         );
 
-    -- abs(i_iir) right-shifted by ENV_RSHIFT into env_word_t.
-    env_proc : process (i_iir)
-        variable a_signed   : signed(POST_W downto 0);
-        variable a_unsigned : unsigned(POST_W - 1 downto 0);
-        variable a_shifted  : unsigned(POST_W - 1 downto 0);
+    phase_err_proc : process(clk)
     begin
-        a_signed := resize(i_iir, POST_W + 1);
-        if a_signed(POST_W) = '1' then
-            a_signed := -a_signed;
+        if rising_edge(clk) then
+            if rst = '1' then
+                phase_err   <= (others => '0');
+                phase_err_v <= '0';
+            else
+                phase_err_v <= '0';
+                if i_iir_v = '1' then
+                    if i_iir(POST_W - 1) = '1' then
+                        phase_err <= -q_box;
+                    else
+                        phase_err <=  q_box;
+                    end if;
+                    phase_err_v <= '1';
+                end if;
+            end if;
         end if;
-        a_unsigned := unsigned(a_signed(POST_W - 1 downto 0));
-        a_shifted  := shift_right(a_unsigned, ENV_RSHIFT);
-        env_pwr    <= resize(to_sfixed(std_logic_vector(a_shifted),
-                                       POST_W - 1, 0),
-                             env_word_t'high, env_word_t'low,
-                             fixed_saturate, fixed_truncate);
+    end process;
+
+    -- PLL input mux: classic raw-Q path or sign(I)*Q phase-err path.
+    pll_q_in   <= phase_err   when PE_LOOP else q_box;
+    pll_q_in_v <= phase_err_v when PE_LOOP else q_box_v;
+
+    -- ENV_MODE='0' -> abs(I_iir); ENV_MODE='1' -> |I_iir| + 3/8 * |Q_iir|
+    -- (alpha-max+beta-min magnitude approximation).  Q_iir is the same
+    -- 20 Hz LPF the carrier_pll applies to its q_sample (pll_qfilt).
+    env_proc : process (i_iir, pll_qfilt)
+        variable i_ext, q_ext : signed(POST_W downto 0);
+        variable i_abs, q_abs : unsigned(POST_W - 1 downto 0);
+        variable a_max, a_min : unsigned(POST_W - 1 downto 0);
+        variable min_term     : unsigned(POST_W - 1 downto 0);
+        variable env_sum      : unsigned(POST_W downto 0);
+        variable env_sh       : unsigned(POST_W downto 0);
+    begin
+        i_ext := resize(i_iir, POST_W + 1);
+        if i_ext(POST_W) = '1' then i_ext := -i_ext; end if;
+        i_abs := unsigned(i_ext(POST_W - 1 downto 0));
+
+        q_ext := resize(pll_qfilt, POST_W + 1);
+        if q_ext(POST_W) = '1' then q_ext := -q_ext; end if;
+        q_abs := unsigned(q_ext(POST_W - 1 downto 0));
+
+        -- alpha-max + beta-min magnitude approx (alpha=1, beta=3/8).
+        if i_abs >= q_abs then
+            a_max := i_abs;
+            a_min := q_abs;
+        else
+            a_max := q_abs;
+            a_min := i_abs;
+        end if;
+        min_term := shift_right(a_min, 2) + shift_right(a_min, 3);
+
+        if ENV_MODE = '1' then
+            env_sum := ('0' & a_max) + ('0' & min_term);
+        else
+            env_sum := ('0' & i_abs);
+        end if;
+
+        env_sh := shift_right(env_sum, ENV_RSHIFT);
+        env_pwr <= resize(to_sfixed(std_logic_vector(env_sh(POST_W - 1 downto 0)),
+                                    POST_W - 1, 0),
+                          env_word_t'high, env_word_t'low,
+                          fixed_saturate, fixed_truncate);
     end process;
     env_v <= i_iir_v;
+
+    -- Optional env_pwr time-series dump (one line per env_valid pulse).
+    -- Format: "<ns_time> <env_pwr_int>".  Off when ENV_DUMP_FILE = "".
+    env_dump : process
+        file     f         : text;
+        variable lbuf      : line;
+        variable opened    : boolean := false;
+        variable status    : file_open_status;
+        variable env_int   : integer;
+    begin
+        if ENV_DUMP_FILE = "" then
+            wait;
+        end if;
+        loop
+            wait until rising_edge(clk);
+            if not opened then
+                file_open(status, f, ENV_DUMP_FILE, write_mode);
+                if status /= open_ok then
+                    info("env_dump: cannot open " & ENV_DUMP_FILE);
+                    wait;
+                end if;
+                opened := true;
+            end if;
+            if env_v = '1' then
+                env_int := to_integer(signed(to_slv(env_pwr)));
+                write(lbuf, now / 1 ns);
+                write(lbuf, string'(" "));
+                write(lbuf, env_int);
+                write(lbuf, string'(" "));
+                write(lbuf, to_integer(i_iir));
+                write(lbuf, string'(" "));
+                write(lbuf, to_integer(pll_qfilt));
+                write(lbuf, string'(" "));
+                write(lbuf, to_integer(phase_err));
+                writeline(f, lbuf);
+            end if;
+        end loop;
+    end process;
 
     u_carrier_pll : entity dcf77.dcf77_carrier_pll
         generic map (
             Q_WIDTH         => POST_W,
             OFFSET_WIDTH    => NCO_OFFSET_W,
             KP_SHIFT        => 7,
-            KI_SHIFT        => 25,
-            KP_SHIFT_ACQ    => 5,
-            KI_SHIFT_ACQ    => 14,
+            KI_SHIFT        => 20,
             LOOP_IIR_SHIFT  => LOOP_IIR_SHIFT,
             LOCK_IIR_SHIFT  => 14,
             LOCK_IN_THR     => 2**18,
@@ -304,8 +406,8 @@ begin
         port map (
             clk              => clk,
             rst              => rst,
-            q_sample         => q_box,
-            q_valid          => q_box_v,
+            q_sample         => pll_q_in,
+            q_valid          => pll_q_in_v,
             phase_inc_offset => pll_offset,
             lock_state       => pll_lock,
             q_filt_out       => pll_qfilt,
@@ -337,6 +439,9 @@ begin
     -- bit_det at 2 kS/s.  Defaults match production; mirror dcf77_core.    --
     -- ------------------------------------------------------------------ --
     u_bit_det : entity dcf77.dcf77_bit_det
+        generic map (
+            DEBUG_TRACE => BIT_DET_DEBUG_TRACE
+        )
         port map (
             clk           => clk,
             rst           => rst,
@@ -524,6 +629,35 @@ begin
     end process;
 
     -- ------------------------------------------------------------------ --
+    -- PLL telemetry: every 5 seconds of recording time, dump pll_offset,
+    -- pll_qfilt, pll_qlock and lock_state.  Lets us watch how the loop
+    -- evolves through acquisition rather than guessing from the final
+    -- snapshot.
+    -- ------------------------------------------------------------------ --
+    pll_telemetry : process
+        constant LOG_PERIOD_MS : positive := 5_000;     -- 5 s of recording
+        -- recording_ms × samples/s × clocks/sample × ns/clock has
+        -- units ms·1/s·ns = ns/1000.  Divide by 1000 (not 1e6) to get
+        -- ns.  Example: 5000 ms × 12000 × 8 × 8 ns / 1000 = 3.84 ms.
+        constant TICK_INTERVAL : time     :=
+            LOG_PERIOD_MS * SAMPLE_RATE_HZ * CLOCKS_PER_TICK * CLK_PERIOD
+            / 1_000;
+        variable tick_idx : natural := 0;
+    begin
+        wait until rst = '0';
+        loop
+            wait for TICK_INTERVAL;
+            tick_idx := tick_idx + 1;
+            info("pll_telem t=" & integer'image(tick_idx * LOG_PERIOD_MS)
+                 & "ms  offset=" & integer'image(to_integer(pll_offset))
+                 & "  seed="     & integer'image(to_integer(seed_offset))
+                 & "  q_filt="   & integer'image(to_integer(pll_qfilt))
+                 & "  q_lock="   & integer'image(to_integer(pll_qlock))
+                 & "  lock="     & std_logic'image(pll_lock));
+        end loop;
+    end process;
+
+    -- ------------------------------------------------------------------ --
     -- Seed loader: read LOCK_FILE (if any) at startup and load the
     -- decimal integer into seed_offset.  Missing file or empty
     -- LOCK_FILE leaves seed_offset at 0 (= acquisition runs from
@@ -536,22 +670,22 @@ begin
         variable v      : integer;
         variable good   : boolean;
     begin
-        if LOCK_FILE /= "" then
-            file_open(status, f, LOCK_FILE, read_mode);
+        if LOCK_FILE_IN /= "" then
+            file_open(status, f, LOCK_FILE_IN, read_mode);
             if status = open_ok then
                 readline(f, lbuf);
                 read(lbuf, v, good);
                 if good then
                     seed_offset <= to_signed(v, NCO_OFFSET_W);
                     report "seed_loader: loaded "
-                        & integer'image(v) & " from " & LOCK_FILE;
+                        & integer'image(v) & " from " & LOCK_FILE_IN;
                 else
-                    report "seed_loader: " & LOCK_FILE
+                    report "seed_loader: " & LOCK_FILE_IN
                         & " present but unparseable; seed = 0";
                 end if;
                 file_close(f);
             else
-                report "seed_loader: " & LOCK_FILE
+                report "seed_loader: " & LOCK_FILE_IN
                     & " not present; seed = 0";
             end if;
         end if;
@@ -578,47 +712,42 @@ begin
 
             -----------------------------------------------------------------
             if run("acquire") then
-                -- Verify the carrier_pll captures the WAV's residual
-                -- carrier offset using the nominal NCO setting.  On
-                -- success, write the converged phase_inc_offset to
-                -- LOCK_FILE so the `decode` test can use it as a
-                -- seed.
+                -- Run the carrier_pll across the FULL recording.  The
+                -- periodic pll_telemetry process logs offset / q_filt /
+                -- q_lock / lock_state every so often, so we can see
+                -- how the loop's state evolves rather than guessing
+                -- from a single end-of-test snapshot.  After the
+                -- stream ends, snapshot the converged offset to
+                -- LOCK_FILE for the `decode` test to seed from.
                 if REPLAY_FILE = "" then
                     info("no REPLAY_FILE configured, skipping acquire");
                 else
-                    wait until pll_lock = '1' for PLL_LOCK_TIMEOUT_MS * 1 us;
-                    if pll_lock = '1' then
-                        info("carrier_pll locked at " & time'image(now)
-                             & ", phase_inc_offset = "
-                             & integer'image(to_integer(pll_offset)));
-                        -- Let the PI loop's integral path settle past
-                        -- a few of the slow lock IIR's Tau (~8.2 s).
-                        -- 30 s of recording @ 12 kS/s with
-                        -- CLOCKS_PER_TICK=8 = 23 ms simulated.  By
-                        -- this point the integral state holds the
-                        -- residual-frequency estimate accurately.
-                        wait for 23 ms;
-                        info("after settle: phase_inc_offset = "
-                             & integer'image(to_integer(pll_offset)));
-                        -- Write the converged offset to LOCK_FILE.
-                        if LOCK_FILE /= "" then
-                            file_open(lock_status, lock_f, LOCK_FILE,
-                                      write_mode);
-                            if lock_status = open_ok then
-                                write(lock_buf,
-                                      integer'(to_integer(pll_offset)));
-                                writeline(lock_f, lock_buf);
-                                file_close(lock_f);
-                                info("wrote lock seed to " & LOCK_FILE);
-                            else
-                                info("could not open " & LOCK_FILE
-                                     & " for writing");
-                            end if;
+                    wait until stim_done = '1';
+                    wait for 1 ms;
+                    info("final pll_offset = "
+                         & integer'image(to_integer(pll_offset))
+                         & "  q_filt = "
+                         & integer'image(to_integer(pll_qfilt))
+                         & "  q_lock = "
+                         & integer'image(to_integer(pll_qlock))
+                         & "  lock_state = "
+                         & std_logic'image(pll_lock));
+                    if LOCK_FILE_OUT /= "" then
+                        file_open(lock_status, lock_f, LOCK_FILE_OUT,
+                                  write_mode);
+                        if lock_status = open_ok then
+                            write(lock_buf,
+                                  integer'(to_integer(pll_offset)));
+                            writeline(lock_f, lock_buf);
+                            file_close(lock_f);
+                            info("wrote lock seed to " & LOCK_FILE_OUT);
+                        else
+                            info("could not open " & LOCK_FILE_OUT
+                                 & " for writing");
                         end if;
                     end if;
                     check_equal(pll_lock, '1',
-                        "carrier_pll asserts lock_state within "
-                        & integer'image(PLL_LOCK_TIMEOUT_MS) & " us simulated");
+                        "carrier_pll locked by end of recording");
                 end if;
 
             -----------------------------------------------------------------

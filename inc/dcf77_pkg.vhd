@@ -149,11 +149,15 @@ package dcf77_pkg is
     type dcf77_control_type is record
         enable     : std_logic;     -- master enable
         soft_reset : std_logic;     -- pulse this high to reset the core
+        env_mode   : std_logic;     -- 0 = abs(I) only, 1 = |I| + 3/8*|Q|
     end record;
 
     constant DCF77_CONTROL_RESET : dcf77_control_type := (
         enable     => '1',          -- default-on
-        soft_reset => '0'
+        soft_reset => '0',
+        env_mode   => '0'           -- abs(I) by default; host can set to
+                                    -- '1' for |I|+3/8|Q| (interferer-robust
+                                    -- at ~0.5 dB sensitivity cost).
     );
 
     ---------------------------------------------------------------------------
@@ -176,7 +180,7 @@ package dcf77_pkg is
     -- plan in /Users/eligs/.claude/plans/this-project-aims-to-toasty-pelican.md.
     ---------------------------------------------------------------------------
 
-    -- CTRL register: bit 0 enable, bit 1 soft_reset, rest reserved.
+    -- CTRL register: bit 0 enable, bit 1 soft_reset, bit 2 env_mode, rest reserved.
     function ctrl_to_slv (c : dcf77_control_type) return std_logic_vector;
     function slv_to_ctrl (s : std_logic_vector) return dcf77_control_type;
 
@@ -296,6 +300,7 @@ package body dcf77_pkg is
     begin
         r(0) := c.enable;
         r(1) := c.soft_reset;
+        r(2) := c.env_mode;
         return r;
     end function;
 
@@ -304,6 +309,7 @@ package body dcf77_pkg is
     begin
         c.enable     := s(s'low + 0);
         c.soft_reset := s(s'low + 1);
+        c.env_mode   := s(s'low + 2);
         return c;
     end function;
 

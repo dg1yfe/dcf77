@@ -60,6 +60,20 @@ entity dcf77_core is
         in_sample : in  adc_sample_t;
         in_valid  : in  std_logic;
 
+        -- 0 = abs(I) only (cheaper, ~0.5 dB more sensitive when PLL is
+        -- locked on a single carrier),
+        -- 1 = |I| + 3/8 * |Q| (magnitude approx; robust against in-band
+        -- CW interferers the PLL doesn't track).  Default '1'.
+        env_mode  : in  std_logic := '1';
+
+        -- Raw phase-error tap: sign(I_iir) * Q_box at boxcar rate.
+        -- This is the input to carrier_pll's internal IIR; it carries
+        -- the full post-boxcar bandwidth (≈ 1 kHz), suitable for a
+        -- future PM/PSK correlator.  Width matches the post-mixer
+        -- boxcar (= iq_word_t'length + 7 = 29 b signed).
+        phase_err_out   : out signed(28 downto 0);
+        phase_err_valid : out std_logic;
+
         -- Comprehensive decoder status: time, validity, last frame, RSSI,
         -- sync state, current bit index.  See dcf77_pkg.dcf77_status_type.
         status_out: out dcf77_status_type
@@ -100,10 +114,18 @@ architecture rtl of dcf77_core is
     signal q_box_v    : std_logic;
 
     -- 20 Hz IIR LPF on the I channel (matches the IIR inside
-    -- carrier_pll on the Q channel).  lambda = 2^-4 at 2 kS/s.
+    -- carrier_pll on the loop-filter path).  lambda = 2^-4 at 2 kS/s.
     constant LOOP_IIR_SHIFT : positive := 4;
     signal i_iir      : signed(POST_W - 1 downto 0);
     signal i_iir_v    : std_logic;
+
+    -- Phase-error signal: sign(I_iir) * Q_box, computed at the
+    -- boxcar valid tick (2 kS/s).  Feeds carrier_pll's input in
+    -- place of the raw Q_box, so the PLL's internal IIR averages
+    -- a polarity-resolved phase-error rather than raw Q.  Also
+    -- exposed as a wider-bandwidth tap for downstream PM demod.
+    signal phase_err   : signed(POST_W - 1 downto 0);
+    signal phase_err_v : std_logic;
 
     -- Synchronously-detected envelope at 2 kS/s.  abs(i_iir) post-
     -- boxcar can reach ~ 2^28; we right-shift by 4 before resizing into
@@ -302,26 +324,88 @@ begin
             out_valid  => i_iir_v
         );
 
-    -- abs(i_iir) right-shifted by ENV_RSHIFT lands inside env_word_t.
-    -- Carrier-PLL lock ambiguity (lock at phi=0 or phi=pi) is absorbed
-    -- by the absolute value -- both stable points produce the same
-    -- envelope.  ENV_RSHIFT = 4 keeps env_pwr's peak around 2^24 so the
-    -- bit_det's slow IIR running headroom is preserved.
-    env_proc : process (i_iir)
-        variable a_signed : signed(POST_W downto 0);
-        variable a_unsigned : unsigned(POST_W - 1 downto 0);
-        variable a_shifted  : unsigned(POST_W - 1 downto 0);
+    -- ------------------------------------------------------------------ --
+    -- Phase-error: sign(I_iir) * Q_box.  Multiplying Q by sign(I) makes  --
+    -- the phase detector respond symmetrically to both stable lock      --
+    -- points (Δφ=0 and Δφ=π) and gives a polarity-resolved error signal --
+    -- whose magnitude tracks A·|sin(Δφ)| regardless of I's quadrant.    --
+    -- Sample tick is i_iir_v so I and Q are aligned to the same         --
+    -- 2 kS/s grid.                                                       --
+    -- ------------------------------------------------------------------ --
+    phase_err_proc : process(clk)
     begin
-        a_signed := resize(i_iir, POST_W + 1);
-        if a_signed(POST_W) = '1' then
-            a_signed := -a_signed;
+        if rising_edge(clk) then
+            if rst = '1' then
+                phase_err   <= (others => '0');
+                phase_err_v <= '0';
+            else
+                phase_err_v <= '0';
+                if i_iir_v = '1' then
+                    if i_iir(POST_W - 1) = '1' then  -- I_iir negative
+                        phase_err <= -q_box;
+                    else
+                        phase_err <=  q_box;
+                    end if;
+                    phase_err_v <= '1';
+                end if;
+            end if;
         end if;
-        a_unsigned := unsigned(a_signed(POST_W - 1 downto 0));
-        a_shifted  := shift_right(a_unsigned, ENV_RSHIFT);
-        env_pwr    <= resize(to_sfixed(std_logic_vector(a_shifted),
-                                       POST_W - 1, 0),
-                             env_word_t'high, env_word_t'low,
-                             fixed_saturate, fixed_truncate);
+    end process;
+
+    phase_err_out   <= phase_err;
+    phase_err_valid <= phase_err_v;
+
+    -- Envelope detector.  Two software-selectable modes:
+    --   env_mode='0': abs(I_iir).  Cheapest; relies on PLL lock to keep
+    --                amplitude in I and zero in Q.  ~0.5 dB more
+    --                sensitive than the magnitude mode in clean cases.
+    --   env_mode='1': |I_iir| + 3/8 * |Q_iir|  (alpha=1, beta=3/8
+    --                magnitude approximation; max error ±7 % over
+    --                angle).  Phase-agnostic: robust against in-band
+    --                CW interferers the PLL doesn't track.
+    -- Q_iir == pll_qfilt = the same 20 Hz LPF that runs on I, applied
+    -- internally inside dcf77_carrier_pll.
+    --
+    -- ENV_RSHIFT = 4 keeps env_pwr's peak around 2^24 (env_word_t = sfixed
+    -- 25 downto 0) so bit_det's slow IIR running headroom is preserved.
+    env_proc : process (i_iir, pll_qfilt, env_mode)
+        variable i_abs, q_abs : unsigned(POST_W - 1 downto 0);
+        variable i_ext, q_ext : signed(POST_W downto 0);
+        variable a_max, a_min : unsigned(POST_W - 1 downto 0);
+        variable min_term     : unsigned(POST_W - 1 downto 0);
+        variable env_sum      : unsigned(POST_W downto 0);
+        variable env_sh       : unsigned(POST_W downto 0);
+    begin
+        i_ext := resize(i_iir, POST_W + 1);
+        if i_ext(POST_W) = '1' then i_ext := -i_ext; end if;
+        i_abs := unsigned(i_ext(POST_W - 1 downto 0));
+
+        q_ext := resize(pll_qfilt, POST_W + 1);
+        if q_ext(POST_W) = '1' then q_ext := -q_ext; end if;
+        q_abs := unsigned(q_ext(POST_W - 1 downto 0));
+
+        -- alpha-max + beta-min magnitude approximation, alpha=1, beta=3/8.
+        -- |V| ≈ max(|I|,|Q|) + 3/8 * min(|I|,|Q|).  Max error ±7 %.
+        if i_abs >= q_abs then
+            a_max := i_abs;
+            a_min := q_abs;
+        else
+            a_max := q_abs;
+            a_min := i_abs;
+        end if;
+        min_term := shift_right(a_min, 2) + shift_right(a_min, 3);
+
+        if env_mode = '1' then
+            env_sum := ('0' & a_max) + ('0' & min_term);
+        else
+            env_sum := ('0' & i_abs);
+        end if;
+
+        env_sh := shift_right(env_sum, ENV_RSHIFT);
+        env_pwr <= resize(to_sfixed(std_logic_vector(env_sh(POST_W - 1 downto 0)),
+                                    POST_W - 1, 0),
+                          env_word_t'high, env_word_t'low,
+                          fixed_saturate, fixed_truncate);
     end process;
     env_v <= i_iir_v;
 
@@ -333,12 +417,9 @@ begin
         generic map (
             Q_WIDTH         => POST_W,          -- 29
             OFFSET_WIDTH    => NCO_OFFSET_W,    -- 24
-            -- Tracking gains (alpha = 2^-7, beta = 2^-25).
+            -- PI gains (alpha = 2^-7, beta = 2^-25).
             KP_SHIFT        => 7,
-            KI_SHIFT        => 25,
-            -- Acquisition gains (wider for fast initial pull-in).
-            KP_SHIFT_ACQ    => 5,
-            KI_SHIFT_ACQ    => 14,
+            KI_SHIFT        => 20,
             -- Internal IIRs.
             LOOP_IIR_SHIFT  => LOOP_IIR_SHIFT,  -- 4 -> ~ 20 Hz
             LOCK_IIR_SHIFT  => 14,              -- ~ 8.2 s
@@ -351,8 +432,12 @@ begin
         port map (
             clk              => clk,
             rst              => rst,
-            q_sample         => q_box,
-            q_valid          => q_box_v,
+            -- PLL now sees the polarity-resolved phase-error rather
+            -- than raw Q.  The PLL's internal 20 Hz IIR therefore
+            -- filters phase_err -> pe_filt (still exposed via the
+            -- existing q_filt_out port for backward-compat).
+            q_sample         => phase_err,
+            q_valid          => phase_err_v,
             phase_inc_offset => nco_phase_inc_offset,
             lock_state       => pll_lock,
             q_filt_out       => pll_qfilt,
