@@ -7,14 +7,20 @@
 -- types defined by axi4lite_interface_pkg.
 --
 -- Register map (per dcf77_pkg):
---   0x00 RW  CTRL         enable, soft_reset
---   0x04 R   STATUS       sync_state, time_valid, bit_index, RSSI
---   0x08 R   TIME_HMS     minute, hour
---   0x0C R   DATE         year, month, day, weekday
---   0x10 R   FLAGS        dst_active, dst_announce, leap_announce
---   0x14 R   RSSI         16-b magnitude (mirrors STATUS bits 31..16)
---   0x18 R   LAST_FRAME0  frame bits 0..31
---   0x1C R   LAST_FRAME1  frame bits 32..58
+--   0x00 RW   CTRL         enable, soft_reset, env_mode
+--   0x04 R    STATUS       sync_state, time_valid, bit_index, RSSI
+--   0x08 R    TIME_HMS     minute, hour
+--   0x0C R    DATE         year, month, day, weekday
+--   0x10 R    FLAGS        dst_active, dst_announce, leap_announce
+--   0x14 R    RSSI         16-b magnitude (mirrors STATUS bits 31..16)
+--   0x18 R    LAST_FRAME0  frame bits 0..31
+--   0x1C R    LAST_FRAME1  frame bits 32..58
+--   0x20 R    ENV_MIN      env_min top 16 b
+--   0x24 R    NOISE        noise_iir top 16 b
+--   0x28 R    SYNC_DIAG    sync_q / mm_q / cycle_in_min
+--   0x2C R    SOFT_AM      am_soft + mm_soft + sec_index + valid + mm
+--   0x30 R    SOFT_PM      placeholder (PSK correlator TBD)
+--   0x34 R/W1C SOFT_IRQ    [0] second_tick (W1C), [1] pll_lock, [2] anchor_held
 -- =========================================================================
 
 library ieee;
@@ -96,6 +102,11 @@ architecture rtl of dcf77_axi_lite is
     signal control     : dcf77_control_type;
     signal status      : dcf77_status_type;
 
+    -- Sticky second_tick (set on every bit_valid pulse from the core's
+    -- bit_det, cleared when the host writes '1' to SOFT_IRQ[0]).
+    signal soft_irq_q    : std_logic := '0';
+    signal soft_irq_clr  : std_logic;     -- pulse from writemux
+
     -- Combined active-high reset for the core: external !aresetn OR the
     -- host-controllable soft_reset bit.
     signal core_rst    : std_logic;
@@ -148,7 +159,8 @@ begin
             ROutput  => r_out,
 
             FromStatus  => status,
-            FromControl => control
+            FromControl => control,
+            FromSoftIrq => soft_irq_q
         );
 
     ------------------------------------------------------------------ --
@@ -166,7 +178,8 @@ begin
             BInput   => b_in,
             BOutput  => b_out,
 
-            ToControl => control
+            ToControl    => control,
+            SoftIrqClear => soft_irq_clr
         );
 
     ------------------------------------------------------------------ --
@@ -175,6 +188,24 @@ begin
     ------------------------------------------------------------------ --
     core_rst   <= (not s_axi_aresetn) or control.soft_reset;
     core_valid <= adc_valid and control.enable;
+
+    ------------------------------------------------------------------ --
+    -- Second-tick sticky bit.  Set on every am_soft_valid pulse from   --
+    -- the core (i.e. on each end_of_bit).  Cleared by a host W1C       --
+    -- write to SOFT_IRQ[0].  Read by the AXI readmux.                  --
+    ------------------------------------------------------------------ --
+    soft_irq_proc : process(s_axi_aclk)
+    begin
+        if rising_edge(s_axi_aclk) then
+            if s_axi_aresetn = '0' then
+                soft_irq_q <= '0';
+            elsif soft_irq_clr = '1' then
+                soft_irq_q <= '0';
+            elsif status.am_soft_valid = '1' then
+                soft_irq_q <= '1';
+            end if;
+        end if;
+    end process;
 
     ------------------------------------------------------------------ --
     -- DCF77 receiver core                                                --

@@ -241,8 +241,8 @@ begin
 
             -----------------------------------------------------------------
             elsif run("read_unmapped_decerr") then
-                -- 0x28 is past the last mapped register (NOISE at 0x24) -> DECERR.
-                axi_read(x"28", rd, AXI_RESPONSE_DECERR);
+                -- 0x38 is past the last mapped register (SOFT_IRQ at 0x34) -> DECERR.
+                axi_read(x"38", rd, AXI_RESPONSE_DECERR);
 
             -----------------------------------------------------------------
             elsif run("last_frame_reset") then

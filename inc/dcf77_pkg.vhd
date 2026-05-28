@@ -113,6 +113,16 @@ package dcf77_pkg is
         noise        : rssi_word_t;                   -- top bits of noise IIR (MAD)
         bit_index    : bit_index_t;                   -- current second 0..58 (59 = frame full)
         last_frame   : std_logic_vector(0 to 58);     -- raw bits of last minute
+
+        -- Soft-metric fields (1 Hz, latched at end_of_bit).  Feed the
+        -- SOFT_AM / SOFT_MM registers; PM fields are placeholders
+        -- pending the PSK correlator and return zero.
+        am_soft      : signed(11 downto 0);           -- (acc_W2 - th_new) >> K, saturated
+        am_soft_valid: std_logic;                     -- bit_valid pulse latched
+        mm_soft      : signed(11 downto 0);           -- (acc_W1 - mm_thr) >> K, saturated
+        minute_mark  : std_logic;                     -- last end_of_bit was an mm
+        pll_lock     : std_logic;                     -- carrier_pll lock_state
+        anchor_held  : std_logic;                     -- bit_det has anchor
     end record;
 
     constant DCF77_STATUS_RESET : dcf77_status_type := (
@@ -126,7 +136,13 @@ package dcf77_pkg is
         env_min      => (others => '0'),
         noise        => (others => '0'),
         bit_index    => 0,
-        last_frame   => (others => '0')
+        last_frame   => (others => '0'),
+        am_soft      => (others => '0'),
+        am_soft_valid=> '0',
+        mm_soft      => (others => '0'),
+        minute_mark  => '0',
+        pll_lock     => '0',
+        anchor_held  => '0'
     );
 
     ---------------------------------------------------------------------------
@@ -174,6 +190,9 @@ package dcf77_pkg is
     constant REG_ENV_MIN     : natural := 8;   -- 0x20 R   env_min top 16 b
     constant REG_NOISE       : natural := 9;   -- 0x24 R   noise_iir top 16 b
     constant REG_SYNC_DIAG   : natural := 10;  -- 0x28 R   sync_q / mm_q / cycle_in_min
+    constant REG_SOFT_AM     : natural := 11;  -- 0x2C R   AM soft metric + flags
+    constant REG_SOFT_PM     : natural := 12;  -- 0x30 R   PM soft metric (placeholder)
+    constant REG_SOFT_IRQ    : natural := 13;  -- 0x34 mixed: bit 0 R/W1C, bits 2:1 R
 
     ---------------------------------------------------------------------------
     -- 32-b register pack / unpack helpers.  The bit layouts below match the
@@ -213,6 +232,18 @@ package dcf77_pkg is
     --   bits 13..8  : cycle_in_min (0..59 predicted second-in-minute)
     --   bits 31..14 : reserved
     function sync_diag_to_slv (s : dcf77_status_type) return std_logic_vector;
+
+    -- SOFT_AM register (both AM and MM LLRs in one word):
+    --   [11:0]  am_soft (signed 12 b, = (acc_W2 - th_new) >> K, sat)
+    --   [23:12] mm_soft (signed 12 b, = (acc_W1 - mm_thr) >> K, sat)
+    --   [29:24] second_index (bit_index 0..58)
+    --   [30]    am_valid (also covers mm_soft -- both update together)
+    --   [31]    minute_mark (last end_of_bit produced an mm)
+    function soft_am_to_slv  (s : dcf77_status_type) return std_logic_vector;
+
+    -- SOFT_PM register: placeholder, returns all zeros until the PSK
+    -- correlator exists.  Layout reserved for symmetry with SOFT_AM.
+    function soft_pm_to_slv  (s : dcf77_status_type) return std_logic_vector;
 
     ---------------------------------------------------------------------------
     -- Helper functions.
@@ -374,6 +405,25 @@ package body dcf77_pkg is
         r( 5 downto  0) := std_logic_vector(s.sync_quality);
         r( 7 downto  6) := std_logic_vector(s.mm_quality);
         r(13 downto  8) := std_logic_vector(s.cycle_in_min);
+        return r;
+    end function;
+
+    function soft_am_to_slv (s : dcf77_status_type) return std_logic_vector is
+        variable r : std_logic_vector(31 downto 0) := (others => '0');
+    begin
+        r(11 downto  0) := std_logic_vector(s.am_soft);
+        r(23 downto 12) := std_logic_vector(s.mm_soft);
+        r(29 downto 24) := std_logic_vector(to_unsigned(s.bit_index, 6));
+        r(30)           := s.am_soft_valid;
+        r(31)           := s.minute_mark;
+        return r;
+    end function;
+
+    function soft_pm_to_slv (s : dcf77_status_type) return std_logic_vector is
+        variable r : std_logic_vector(31 downto 0) := (others => '0');
+    begin
+        -- PM correlator does not yet exist; reserve the layout and
+        -- return zero so software gets pm_valid='0'.
         return r;
     end function;
 

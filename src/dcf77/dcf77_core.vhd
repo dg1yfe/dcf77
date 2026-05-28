@@ -151,6 +151,11 @@ architecture rtl of dcf77_core is
     -- Carrier-PLL-gated decoder outputs.
     signal bit_v_gated     : std_logic;
     signal minute_mk_gated : std_logic;
+
+    signal am_soft_s       : signed(11 downto 0);
+    signal am_soft_v_s     : std_logic;
+    signal mm_soft_s       : signed(11 downto 0);
+    signal anchor_held_s   : std_logic;
     signal sync_st_gated   : sync_state_t;
     signal env_max_s  : env_word_t;
     signal env_min_s  : env_word_t;
@@ -472,6 +477,10 @@ begin
             env_min       => env_min_s,
             noise         => noise_s,
             threshold     => thresh_s,
+            am_soft       => am_soft_s,
+            am_soft_valid => am_soft_v_s,
+            mm_soft       => mm_soft_s,
+            anchor_held   => anchor_held_s,
             edge_accepted => open
         );
 
@@ -528,5 +537,14 @@ begin
     status_out.rssi    <= env_to_rssi(env_max_s);
     status_out.env_min <= env_to_rssi(env_min_s);
     status_out.noise   <= env_to_rssi(noise_s);
+
+    -- Soft metric and per-bit status flags.  bit_index in the status
+    -- record provides the second_index for the SOFT_AM register.
+    status_out.am_soft       <= am_soft_s;
+    status_out.am_soft_valid <= am_soft_v_s;
+    status_out.mm_soft       <= mm_soft_s;
+    status_out.minute_mark   <= minute_mk_gated;
+    status_out.pll_lock      <= pll_lock;
+    status_out.anchor_held   <= anchor_held_s;
 
 end architecture rtl;

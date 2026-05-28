@@ -31,7 +31,11 @@ entity axi_readmux is
         -- decoder status, and the host-writable control (echoed back from
         -- the writemux so the host can read what it wrote).
         FromStatus  : in dcf77_status_type;
-        FromControl : in dcf77_control_type
+        FromControl : in dcf77_control_type;
+
+        -- Sticky second_tick bit (set on bit_valid, cleared by host
+        -- write to SOFT_IRQ).  Driven by the axi_lite wrapper.
+        FromSoftIrq : in std_logic
     );
 end entity axi_readmux;
 
@@ -129,6 +133,16 @@ begin
                                   others => '0');
                     v.ro.data(15 downto 0) := std_logic_vector(r.st.noise);
                 when REG_SYNC_DIAG   => v.ro.data := sync_diag_to_slv(r.st);
+                when REG_SOFT_AM     => v.ro.data := soft_am_to_slv(r.st);
+                when REG_SOFT_PM     => v.ro.data := soft_pm_to_slv(r.st);
+                when REG_SOFT_IRQ    =>
+                    -- Mixed register: bit 0 is the sticky second_tick
+                    -- (W1C from the writemux); bits 2..1 mirror per-bit
+                    -- status flags from the latched status record.
+                    v.ro.data := (others => '0');
+                    v.ro.data(0) := FromSoftIrq;
+                    v.ro.data(1) := r.st.pll_lock;
+                    v.ro.data(2) := r.st.anchor_held;
                 when others =>
                     v.ro.data := (others => '0');
                     v.ro.resp := AXI_RESPONSE_DECERR;

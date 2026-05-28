@@ -80,7 +80,18 @@ entity dcf77_bit_det is
         -- Per-cycle diagnostic dump at every end_of_bit (acc_W1, acc_W2,
         -- mm_thr, th_new, candidate, bit_value).  Off by default; flip
         -- to true in a TB when chasing false candidate / wrong bit value.
-        DEBUG_TRACE    : boolean := false
+        DEBUG_TRACE    : boolean := false;
+
+        -- AM-LLR right shift applied to (acc_W2 - th_new) before saturating
+        -- into 12-bit signed.  Default 7 keeps the dynamic range of a
+        -- ~3000 env_peak corpus inside ±2 k LSB.  Software is told this
+        -- constant and treats am_soft as a fixed-point LLR.
+        AM_LLR_SHIFT   : positive := 7;
+
+        -- MM-LLR right shift applied to (acc_W1 - mm_thr) before saturating
+        -- into 12-bit signed.  Same scale rationale as AM_LLR_SHIFT;
+        -- acc_W1 and mm_thr live on the same acc10_t / iir_high range.
+        MM_LLR_SHIFT   : positive := 7
     );
     port (
         clk         : in  std_logic;
@@ -100,6 +111,19 @@ entity dcf77_bit_det is
         env_min       : out env_word_t;
         noise         : out env_word_t;
         threshold     : out env_word_t;
+
+        -- Latched AM-LLR (signed 12 b): acc_W2 - th_new, right-shifted
+        -- by AM_LLR_SHIFT, saturated.  Updated at end_of_bit; holds
+        -- between updates.  Negative => bit '1' favoured, positive =>
+        -- bit '0' favoured.  am_soft_valid pulses with bit_valid.
+        am_soft       : out signed(11 downto 0);
+        am_soft_valid : out std_logic;
+
+        -- Latched MM-LLR (signed 12 b): acc_W1 - mm_thr, right-shifted
+        -- by MM_LLR_SHIFT, saturated.  Positive => minute-mark
+        -- candidate (W1 carrier-on, no dip), negative => normal bit.
+        mm_soft       : out signed(11 downto 0);
+        anchor_held   : out std_logic;
 
         edge_accepted : out std_logic
     );
@@ -195,6 +219,8 @@ architecture rtl of dcf77_bit_det is
         bit_valid     : std_logic;
         minute_mark   : std_logic;
         edge_accepted : std_logic;
+        am_soft       : signed(11 downto 0);
+        mm_soft       : signed(11 downto 0);
     end record;
 
     constant ZERO_ENV   : env_word_t := (others => '0');
@@ -226,7 +252,9 @@ architecture rtl of dcf77_bit_det is
         bit_value       => '0',
         bit_valid       => '0',
         minute_mark     => '0',
-        edge_accepted   => '0'
+        edge_accepted   => '0',
+        am_soft         => (others => '0'),
+        mm_soft         => (others => '0')
     );
 
     signal r, rin : reg_type;
@@ -236,6 +264,10 @@ begin
     bit_value     <= r.bit_value;
     bit_valid     <= r.bit_valid;
     minute_mark   <= r.minute_mark;
+    am_soft       <= r.am_soft;
+    am_soft_valid <= r.bit_valid;
+    mm_soft       <= r.mm_soft;
+    anchor_held   <= r.have_anchor;
     sync_quality  <= to_unsigned(r.sync_q,       6);
     mm_quality    <= to_unsigned(r.mm_counter,   2);
     cycle_in_min  <= to_unsigned(r.cycle_in_min, 6);
@@ -291,6 +323,8 @@ begin
         variable new_iir       : sfixed(acc10_t'high + 1 downto acc10_t'low);
         variable th_new        : acc10_t;
         variable th_h1, th_h4, th_h6 : acc10_t;
+        variable am_soft_full  : acc10_t;
+        variable mm_soft_full  : acc10_t;
         variable em_acc, em_x4, em_x2, mm_thr : acc10_t;
     begin
         v := r;
@@ -582,6 +616,26 @@ begin
                     end if;
                     do_fire_bit := '1';
                 end if;
+
+                -- AM-LLR: (acc_W2 - th_new) >> AM_LLR_SHIFT, saturated to
+                -- 12-bit signed.  Sign convention: positive = bit '0'
+                -- favoured (carrier present in W2), negative = bit '1'.
+                am_soft_full := resize(v.acc_W2 - th_new,
+                                       am_soft_full'high, am_soft_full'low,
+                                       fixed_saturate, fixed_truncate);
+                v.am_soft := signed(to_slv(resize(
+                    shift_right(am_soft_full, AM_LLR_SHIFT),
+                    11, 0, fixed_saturate, fixed_truncate)));
+
+                -- MM-LLR: (acc_W1 - mm_thr) >> MM_LLR_SHIFT, saturated.
+                -- Positive = minute-mark candidate (no dip in W1),
+                -- negative = normal bit (W1 contains the dip).
+                mm_soft_full := resize(v.acc_W1 - mm_thr,
+                                       mm_soft_full'high, mm_soft_full'low,
+                                       fixed_saturate, fixed_truncate);
+                v.mm_soft := signed(to_slv(resize(
+                    shift_right(mm_soft_full, MM_LLR_SHIFT),
+                    11, 0, fixed_saturate, fixed_truncate)));
 
                 v.bit_valid   := do_fire_bit;
                 v.minute_mark := do_fire_mm;

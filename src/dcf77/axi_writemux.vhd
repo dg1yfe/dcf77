@@ -33,7 +33,12 @@ entity axi_writemux is
         BInput  : in  axi4lite_write_response_channel_input_type;
         BOutput : out axi4lite_write_response_channel_output_type;
 
-        ToControl : out dcf77_control_type
+        ToControl : out dcf77_control_type;
+
+        -- One-cycle pulse: AXI host wrote '1' to SOFT_IRQ[0].  The
+        -- containing axi_lite block uses this to clear its sticky
+        -- second_tick flop.
+        SoftIrqClear : out std_logic
     );
 end entity axi_writemux;
 
@@ -47,6 +52,7 @@ architecture rtl of axi_writemux is
         bi  : axi4lite_write_response_channel_input_type;
         bo  : axi4lite_write_response_channel_output_type;
         ctrl: dcf77_control_type;
+        soft_irq_clear : std_logic;       -- one-cycle pulse
     end record;
 
     constant AWI_RESET : axi4lite_address_channel_input_type := (
@@ -74,7 +80,8 @@ architecture rtl of axi_writemux is
         wo   => WO_RESET,
         bi   => BI_RESET,
         bo   => BO_RESET,
-        ctrl => DCF77_CONTROL_RESET
+        ctrl => DCF77_CONTROL_RESET,
+        soft_irq_clear => '0'
     );
 
     signal r, rin : wmux_reg_type;
@@ -85,6 +92,7 @@ begin
     WOutput   <= r.wo;
     BOutput   <= r.bo;
     ToControl <= r.ctrl;
+    SoftIrqClear <= r.soft_irq_clear;
 
     comb : process (all)
         variable v       : wmux_reg_type;
@@ -100,6 +108,7 @@ begin
         -- transaction, so the registered output is high for exactly one
         -- clock.
         v.ctrl.soft_reset := '0';
+        v.soft_irq_clear  := '0';
 
         -- Register incoming AXI signals.
         v.awi := AWInput;
@@ -142,10 +151,19 @@ begin
             case word_ix is
                 when REG_CTRL =>
                     -- Field-by-field update so persistent and pulsed bits
-                    -- can be handled differently.  enable is sticky; soft_reset
-                    -- is a one-cycle pulse cleared by the default above.
+                    -- can be handled differently.  enable, env_mode
+                    -- sticky; soft_reset is a one-cycle pulse cleared
+                    -- by the default above.
                     v.ctrl.enable     := r.wi.data(0);
                     v.ctrl.soft_reset := r.wi.data(1);
+                    v.ctrl.env_mode   := r.wi.data(2);
+                    v.bo.resp := AXI_RESPONSE_OKAY;
+                when REG_SOFT_IRQ =>
+                    -- W1C: a write of '1' to bit 0 clears the sticky
+                    -- second_tick in the containing axi_lite block.
+                    if r.wi.data(0) = '1' then
+                        v.soft_irq_clear := '1';
+                    end if;
                     v.bo.resp := AXI_RESPONSE_OKAY;
                 when others =>
                     v.bo.resp := AXI_RESPONSE_SLVERR;
