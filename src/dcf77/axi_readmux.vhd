@@ -135,6 +135,12 @@ begin
                 when REG_SYNC_DIAG   => v.ro.data := sync_diag_to_slv(r.st);
                 when REG_SOFT_AM     => v.ro.data := soft_am_to_slv(r.st);
                 when REG_SOFT_PM     => v.ro.data := soft_pm_to_slv(r.st);
+                when REG_PM_STATUS      => v.ro.data := pm_status_to_slv(r.st);
+                when REG_PM_TIME_HMS    => v.ro.data := pm_time_hms_to_slv(r.st);
+                when REG_PM_DATE        => v.ro.data := pm_date_to_slv(r.st);
+                when REG_PM_FLAGS       => v.ro.data := pm_flags_to_slv(r.st);
+                when REG_PM_LAST_FRAME0 => v.ro.data := pm_last_frame0_to_slv(r.st);
+                when REG_PM_LAST_FRAME1 => v.ro.data := pm_last_frame1_to_slv(r.st);
                 when REG_SOFT_IRQ    =>
                     -- Mixed register: bit 0 is the sticky second_tick
                     -- (W1C from the writemux); bits 2..1 mirror per-bit

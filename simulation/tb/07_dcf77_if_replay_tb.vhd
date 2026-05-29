@@ -168,6 +168,7 @@ architecture tb of dcf77_if_replay_tb is
     signal sync_st_raw           : sync_state_t;
     signal sync_st               : sync_state_t;
     signal env_max_s, env_min_s  : env_word_t;
+    signal et_falling_edge_s     : std_logic;
     signal noise_s, thresh_s     : env_word_t;
     signal time_d                : dcf77_time_type;
     signal time_v_d              : std_logic;
@@ -436,8 +437,20 @@ begin
                NCO_OFFSET_W);
 
     -- ------------------------------------------------------------------ --
-    -- bit_det at 2 kS/s.  Defaults match production; mirror dcf77_core.    --
+    -- env_tracker + bit_det at 2 kS/s.  Mirrors dcf77_core.                --
     -- ------------------------------------------------------------------ --
+    u_env_tracker : entity dcf77.dcf77_env_tracker
+        port map (
+            clk          => clk,
+            rst          => rst,
+            env_in       => env_pwr,
+            env_valid    => env_v,
+            env_max      => env_max_s,
+            env_min      => env_min_s,
+            noise        => noise_s,
+            falling_edge => et_falling_edge_s
+        );
+
     u_bit_det : entity dcf77.dcf77_bit_det
         generic map (
             DEBUG_TRACE => BIT_DET_DEBUG_TRACE
@@ -447,6 +460,10 @@ begin
             rst           => rst,
             env_in        => env_pwr,
             env_valid     => env_v,
+            env_max_in    => env_max_s,
+            env_min_in    => env_min_s,
+            noise_in      => noise_s,
+            falling_edge  => et_falling_edge_s,
             bit_value     => bit_val_raw,
             bit_valid     => bit_v_raw,
             minute_mark   => mm_raw,
@@ -454,9 +471,9 @@ begin
             sync_quality  => open,
             mm_quality    => open,
             cycle_in_min  => open,
-            env_max       => env_max_s,
-            env_min       => env_min_s,
-            noise         => noise_s,
+            env_max       => open,
+            env_min       => open,
+            noise         => open,
             threshold     => thresh_s,
             edge_accepted => open
         );

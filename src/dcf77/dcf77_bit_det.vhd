@@ -40,18 +40,6 @@ use work.dcf77_pkg.all;
 
 entity dcf77_bit_det is
     generic (
-        -- Slow trackers (SNR estimator) -- shifts at the env_valid rate.
-        -- Defaults below are scaled for SAMPLE_RATE_HZ = 2000 (= +5 over
-        -- the legacy 100 S/s defaults so the continuous-time TCs match).
-        K_ATK          : positive := 8;
-        K_DEC          : positive := 14;
-        K_NOISE        : positive := 14;
-
-        -- Falling-edge amplitude detector.
-        -- DERIV_DELAY = ~ one IIR-TC of the upstream 20 Hz LPF.
-        DERIV_DELAY    : positive := 16;
-        K_SLOPE        : positive := 2;
-
         -- Symbol windows (in env_valid ticks at SAMPLE_RATE_HZ).
         -- 100 ms / 200 ms windows at 2 kS/s.
         BIT_PERIOD     : positive := 2000;
@@ -100,6 +88,13 @@ entity dcf77_bit_det is
         env_in      : in  env_word_t;
         env_valid   : in  std_logic;
 
+        -- Statistics from dcf77_env_tracker (registered, valid on the
+        -- cycle following env_valid):
+        env_max_in   : in  env_word_t;
+        env_min_in   : in  env_word_t;
+        noise_in     : in  env_word_t;
+        falling_edge : in  std_logic;
+
         bit_value     : out std_logic;
         bit_valid     : out std_logic;
         minute_mark   : out std_logic;
@@ -107,9 +102,9 @@ entity dcf77_bit_det is
         sync_quality  : out unsigned(5 downto 0);
         mm_quality    : out unsigned(1 downto 0);
         cycle_in_min  : out unsigned(5 downto 0);
-        env_max       : out env_word_t;
-        env_min       : out env_word_t;
-        noise         : out env_word_t;
+        env_max       : out env_word_t;   -- passthrough of env_max_in
+        env_min       : out env_word_t;   -- passthrough of env_min_in
+        noise         : out env_word_t;   -- passthrough of noise_in
         threshold     : out env_word_t;
 
         -- Latched AM-LLR (signed 12 b): acc_W2 - th_new, right-shifted
@@ -164,22 +159,7 @@ architecture rtl of dcf77_bit_det is
     subtype acc10_t is acc12_t;
     subtype acc80_t is acc3_t;
 
-    constant DELAY_DEPTH : natural := DERIV_DELAY + 1;
-    type env_delay_t is array (0 to DELAY_DEPTH - 1) of env_word_t;
-
     type reg_type is record
-        -- Slow trackers.
-        env_max     : env_word_t;
-        env_min     : env_word_t;
-        noise_iir   : env_word_t;
-        carrier_thr : env_word_t;
-        carrier_hys : env_word_t;
-        carrier     : std_logic;
-
-        -- Falling-edge detector.
-        env_dly     : env_delay_t;
-        slope_below : std_logic;
-
         -- Free-running modulo-BIT_PERIOD sample counter.
         sample_in_bit : natural range 0 to BIT_PERIOD - 1;
         have_anchor   : std_logic;
@@ -223,19 +203,10 @@ architecture rtl of dcf77_bit_det is
         mm_soft       : signed(11 downto 0);
     end record;
 
-    constant ZERO_ENV   : env_word_t := (others => '0');
-    constant ZERO_ACC10 : acc10_t    := (others => '0');
-    constant ZERO_ACC80 : acc80_t    := (others => '0');
+    constant ZERO_ACC10 : acc10_t := (others => '0');
+    constant ZERO_ACC80 : acc80_t := (others => '0');
 
     constant R_RESET : reg_type := (
-        env_max         => ZERO_ENV,
-        env_min         => ZERO_ENV,
-        noise_iir       => ZERO_ENV,
-        carrier_thr     => ZERO_ENV,
-        carrier_hys     => ZERO_ENV,
-        carrier         => '1',
-        env_dly         => (others => ZERO_ENV),
-        slope_below     => '0',
         sample_in_bit   => 0,
         have_anchor     => '0',
         give_up_cnt     => 0,
@@ -271,9 +242,10 @@ begin
     sync_quality  <= to_unsigned(r.sync_q,       6);
     mm_quality    <= to_unsigned(r.mm_counter,   2);
     cycle_in_min  <= to_unsigned(r.cycle_in_min, 6);
-    env_max       <= r.env_max;
-    env_min       <= r.env_min;
-    noise         <= r.noise_iir;
+    -- Passthroughs from the upstream env_tracker (already registered there):
+    env_max       <= env_max_in;
+    env_min       <= env_min_in;
+    noise         <= noise_in;
     edge_accepted <= r.edge_accepted;
     threshold     <= resize(r.threshold_o,
                             env_word_t'high, env_word_t'low,
@@ -293,20 +265,8 @@ begin
     comb : process (all)
         variable v          : reg_type;
 
-        -- Slow-tracker scratch.
-        variable delta_e    : sfixed(env_word_t'high + 1 downto env_word_t'low);
-        variable abs_dev    : sfixed(env_word_t'high + 1 downto env_word_t'low);
-        variable shifted_e  : sfixed(env_word_t'high + 1 downto env_word_t'low);
-        variable th_hi      : sfixed(env_word_t'high + 1 downto env_word_t'low);
-        variable th_lo      : sfixed(env_word_t'high + 1 downto env_word_t'low);
-        variable new_max    : sfixed(env_word_t'high + 1 downto env_word_t'low);
-        variable new_min    : sfixed(env_word_t'high + 1 downto env_word_t'low);
-        variable new_noise  : sfixed(env_word_t'high + 1 downto env_word_t'low);
-
-        -- Falling-edge detector scratch.
-        variable d1         : sfixed(env_word_t'high + 1 downto env_word_t'low);
-        variable slope_thr  : sfixed(env_word_t'high + 1 downto env_word_t'low);
-        variable neg_thr    : sfixed(env_word_t'high + 1 downto env_word_t'low);
+        -- amp_ok = the env_tracker's falling_edge pulse (renamed locally
+        -- to match the original anchor-logic phrasing).
         variable amp_ok     : std_logic;
 
         -- Bit-counter scratch.
@@ -339,107 +299,9 @@ begin
 
         if env_valid = '1' then
 
-            -- ============================================================
-            -- (1) Slow trackers (env_max / env_min / noise_iir / carrier).
-            -- ============================================================
-            if env_in > r.env_max then
-                delta_e   := resize(env_in - r.env_max,
-                                    delta_e'high, delta_e'low);
-                shifted_e := shift_right(delta_e, K_ATK);
-                new_max   := resize(r.env_max + shifted_e,
-                                    new_max'high, new_max'low);
-            else
-                shifted_e := shift_right(resize(r.env_max,
-                                                shifted_e'high, shifted_e'low),
-                                         K_DEC);
-                new_max   := resize(r.env_max - shifted_e,
-                                    new_max'high, new_max'low);
-            end if;
-            v.env_max := resize(new_max, env_word_t'high, env_word_t'low,
-                                fixed_saturate, fixed_truncate);
-
-            if env_in < r.env_min then
-                delta_e   := resize(r.env_min - env_in,
-                                    delta_e'high, delta_e'low);
-                shifted_e := shift_right(delta_e, K_ATK);
-                new_min   := resize(r.env_min - shifted_e,
-                                    new_min'high, new_min'low);
-            else
-                delta_e   := resize(r.env_max - r.env_min,
-                                    delta_e'high, delta_e'low);
-                shifted_e := shift_right(delta_e, K_DEC);
-                new_min   := resize(r.env_min + shifted_e,
-                                    new_min'high, new_min'low);
-            end if;
-            v.env_min := resize(new_min, env_word_t'high, env_word_t'low,
-                                fixed_saturate, fixed_truncate);
-
-            v.carrier_thr := resize(shift_right(v.env_max, 1),
-                                    env_word_t'high, env_word_t'low,
-                                    fixed_saturate, fixed_truncate);
-            v.carrier_hys := resize(shift_right(v.env_max, 3),
-                                    env_word_t'high, env_word_t'low,
-                                    fixed_saturate, fixed_truncate);
-            th_hi := resize(v.carrier_thr + v.carrier_hys,
-                            th_hi'high, th_hi'low);
-            th_lo := resize(v.carrier_thr - v.carrier_hys,
-                            th_lo'high, th_lo'low);
-            if env_in >= th_hi then
-                v.carrier := '1';
-            elsif env_in <= th_lo then
-                v.carrier := '0';
-            else
-                v.carrier := r.carrier;
-            end if;
-
-            if v.carrier = '1' then
-                delta_e := resize(env_in - r.env_max,
-                                  delta_e'high, delta_e'low);
-            else
-                delta_e := resize(env_in - r.env_min,
-                                  delta_e'high, delta_e'low);
-            end if;
-            if delta_e(delta_e'high) = '1' then
-                abs_dev := resize(- delta_e, abs_dev'high, abs_dev'low);
-            else
-                abs_dev := delta_e;
-            end if;
-            shifted_e := shift_right(resize(r.noise_iir,
-                                            shifted_e'high, shifted_e'low),
-                                     K_NOISE);
-            new_noise := resize(r.noise_iir
-                                + resize(shift_right(abs_dev, K_NOISE),
-                                         new_noise'high, new_noise'low)
-                                - shifted_e,
-                                new_noise'high, new_noise'low);
-            v.noise_iir := resize(new_noise, env_word_t'high, env_word_t'low,
-                                  fixed_saturate, fixed_truncate);
-
-            -- ============================================================
-            -- (2) Falling-edge amplitude detector (one-shot debounced).
-            -- ============================================================
-            d1 := resize(env_in - r.env_dly(DERIV_DELAY - 1),
-                         d1'high, d1'low);
-            slope_thr := resize(shift_right(v.env_max, K_SLOPE),
-                                slope_thr'high, slope_thr'low);
-            neg_thr   := resize(- slope_thr,
-                                neg_thr'high, neg_thr'low);
-
-            amp_ok := '0';
-            if slope_thr > to_sfixed(0, slope_thr'high, slope_thr'low)
-               and d1 < neg_thr then
-                if r.slope_below = '0' then
-                    amp_ok := '1';
-                end if;
-                v.slope_below := '1';
-            else
-                v.slope_below := '0';
-            end if;
-
-            for i in DELAY_DEPTH - 1 downto 1 loop
-                v.env_dly(i) := r.env_dly(i - 1);
-            end loop;
-            v.env_dly(0) := env_in;
+            -- Slow trackers + falling-edge detector now live in
+            -- dcf77_env_tracker; consume its outputs directly.
+            amp_ok := falling_edge;
 
             -- ============================================================
             -- (3) Anchor + counter advance.

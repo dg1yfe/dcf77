@@ -123,6 +123,21 @@ package dcf77_pkg is
         minute_mark  : std_logic;                     -- last end_of_bit was an mm
         pll_lock     : std_logic;                     -- carrier_pll lock_state
         anchor_held  : std_logic;                     -- bit_det has anchor
+
+        -- PM (PSK/SIK) path fields.  Sourced by dcf77_pm_correlator +
+        -- a second instance of dcf77_frame_dec configured with
+        -- PM_MODE=true.  All values default to zero before the first
+        -- PM lock is achieved.
+        pm_soft         : signed(11 downto 0);        -- SIK bit LLR
+        pm_valid        : std_logic;                  -- pm_soft / pm_sec_index just updated
+        pm_minute_mark  : std_logic;                  -- SIK signature was just detected
+        pm_sec_index    : bit_index_t;                -- 0..59, latched at pm_valid
+        pm_bit_index    : bit_index_t;                -- live frame_dec bit_idx
+        pm_sync_state   : std_logic_vector(1 downto 0);  -- correlator sync state
+        pm_lock_qual    : unsigned(15 downto 0);      -- correlator lock-quality IIR
+        pm_time         : dcf77_time_type;            -- PM-decoded time
+        pm_time_valid   : std_logic;                  -- PM frame decoded OK
+        pm_last_frame   : std_logic_vector(0 to 58);  -- raw PM frame bits
     end record;
 
     constant DCF77_STATUS_RESET : dcf77_status_type := (
@@ -142,7 +157,17 @@ package dcf77_pkg is
         mm_soft      => (others => '0'),
         minute_mark  => '0',
         pll_lock     => '0',
-        anchor_held  => '0'
+        anchor_held  => '0',
+        pm_soft         => (others => '0'),
+        pm_valid        => '0',
+        pm_minute_mark  => '0',
+        pm_sec_index    => 0,
+        pm_bit_index    => 0,
+        pm_sync_state   => (others => '0'),
+        pm_lock_qual    => (others => '0'),
+        pm_time         => DCF77_TIME_RESET,
+        pm_time_valid   => '0',
+        pm_last_frame   => (others => '0')
     );
 
     ---------------------------------------------------------------------------
@@ -190,9 +215,15 @@ package dcf77_pkg is
     constant REG_ENV_MIN     : natural := 8;   -- 0x20 R   env_min top 16 b
     constant REG_NOISE       : natural := 9;   -- 0x24 R   noise_iir top 16 b
     constant REG_SYNC_DIAG   : natural := 10;  -- 0x28 R   sync_q / mm_q / cycle_in_min
-    constant REG_SOFT_AM     : natural := 11;  -- 0x2C R   AM soft metric + flags
-    constant REG_SOFT_PM     : natural := 12;  -- 0x30 R   PM soft metric (placeholder)
-    constant REG_SOFT_IRQ    : natural := 13;  -- 0x34 mixed: bit 0 R/W1C, bits 2:1 R
+    constant REG_SOFT_AM        : natural := 11;  -- 0x2C R   AM soft metric + flags
+    constant REG_SOFT_PM        : natural := 12;  -- 0x30 R   PM soft metric + flags
+    constant REG_SOFT_IRQ       : natural := 13;  -- 0x34 mixed: bit 0 R/W1C, bits 2:1 R
+    constant REG_PM_STATUS      : natural := 14;  -- 0x38 R   PM sync/lock diagnostics
+    constant REG_PM_TIME_HMS    : natural := 15;  -- 0x3C R   PM-decoded HH:MM
+    constant REG_PM_DATE        : natural := 16;  -- 0x40 R   PM-decoded date
+    constant REG_PM_FLAGS       : natural := 17;  -- 0x44 R   PM-decoded flags
+    constant REG_PM_LAST_FRAME0 : natural := 18;  -- 0x48 R   PM frame bits 0..31
+    constant REG_PM_LAST_FRAME1 : natural := 19;  -- 0x4C R   PM frame bits 32..58
 
     ---------------------------------------------------------------------------
     -- 32-b register pack / unpack helpers.  The bit layouts below match the
@@ -241,9 +272,30 @@ package dcf77_pkg is
     --   [31]    minute_mark (last end_of_bit produced an mm)
     function soft_am_to_slv  (s : dcf77_status_type) return std_logic_vector;
 
-    -- SOFT_PM register: placeholder, returns all zeros until the PSK
-    -- correlator exists.  Layout reserved for symmetry with SOFT_AM.
+    -- SOFT_PM register:
+    --   [5:0]    pm_sec_index   (snapshot — second pm_soft was latched for)
+    --   [17:6]   pm_soft        (signed 12 b, SIK bit LLR)
+    --   [29:18]  reserved       (was pm_mm_soft; software computes its own)
+    --   [30]     pm_valid
+    --   [31]     pm_minute_mark
     function soft_pm_to_slv  (s : dcf77_status_type) return std_logic_vector;
+
+    -- PM_STATUS register:
+    --   [5:0]    pm_bit_index   (live 0..59 counter from frame_dec_pm)
+    --   [7:6]    pm_sync_state  (0=FILL, 1=ACQUIRE, 2=LOCK)
+    --   [8]      pm_time_valid
+    --   [31:16]  pm_lock_qual   (slow IIR of |pm_soft|)
+    function pm_status_to_slv (s : dcf77_status_type) return std_logic_vector;
+
+    -- PM_TIME_HMS / PM_DATE / PM_FLAGS: same layouts as TIME_HMS / DATE /
+    -- FLAGS but populated from the PM-side decoded time.
+    function pm_time_hms_to_slv (s : dcf77_status_type) return std_logic_vector;
+    function pm_date_to_slv     (s : dcf77_status_type) return std_logic_vector;
+    function pm_flags_to_slv    (s : dcf77_status_type) return std_logic_vector;
+
+    -- PM_LAST_FRAME0 / 1: PM frame bits 0..31 / 32..58.
+    function pm_last_frame0_to_slv (s : dcf77_status_type) return std_logic_vector;
+    function pm_last_frame1_to_slv (s : dcf77_status_type) return std_logic_vector;
 
     ---------------------------------------------------------------------------
     -- Helper functions.
@@ -422,8 +474,66 @@ package body dcf77_pkg is
     function soft_pm_to_slv (s : dcf77_status_type) return std_logic_vector is
         variable r : std_logic_vector(31 downto 0) := (others => '0');
     begin
-        -- PM correlator does not yet exist; reserve the layout and
-        -- return zero so software gets pm_valid='0'.
+        r( 5 downto  0) := std_logic_vector(to_unsigned(s.pm_sec_index, 6));
+        r(17 downto  6) := std_logic_vector(s.pm_soft);
+        -- bits 29..18 reserved (was pm_mm_soft)
+        r(30)           := s.pm_valid;
+        r(31)           := s.pm_minute_mark;
+        return r;
+    end function;
+
+    function pm_status_to_slv (s : dcf77_status_type) return std_logic_vector is
+        variable r : std_logic_vector(31 downto 0) := (others => '0');
+    begin
+        r( 5 downto  0) := std_logic_vector(to_unsigned(s.pm_bit_index, 6));
+        r( 7 downto  6) := s.pm_sync_state;
+        r(8)            := s.pm_time_valid;
+        r(31 downto 16) := std_logic_vector(s.pm_lock_qual);
+        return r;
+    end function;
+
+    function pm_time_hms_to_slv (s : dcf77_status_type) return std_logic_vector is
+        variable r : std_logic_vector(31 downto 0) := (others => '0');
+    begin
+        r( 5 downto  0) := std_logic_vector(s.pm_time.minute);
+        r(12 downto  8) := std_logic_vector(s.pm_time.hour);
+        return r;
+    end function;
+
+    function pm_date_to_slv (s : dcf77_status_type) return std_logic_vector is
+        variable r : std_logic_vector(31 downto 0) := (others => '0');
+    begin
+        r( 7 downto  0) := std_logic_vector(s.pm_time.year);
+        r(11 downto  8) := std_logic_vector(s.pm_time.month);
+        r(20 downto 16) := std_logic_vector(s.pm_time.day);
+        r(26 downto 24) := std_logic_vector(s.pm_time.weekday);
+        return r;
+    end function;
+
+    function pm_flags_to_slv (s : dcf77_status_type) return std_logic_vector is
+        variable r : std_logic_vector(31 downto 0) := (others => '0');
+    begin
+        r(0) := s.pm_time.dst_active;
+        r(1) := s.pm_time.dst_announce;
+        r(2) := s.pm_time.leap_announce;
+        return r;
+    end function;
+
+    function pm_last_frame0_to_slv (s : dcf77_status_type) return std_logic_vector is
+        variable r : std_logic_vector(31 downto 0) := (others => '0');
+    begin
+        for i in 0 to 31 loop
+            r(i) := s.pm_last_frame(i);
+        end loop;
+        return r;
+    end function;
+
+    function pm_last_frame1_to_slv (s : dcf77_status_type) return std_logic_vector is
+        variable r : std_logic_vector(31 downto 0) := (others => '0');
+    begin
+        for i in 32 to 58 loop
+            r(i - 32) := s.pm_last_frame(i);
+        end loop;
         return r;
     end function;
 

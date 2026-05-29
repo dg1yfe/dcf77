@@ -18,9 +18,15 @@
 --   0x20 R    ENV_MIN      env_min top 16 b
 --   0x24 R    NOISE        noise_iir top 16 b
 --   0x28 R    SYNC_DIAG    sync_q / mm_q / cycle_in_min
---   0x2C R    SOFT_AM      am_soft + mm_soft + sec_index + valid + mm
---   0x30 R    SOFT_PM      placeholder (PSK correlator TBD)
---   0x34 R/W1C SOFT_IRQ    [0] second_tick (W1C), [1] pll_lock, [2] anchor_held
+--   0x2C R    SOFT_AM         am_soft + mm_soft + sec_index + valid + mm
+--   0x30 R    SOFT_PM         pm_soft + sec_index + valid + minute_mark
+--   0x34 R/W1C SOFT_IRQ       [0] second_tick (W1C), [1] pll_lock, [2] anchor_held
+--   0x38 R    PM_STATUS       pm_bit_index + sync_state + time_valid + lock_qual
+--   0x3C R    PM_TIME_HMS     PM-decoded HH:MM (layout = TIME_HMS)
+--   0x40 R    PM_DATE         PM-decoded year/month/day/weekday (layout = DATE)
+--   0x44 R    PM_FLAGS        PM-decoded DST/leap flags (layout = FLAGS)
+--   0x48 R    PM_LAST_FRAME0  PM frame bits 0..31
+--   0x4C R    PM_LAST_FRAME1  PM frame bits 32..58
 -- =========================================================================
 
 library ieee;

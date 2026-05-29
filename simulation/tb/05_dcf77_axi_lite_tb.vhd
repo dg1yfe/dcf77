@@ -241,8 +241,40 @@ begin
 
             -----------------------------------------------------------------
             elsif run("read_unmapped_decerr") then
-                -- 0x38 is past the last mapped register (SOFT_IRQ at 0x34) -> DECERR.
-                axi_read(x"38", rd, AXI_RESPONSE_DECERR);
+                -- 0x50 is past the last mapped register (PM_LAST_FRAME1 at 0x4C) -> DECERR.
+                axi_read(x"50", rd, AXI_RESPONSE_DECERR);
+
+            -----------------------------------------------------------------
+            elsif run("pm_registers_reset") then
+                -- After reset, every PM-side register reads 0.  Verifies the
+                -- wires from the new PM-side status_out fields through
+                -- axi_readmux.  pm_valid='0' and pm_minute_mark='0' in
+                -- SOFT_PM mean bits 30 and 31 are zero, so the whole word
+                -- is zero.
+                axi_read(x"30", rd, AXI_RESPONSE_OKAY);
+                check_equal(rd, std_logic_vector'(x"00000000"),
+                            "SOFT_PM reads 0 at reset");
+                -- PM_STATUS at reset has pm_bit_index = 15 (= START_INDEX
+                -- of the PM-side frame_dec) → bits [5:0] = 0x0F.  Other
+                -- fields are zero, so the full word is 0x0000_000F.
+                axi_read(x"38", rd, AXI_RESPONSE_OKAY);
+                check_equal(rd, std_logic_vector'(x"0000000F"),
+                            "PM_STATUS reads pm_bit_index=15 at reset");
+                axi_read(x"3C", rd, AXI_RESPONSE_OKAY);
+                check_equal(rd, std_logic_vector'(x"00000000"),
+                            "PM_TIME_HMS reads 0 at reset");
+                axi_read(x"40", rd, AXI_RESPONSE_OKAY);
+                check_equal(rd, std_logic_vector'(x"00000000"),
+                            "PM_DATE reads 0 at reset");
+                axi_read(x"44", rd, AXI_RESPONSE_OKAY);
+                check_equal(rd, std_logic_vector'(x"00000000"),
+                            "PM_FLAGS reads 0 at reset");
+                axi_read(x"48", rd, AXI_RESPONSE_OKAY);
+                check_equal(rd, std_logic_vector'(x"00000000"),
+                            "PM_LAST_FRAME0 reads 0 at reset");
+                axi_read(x"4C", rd, AXI_RESPONSE_OKAY);
+                check_equal(rd, std_logic_vector'(x"00000000"),
+                            "PM_LAST_FRAME1 reads 0 at reset");
 
             -----------------------------------------------------------------
             elsif run("last_frame_reset") then

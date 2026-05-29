@@ -71,7 +71,10 @@ entity dcf77_core is
         -- the full post-boxcar bandwidth (≈ 1 kHz), suitable for a
         -- future PM/PSK correlator.  Width matches the post-mixer
         -- boxcar (= iq_word_t'length + 7 = 29 b signed).
-        phase_err_out   : out signed(28 downto 0);
+        -- Amplitude-independent phase tap (CORDIC atan2 output).
+        -- Width is the CORDIC PHASE_WIDTH; 2π = 2^12, so 1 LSB ≈ 0.088°.
+        -- Replaces the old 29-b amplitude-weighted sign(I)·q_box tap.
+        phase_err_out   : out signed(11 downto 0);
         phase_err_valid : out std_logic;
 
         -- Comprehensive decoder status: time, validity, last frame, RSSI,
@@ -113,19 +116,46 @@ architecture rtl of dcf77_core is
     signal i_box_v    : std_logic;
     signal q_box_v    : std_logic;
 
-    -- 20 Hz IIR LPF on the I channel (matches the IIR inside
-    -- carrier_pll on the loop-filter path).  lambda = 2^-4 at 2 kS/s.
+    -- 20 Hz IIR LPF.  lambda = 2^-4 at 2 kS/s.  Applied to the CORDIC
+    -- magnitude output to recover the noise-bandwidth limit the old
+    -- per-channel i_iir provided before envelope detection.
     constant LOOP_IIR_SHIFT : positive := 4;
-    signal i_iir      : signed(POST_W - 1 downto 0);
-    signal i_iir_v    : std_logic;
 
-    -- Phase-error signal: sign(I_iir) * Q_box, computed at the
-    -- boxcar valid tick (2 kS/s).  Feeds carrier_pll's input in
-    -- place of the raw Q_box, so the PLL's internal IIR averages
-    -- a polarity-resolved phase-error rather than raw Q.  Also
-    -- exposed as a wider-bandwidth tap for downstream PM demod.
-    signal phase_err   : signed(POST_W - 1 downto 0);
-    signal phase_err_v : std_logic;
+    -- ------------------------------------------------------------------ --
+    -- CORDIC I/Q-to-polar conversion (Phase 4.5 consolidation).          --
+    --                                                                    --
+    -- Inputs: top 18 bits of the 29-b post-boxcar I/Q (drops 11 LSBs).   --
+    -- Outputs: 19-b unsigned magnitude (= K·√(I²+Q²), K ≈ 1.6467) and    --
+    -- 12-b signed phase (atan2(Q, I); 2π = 2^12 so 1 LSB ≈ 0.088°).      --
+    --                                                                    --
+    -- Replaces three pieces of the old chain:                            --
+    --   * the i_iir 20 Hz LPF (now applied to CORDIC magnitude instead) --
+    --   * the env_proc α-max-β-min envelope detector                    --
+    --   * the phase_err_proc sign(I)·q_box phase detector               --
+    -- ------------------------------------------------------------------ --
+    constant CORDIC_IQ_W    : positive := 18;
+    constant CORDIC_PHASE_W : positive := 12;
+    signal cordic_mag   : unsigned(CORDIC_IQ_W downto 0);    -- 19-b
+    signal cordic_phase : signed(CORDIC_PHASE_W - 1 downto 0);
+    signal cordic_v     : std_logic;
+
+    -- 20-b signed wrapping of CORDIC magnitude (prepend 0 sign bit) for
+    -- the magnitude IIR LPF.
+    signal mag_signed   : signed(CORDIC_IQ_W + 1 downto 0);  -- 20-b
+    signal mag_filt     : signed(CORDIC_IQ_W + 1 downto 0);
+    signal mag_filt_v   : std_logic;
+
+    -- Carrier-PLL phase input.  The CORDIC phase is amplitude-
+    -- independent in 12-b at 2π=2^12 scale; the carrier_pll's PI gains
+    -- (KP_SHIFT=7, KI_SHIFT=20) were calibrated for the OLD amplitude-
+    -- weighted sign(I)·q_box detector with magnitude A·Δφ.  Left-shift
+    -- the CORDIC phase by 11 bits to scale it into the same magnitude
+    -- envelope the PI filter was designed for (~1.33 M LSB per radian
+    -- = midway between old A_medium and A_strong cases).  Net result:
+    -- amplitude-independent phase detector + unchanged PLL loop bandwidth.
+    constant PLL_PHASE_ADAPTER_SHIFT : natural := 11;
+    signal phase_for_pll   : signed(POST_W - 1 downto 0);
+    signal phase_for_pll_v : std_logic;
 
     -- Synchronously-detected envelope at 2 kS/s.  abs(i_iir) post-
     -- boxcar can reach ~ 2^28; we right-shift by 4 before resizing into
@@ -161,11 +191,32 @@ architecture rtl of dcf77_core is
     signal env_min_s  : env_word_t;
     signal noise_s    : env_word_t;
     signal thresh_s   : env_word_t;
+    signal et_falling_edge_s : std_logic;
 
     signal time_d     : dcf77_time_type;
     signal time_v_d   : std_logic;
     signal last_frm   : std_logic_vector(0 to 58);
     signal bit_ix     : bit_index_t;
+
+    -- ------------------------------------------------------------------ --
+    -- PM (PSK/SIK) demod chain.                                          --
+    -- ------------------------------------------------------------------ --
+    signal pm_soft_s         : signed(11 downto 0);
+    signal pm_valid_s        : std_logic;
+    signal pm_corr_mm_s      : std_logic;             -- correlator's per-second pulse
+    signal pm_sync_state_s   : std_logic_vector(1 downto 0);
+    signal pm_locked_phase_s : unsigned(11 downto 0);
+    signal pm_lock_qual_s    : unsigned(15 downto 0);
+
+    signal pm_time_d         : dcf77_time_type;
+    signal pm_time_v_d       : std_logic;
+    signal pm_last_frm       : std_logic_vector(0 to 58);
+    signal pm_bit_ix         : bit_index_t;
+    signal pm_frame_mm_s     : std_logic;             -- frame_dec's SIK-signature edge
+
+    -- pm_sec_index = bit_ix snapshot at the moment pm_valid pulses.
+    -- pm_bit_index = the live frame_dec counter (= pm_bit_ix above).
+    signal pm_sec_index_s    : bit_index_t;
 
     -- Cast top 16 b of an env_word_t (sfixed, but always >= 0 in this
     -- design) to rssi_word_t.  Skips the sign bit and takes the 16 next
@@ -311,108 +362,88 @@ begin
         );
 
     -- ------------------------------------------------------------------ --
-    -- I-channel 20 Hz IIR (lambda = 2^-4 at 2 kS/s) -> abs() ->          --
-    -- env_word_t.  The IIR provides the noise-bandwidth limit before     --
-    -- envelope detection.                                                 --
+    -- CORDIC I/Q-to-polar.  Consumes the top 18 b of the post-boxcar    --
+    -- I/Q (drops the bottom 11 LSBs).  Produces 19-b unsigned magnitude --
+    -- (= K·√(I²+Q²)) and 12-b signed phase (= atan2(Q, I)).             --
     -- ------------------------------------------------------------------ --
-    u_i_iir : entity work.dcf77_iir_lpf
+    u_cordic : entity work.dcf77_cordic_atan2
         generic map (
-            WIDTH => POST_W,
+            IQ_WIDTH    => CORDIC_IQ_W,
+            PHASE_WIDTH => CORDIC_PHASE_W,
+            ITERATIONS  => 10
+        )
+        port map (
+            clk       => clk,
+            rst       => rst,
+            in_i      => i_box(POST_W - 1 downto POST_W - CORDIC_IQ_W),
+            in_q      => q_box(POST_W - 1 downto POST_W - CORDIC_IQ_W),
+            in_valid  => i_box_v,
+            out_mag   => cordic_mag,
+            out_phase => cordic_phase,
+            out_valid => cordic_v
+        );
+
+    -- ------------------------------------------------------------------ --
+    -- Magnitude IIR (= the 20 Hz noise-bandwidth limit before envelope  --
+    -- detection that the OLD i_iir provided).  CORDIC magnitude is      --
+    -- naturally non-negative so we just prepend a 0 to feed the signed  --
+    -- IIR module.                                                        --
+    -- ------------------------------------------------------------------ --
+    mag_signed <= signed('0' & std_logic_vector(cordic_mag));
+
+    u_mag_iir : entity work.dcf77_iir_lpf
+        generic map (
+            WIDTH => CORDIC_IQ_W + 2,
             SHIFT => LOOP_IIR_SHIFT
         )
         port map (
             clk        => clk,
             rst        => rst,
-            in_sample  => i_box,
-            in_valid   => i_box_v,
-            out_sample => i_iir,
-            out_valid  => i_iir_v
+            in_sample  => mag_signed,
+            in_valid   => cordic_v,
+            out_sample => mag_filt,
+            out_valid  => mag_filt_v
         );
 
+    -- env_pwr scale compensation: the OLD env_proc shifted env_sum
+    -- (~|I| in 29-b units) right by ENV_RSHIFT=4 before writing to
+    -- env_word_t.  The CORDIC consumed the top 18 of 29 bits of I/Q
+    -- (= an effective 11-bit right-shift) so its magnitude is already
+    -- 2^11/2^4 = 2^7 = 128× smaller than what bit_det expects.  Left-
+    -- shift by 7 here to restore the magnitude bit_det was tuned for.
+    env_pwr <= resize(
+        to_sfixed(std_logic_vector(
+            resize(shift_left(resize(mag_filt, CORDIC_IQ_W + 2 + 7), 7),
+                   CORDIC_IQ_W + 2 + 7)),
+            CORDIC_IQ_W + 2 + 7 - 1, 0),
+        env_word_t'high, env_word_t'low,
+        fixed_saturate, fixed_truncate);
+    env_v <= mag_filt_v;
+
     -- ------------------------------------------------------------------ --
-    -- Phase-error: sign(I_iir) * Q_box.  Multiplying Q by sign(I) makes  --
-    -- the phase detector respond symmetrically to both stable lock      --
-    -- points (Δφ=0 and Δφ=π) and gives a polarity-resolved error signal --
-    -- whose magnitude tracks A·|sin(Δφ)| regardless of I's quadrant.    --
-    -- Sample tick is i_iir_v so I and Q are aligned to the same         --
-    -- 2 kS/s grid.                                                       --
+    -- Carrier-PLL adapter: left-shift CORDIC phase by 11 bits to match  --
+    -- the magnitude scale the PI gains (KP_SHIFT=7, KI_SHIFT=20) were   --
+    -- calibrated for under the OLD amplitude-weighted detector.         --
     -- ------------------------------------------------------------------ --
-    phase_err_proc : process(clk)
+    pll_adapter_proc : process(clk)
     begin
         if rising_edge(clk) then
             if rst = '1' then
-                phase_err   <= (others => '0');
-                phase_err_v <= '0';
+                phase_for_pll   <= (others => '0');
+                phase_for_pll_v <= '0';
             else
-                phase_err_v <= '0';
-                if i_iir_v = '1' then
-                    if i_iir(POST_W - 1) = '1' then  -- I_iir negative
-                        phase_err <= -q_box;
-                    else
-                        phase_err <=  q_box;
-                    end if;
-                    phase_err_v <= '1';
-                end if;
+                phase_for_pll   <= shift_left(resize(cordic_phase, POST_W),
+                                              PLL_PHASE_ADAPTER_SHIFT);
+                phase_for_pll_v <= cordic_v;
             end if;
         end if;
     end process;
 
-    phase_err_out   <= phase_err;
-    phase_err_valid <= phase_err_v;
-
-    -- Envelope detector.  Two software-selectable modes:
-    --   env_mode='0': abs(I_iir).  Cheapest; relies on PLL lock to keep
-    --                amplitude in I and zero in Q.  ~0.5 dB more
-    --                sensitive than the magnitude mode in clean cases.
-    --   env_mode='1': |I_iir| + 3/8 * |Q_iir|  (alpha=1, beta=3/8
-    --                magnitude approximation; max error ±7 % over
-    --                angle).  Phase-agnostic: robust against in-band
-    --                CW interferers the PLL doesn't track.
-    -- Q_iir == pll_qfilt = the same 20 Hz LPF that runs on I, applied
-    -- internally inside dcf77_carrier_pll.
-    --
-    -- ENV_RSHIFT = 4 keeps env_pwr's peak around 2^24 (env_word_t = sfixed
-    -- 25 downto 0) so bit_det's slow IIR running headroom is preserved.
-    env_proc : process (i_iir, pll_qfilt, env_mode)
-        variable i_abs, q_abs : unsigned(POST_W - 1 downto 0);
-        variable i_ext, q_ext : signed(POST_W downto 0);
-        variable a_max, a_min : unsigned(POST_W - 1 downto 0);
-        variable min_term     : unsigned(POST_W - 1 downto 0);
-        variable env_sum      : unsigned(POST_W downto 0);
-        variable env_sh       : unsigned(POST_W downto 0);
-    begin
-        i_ext := resize(i_iir, POST_W + 1);
-        if i_ext(POST_W) = '1' then i_ext := -i_ext; end if;
-        i_abs := unsigned(i_ext(POST_W - 1 downto 0));
-
-        q_ext := resize(pll_qfilt, POST_W + 1);
-        if q_ext(POST_W) = '1' then q_ext := -q_ext; end if;
-        q_abs := unsigned(q_ext(POST_W - 1 downto 0));
-
-        -- alpha-max + beta-min magnitude approximation, alpha=1, beta=3/8.
-        -- |V| ≈ max(|I|,|Q|) + 3/8 * min(|I|,|Q|).  Max error ±7 %.
-        if i_abs >= q_abs then
-            a_max := i_abs;
-            a_min := q_abs;
-        else
-            a_max := q_abs;
-            a_min := i_abs;
-        end if;
-        min_term := shift_right(a_min, 2) + shift_right(a_min, 3);
-
-        if env_mode = '1' then
-            env_sum := ('0' & a_max) + ('0' & min_term);
-        else
-            env_sum := ('0' & i_abs);
-        end if;
-
-        env_sh := shift_right(env_sum, ENV_RSHIFT);
-        env_pwr <= resize(to_sfixed(std_logic_vector(env_sh(POST_W - 1 downto 0)),
-                                    POST_W - 1, 0),
-                          env_word_t'high, env_word_t'low,
-                          fixed_saturate, fixed_truncate);
-    end process;
-    env_v <= i_iir_v;
+    -- External tap: the amplitude-independent CORDIC phase directly
+    -- (no adapter shift; consumers like the PM correlator want phase
+    -- units, not the PLL-internal amplitude-weighted scale).
+    phase_err_out   <= cordic_phase;
+    phase_err_valid <= cordic_v;
 
     -- ------------------------------------------------------------------ --
     -- Q-channel -> carrier PLL.  The PLL's internal IIRs handle both
@@ -437,25 +468,43 @@ begin
         port map (
             clk              => clk,
             rst              => rst,
-            -- PLL now sees the polarity-resolved phase-error rather
-            -- than raw Q.  The PLL's internal 20 Hz IIR therefore
-            -- filters phase_err -> pe_filt (still exposed via the
-            -- existing q_filt_out port for backward-compat).
-            q_sample         => phase_err,
-            q_valid          => phase_err_v,
+            -- Amplitude-independent CORDIC phase, scaled into the
+            -- magnitude range the PI gains were calibrated for.
+            q_sample         => phase_for_pll,
+            q_valid          => phase_for_pll_v,
             phase_inc_offset => nco_phase_inc_offset,
             lock_state       => pll_lock,
             q_filt_out       => pll_qfilt,
             q_lock_out       => pll_qlock
         );
 
+    -- ------------------------------------------------------------------ --
+    -- Envelope statistics + falling-edge detector.  Carved out of        --
+    -- bit_det so the slow-tracker / edge-detect machinery doesn't bloat  --
+    -- bit_det's reg_type record (= faster GHDL simulation, cleaner       --
+    -- separation of concerns).                                            --
+    -- ------------------------------------------------------------------ --
+    u_env_tracker : entity work.dcf77_env_tracker
+        generic map (
+            K_ATK       => K_ATK,
+            K_DEC       => K_DEC,
+            K_NOISE     => K_NOISE,
+            DERIV_DELAY => DERIV_DELAY,
+            K_SLOPE     => K_SLOPE
+        )
+        port map (
+            clk          => clk,
+            rst          => rst,
+            env_in       => env_pwr,
+            env_valid    => env_v,
+            env_max      => env_max_s,
+            env_min      => env_min_s,
+            noise        => noise_s,
+            falling_edge => et_falling_edge_s
+        );
+
     u_bit_det : entity work.dcf77_bit_det
         generic map (
-            K_ATK          => K_ATK,
-            K_DEC          => K_DEC,
-            K_NOISE        => K_NOISE,
-            DERIV_DELAY    => DERIV_DELAY,
-            K_SLOPE        => K_SLOPE,
             K_REF          => K_REF,
             SAMPLE_RATE_HZ => SAMPLE_RATE_HZ,
             T_HOLD_SEC     => T_HOLD_SEC,
@@ -466,6 +515,10 @@ begin
             rst           => rst,
             env_in        => env_pwr,
             env_valid     => env_v,
+            env_max_in    => env_max_s,
+            env_min_in    => env_min_s,
+            noise_in      => noise_s,
+            falling_edge  => et_falling_edge_s,
             bit_value     => bit_val,
             bit_valid     => bit_v,
             minute_mark   => minute_mk,
@@ -473,9 +526,9 @@ begin
             sync_quality  => sync_q_s,
             mm_quality    => mm_q_s,
             cycle_in_min  => cycle_s,
-            env_max       => env_max_s,
-            env_min       => env_min_s,
-            noise         => noise_s,
+            env_max       => open,         -- already exposed from env_tracker
+            env_min       => open,
+            noise         => open,
             threshold     => thresh_s,
             am_soft       => am_soft_s,
             am_soft_valid => am_soft_v_s,
@@ -506,17 +559,80 @@ begin
     -- Frame decoder                                                        --
     -- ------------------------------------------------------------------ --
     u_frame : entity work.dcf77_frame_dec
+        generic map (
+            PM_MODE => false
+        )
         port map (
-            clk         => clk,
-            rst         => rst,
-            bit_value   => bit_val,
-            bit_valid   => bit_v_gated,
-            minute_mark => minute_mk_gated,
-            time_out    => time_d,
-            time_valid  => time_v_d,
-            last_frame  => last_frm,
-            bit_index   => bit_ix
+            clk             => clk,
+            rst             => rst,
+            bit_value       => bit_val,
+            bit_valid       => bit_v_gated,
+            minute_mark     => minute_mk_gated,
+            time_out        => time_d,
+            time_valid      => time_v_d,
+            last_frame      => last_frm,
+            bit_index       => bit_ix,
+            minute_mark_out => open
         );
+
+    -- ------------------------------------------------------------------ --
+    -- PM (PSK/SIK) correlator: time-multiplexed matched filter over the --
+    -- CORDIC phase stream.  Emits one pm_soft (SIK bit LLR) per locked  --
+    -- second; sync state machine handles ACQUIRE → LOCK → re-acquire.   --
+    -- ------------------------------------------------------------------ --
+    u_pm_corr : entity work.dcf77_pm_correlator
+        port map (
+            clk              => clk,
+            rst              => rst,
+            -- Drop the 3 LSBs of the 12-b CORDIC phase to feed the
+            -- 9-b PM correlator input (= 1 LSB ≈ 0.7°, plenty given
+            -- the matched filter's 32 dB processing gain).
+            phase_err        => cordic_phase(CORDIC_PHASE_W - 1
+                                              downto CORDIC_PHASE_W - 9),
+            phase_err_v      => cordic_v,
+            pll_locked       => pll_lock,
+            pm_soft          => pm_soft_s,
+            pm_valid         => pm_valid_s,
+            pm_minute_mark_o => pm_corr_mm_s,
+            pm_sync_state    => pm_sync_state_s,
+            pm_locked_phase  => pm_locked_phase_s,
+            pm_lock_qual     => pm_lock_qual_s
+        );
+
+    -- PM frame decoder.  PM_MODE=true → START_INDEX=15 + internal SIK
+    -- signature detector; ignores the external minute_mark port.
+    -- The bit_value fed in is the sign of pm_soft (12-b signed; sign
+    -- bit '1' = negative = SIK '1' bit; sign bit '0' = positive = SIK '0').
+    u_pm_frame : entity work.dcf77_frame_dec
+        generic map (
+            PM_MODE => true
+        )
+        port map (
+            clk             => clk,
+            rst             => rst,
+            bit_value       => pm_soft_s(11),       -- sign bit of pm_soft
+            bit_valid       => pm_valid_s,
+            minute_mark     => '0',                 -- ignored for PM mode
+            time_out        => pm_time_d,
+            time_valid      => pm_time_v_d,
+            last_frame      => pm_last_frm,
+            bit_index       => pm_bit_ix,
+            minute_mark_out => pm_frame_mm_s
+        );
+
+    -- Latch pm_bit_ix into pm_sec_index on each pm_valid pulse so the
+    -- AXI SOFT_PM register's [5:0] field reports the second-of-minute
+    -- that the pm_soft value belongs to, atomically with the LLR.
+    pm_sec_index_proc : process(clk)
+    begin
+        if rising_edge(clk) then
+            if rst = '1' then
+                pm_sec_index_s <= 0;
+            elsif pm_valid_s = '1' then
+                pm_sec_index_s <= pm_bit_ix;
+            end if;
+        end if;
+    end process;
 
     -- ------------------------------------------------------------------ --
     -- Aggregate the comprehensive status record from the sub-blocks.      --
@@ -546,5 +662,17 @@ begin
     status_out.minute_mark   <= minute_mk_gated;
     status_out.pll_lock      <= pll_lock;
     status_out.anchor_held   <= anchor_held_s;
+
+    -- PM-side status fields.
+    status_out.pm_soft        <= pm_soft_s;
+    status_out.pm_valid       <= pm_valid_s;
+    status_out.pm_minute_mark <= pm_frame_mm_s;
+    status_out.pm_sec_index   <= pm_sec_index_s;
+    status_out.pm_bit_index   <= pm_bit_ix;
+    status_out.pm_sync_state  <= pm_sync_state_s;
+    status_out.pm_lock_qual   <= pm_lock_qual_s;
+    status_out.pm_time        <= pm_time_d;
+    status_out.pm_time_valid  <= pm_time_v_d;
+    status_out.pm_last_frame  <= pm_last_frm;
 
 end architecture rtl;

@@ -62,6 +62,7 @@ architecture tb of dcf77_bit_det_tb is
     signal env_min_o     : env_word_t;
     signal noise_o       : env_word_t;
     signal threshold_o   : env_word_t;
+    signal et_falling_edge_o : std_logic;
 
 begin
 
@@ -70,13 +71,27 @@ begin
     -- Keep this TB on the legacy 100 S/s timings even though bit_det's
     -- production defaults moved to 2 kS/s.  The dip / warm-up stimulus
     -- in this TB is sized for 100-tick bit cycles.
+    u_env_tracker : entity dcf77.dcf77_env_tracker
+        generic map (
+            K_ATK       => 3,
+            K_DEC       => 9,
+            K_NOISE     => 9,
+            DERIV_DELAY => 2,
+            K_SLOPE     => 2
+        )
+        port map (
+            clk          => clk,
+            rst          => rst,
+            env_in       => env_in,
+            env_valid    => env_valid,
+            env_max      => env_max_o,
+            env_min      => env_min_o,
+            noise        => noise_o,
+            falling_edge => et_falling_edge_o
+        );
+
     dut : entity dcf77.dcf77_bit_det
         generic map (
-            K_ATK          => 3,
-            K_DEC          => 9,
-            K_NOISE        => 9,
-            DERIV_DELAY    => 2,
-            K_SLOPE        => 2,
             K_REF          => 2,
             BIT_PERIOD     => 100,
             W1_END         => 10,
@@ -90,6 +105,10 @@ begin
             rst           => rst,
             env_in        => env_in,
             env_valid     => env_valid,
+            env_max_in    => env_max_o,
+            env_min_in    => env_min_o,
+            noise_in      => noise_o,
+            falling_edge  => et_falling_edge_o,
             bit_value     => bit_value,
             bit_valid     => bit_valid,
             minute_mark   => minute_mark,
@@ -97,9 +116,9 @@ begin
             sync_quality  => sync_quality,
             mm_quality    => mm_quality,
             cycle_in_min  => cycle_in_min,
-            env_max       => env_max_o,
-            env_min       => env_min_o,
-            noise         => noise_o,
+            env_max       => open,
+            env_min       => open,
+            noise         => open,
             threshold     => threshold_o,
             edge_accepted => open
         );

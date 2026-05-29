@@ -96,6 +96,7 @@ architecture tb of dcf77_rx_replay_tb is
     signal env_max_s : env_word_t;
     signal env_min_s : env_word_t;
     signal noise_s   : env_word_t;
+    signal et_falling_edge_s : std_logic;
     signal thresh_s  : env_word_t;
 
     signal time_d    : dcf77_time_type;
@@ -187,13 +188,27 @@ begin
 
     -- Baseband replay still runs at 100 S/s through CIC_ENV.  Override
     -- the 2 kS/s-scaled production defaults back to the legacy timings.
+    u_env_tracker : entity dcf77.dcf77_env_tracker
+        generic map (
+            K_ATK       => 3,
+            K_DEC       => 9,
+            K_NOISE     => 9,
+            DERIV_DELAY => 2,
+            K_SLOPE     => 2
+        )
+        port map (
+            clk          => clk,
+            rst          => rst,
+            env_in       => env_dec_out,
+            env_valid    => env_dec_v,
+            env_max      => env_max_s,
+            env_min      => env_min_s,
+            noise        => noise_s,
+            falling_edge => et_falling_edge_s
+        );
+
     u_bit_det : entity dcf77.dcf77_bit_det
         generic map (
-            K_ATK          => 3,
-            K_DEC          => 9,
-            K_NOISE        => 9,
-            DERIV_DELAY    => 2,
-            K_SLOPE        => 2,
             K_REF          => 2,
             BIT_PERIOD     => 100,
             W1_END         => 10,
@@ -207,6 +222,10 @@ begin
             rst           => rst,
             env_in        => env_dec_out,
             env_valid     => env_dec_v,
+            env_max_in    => env_max_s,
+            env_min_in    => env_min_s,
+            noise_in      => noise_s,
+            falling_edge  => et_falling_edge_s,
             bit_value     => bit_val,
             bit_valid     => bit_v,
             minute_mark   => minute_mk,
@@ -214,9 +233,9 @@ begin
             sync_quality  => open,
             mm_quality    => open,
             cycle_in_min  => open,
-            env_max       => env_max_s,
-            env_min       => env_min_s,
-            noise         => noise_s,
+            env_max       => open,
+            env_min       => open,
+            noise         => open,
             threshold     => thresh_s,
             edge_accepted => open
         );

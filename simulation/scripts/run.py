@@ -117,6 +117,7 @@ def _configure_testbenches(lib) -> None:
 
     _configure_replay_testbench(lib)
     _configure_if_replay_testbench(lib)
+    _configure_pm_if_replay_testbench(lib)
 
 
 def _configure_replay_testbench(lib) -> None:
@@ -296,6 +297,45 @@ def _configure_if_replay_testbench(lib) -> None:
         tb.test("decode").add_config(
             name=reason,
             generics=dict(EXPECT_FULL_FRAME=False))
+
+
+def _configure_pm_if_replay_testbench(lib) -> None:
+    """Register PM IF-replay configurations per .if.s16 recording.
+
+    For each `.if.s16` in derived/, register one `pm_smoke` configuration
+    that runs the PM correlator through the full recording and checks
+    that pm_sync_state has advanced past FILL and that pm_valid pulses
+    have fired (= the PM chain is wired and running).  Decoded time
+    validation is not (yet) asserted — needs cached PM truth.
+    """
+    try:
+        tb = lib.test_bench("dcf77_pm_if_replay_tb")
+    except KeyError:
+        return
+
+    if not SAMPLES_DIR.is_dir():
+        return
+
+    for wav in sorted(SAMPLES_DIR.glob("*.wav")):
+        stem    = wav.stem
+        if_s16  = DERIVED_DIR / f"{stem}.if.s16"
+        if_meta = DERIVED_DIR / f"{stem}.if.meta"
+        if not (if_s16.exists() and if_meta.exists()):
+            continue
+
+        kv      = _read_meta(if_meta)
+        rate    = int(kv.get("sample_rate_hz", 12000))
+        if_hz   = int(float(kv.get("if_hz", 5000)))
+        samples = int(kv["sample_count"])
+
+        cfg = dict(
+            REPLAY_FILE         = str(if_s16),
+            SAMPLE_COUNT        = samples,
+            SAMPLE_RATE_HZ      = rate,
+            IF_HZ               = if_hz,
+            EXPECT_PM_VALID_MIN = 30,
+        )
+        tb.test("pm_smoke").add_config(name=stem, generics=cfg)
 
 
 def _read_meta(path) -> dict:
