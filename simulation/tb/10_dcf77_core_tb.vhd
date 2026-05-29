@@ -9,7 +9,7 @@
 --
 -- The test runs a "bit 1" sequence:
 --   * ~10 k clocks of full carrier  -> env_max settles
---   * 200 env_valid ticks of absenkung (~100 k clocks)
+--   * 200 clock_en ticks of absenkung (~100 k clocks)
 --   * back to full carrier         -> bit_valid + bit_value='1'
 -- =========================================================================
 
@@ -37,11 +37,11 @@ architecture tb of dcf77_core_tb is
     constant FC : real := 77_500.0;
     constant FS : real := 125_000_000.0;
 
-    -- Scaled bit_det generics (units = env_valid ticks @ 100 S/s).
+    -- Scaled bit_det generics (units = clock_en ticks @ 100 S/s).
     constant TG_K_ATK : positive := 2;
     constant TG_K_DEC : positive := 14;
 
-    -- One env_valid pulse appears every 512 input samples.
+    -- One clock_en pulse appears every 512 input samples.
     constant CLOCKS_PER_TICK : positive := 512;
 
     signal clk        : std_logic := '0';
@@ -118,7 +118,7 @@ begin
             end loop;
         end procedure;
 
-        -- Run for `n_ticks` env_valid pulses while observing the bit_det
+        -- Run for `n_ticks` clock_en pulses while observing the bit_det
         -- outputs.  Captures the most recently seen bit_valid event.
         procedure run_ticks(n_ticks : positive;
                             high    : in boolean;

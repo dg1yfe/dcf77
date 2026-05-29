@@ -354,7 +354,7 @@ begin
     end process;
     env_v <= i_iir_v;
 
-    -- Optional env_pwr time-series dump (one line per env_valid pulse).
+    -- Optional env_pwr time-series dump (one line per clock_en pulse).
     -- Format: "<ns_time> <env_pwr_int>".  Off when ENV_DUMP_FILE = "".
     env_dump : process
         file     f         : text;
@@ -444,7 +444,7 @@ begin
             clk          => clk,
             rst          => rst,
             env_in       => env_pwr,
-            env_valid    => env_v,
+            clock_en    => env_v,
             env_max      => env_max_s,
             env_min      => env_min_s,
             noise        => noise_s,
@@ -459,7 +459,7 @@ begin
             clk           => clk,
             rst           => rst,
             env_in        => env_pwr,
-            env_valid     => env_v,
+            clock_en     => env_v,
             env_max_in    => env_max_s,
             env_min_in    => env_min_s,
             noise_in      => noise_s,

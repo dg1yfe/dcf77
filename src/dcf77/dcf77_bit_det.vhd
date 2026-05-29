@@ -7,11 +7,11 @@
 -- sample counter from there.  No internal phase-locked loop -- the
 -- carrier-tracking PLL upstream provides cesium-locked time stability
 -- through the NCO; in replay-mode test flow the system-clock /
--- env_valid cadence is good enough over the test duration (sample-
+-- clock_en cadence is good enough over the test duration (sample-
 -- rate drift of 10 ppm yields ~6 ms over a minute, well within the
 -- 100 ms bit width).
 --
--- Symbol-structural windows (in env_valid ticks, called "bins"):
+-- Symbol-structural windows (in clock_en ticks, called "bins"):
 --   W1 = [0..W1_END)           = dip / minute-mark sense (10 bins)
 --   W2 = [W1_END..W2_END)      = bit-value discriminator (10 bins)
 --   W3 = [W2_END..BIT_PERIOD)  = carrier reference -> iir_high (80 bins)
@@ -40,7 +40,7 @@ use work.dcf77_pkg.all;
 
 entity dcf77_bit_det is
     generic (
-        -- Symbol windows (in env_valid ticks at SAMPLE_RATE_HZ).
+        -- Symbol windows (in clock_en ticks at SAMPLE_RATE_HZ).
         -- 100 ms / 200 ms windows at 2 kS/s.
         BIT_PERIOD     : positive := 2000;
         W1_END         : positive := 200;
@@ -51,7 +51,7 @@ entity dcf77_bit_det is
         -- independent of SAMPLE_RATE_HZ.
         K_REF          : positive := 2;
 
-        -- Anchor give-up: clear have_anchor after this many env_valid
+        -- Anchor give-up: clear have_anchor after this many clock_en
         -- ticks with no falling edge (~10 s @ SAMPLE_RATE_HZ).
         GIVE_UP_TICKS  : positive := 20000;
 
@@ -86,10 +86,10 @@ entity dcf77_bit_det is
         rst         : in  std_logic;
 
         env_in      : in  env_word_t;
-        env_valid   : in  std_logic;
+        clock_en   : in  std_logic;
 
         -- Statistics from dcf77_env_tracker (registered, valid on the
-        -- cycle following env_valid):
+        -- cycle following clock_en):
         env_max_in   : in  env_word_t;
         env_min_in   : in  env_word_t;
         noise_in     : in  env_word_t;
@@ -297,7 +297,7 @@ begin
         current_bin := r.sample_in_bit;
         end_of_bit  := '0';
 
-        if env_valid = '1' then
+        if clock_en = '1' then
 
             -- Slow trackers + falling-edge detector now live in
             -- dcf77_env_tracker; consume its outputs directly.
@@ -576,6 +576,12 @@ begin
         rin <= v;
     end process;
 
+    -- Note: bit_det cannot use a clock-enable seq because bit_valid,
+    -- minute_mark and edge_accepted are registered 1-cycle pulses --
+    -- a CE'd seq would freeze them at '1' for the entire inter-tick
+    -- interval and downstream frame_dec would re-trigger thousands of
+    -- times per pulse.  env_tracker (whose only pulse output, falling_
+    -- edge, is combinational) uses the CE form to save sim time.
     seq : process (clk)
     begin
         if rising_edge(clk) then

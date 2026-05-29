@@ -2,7 +2,7 @@
 -- dcf77_env_tracker.vhd
 --
 -- Envelope statistics + falling-edge detector, carved out of bit_det.
--- Updates per env_valid tick:
+-- Updates per clock_en tick:
 --
 --   * env_max:  attack-fast / decay-slow IIR tracking the carrier-on
 --                amplitude (Kp = 2^-K_ATK / 2^-K_DEC).
@@ -20,7 +20,7 @@
 --                exactly one pulse.
 --
 -- All outputs are registered and present on the cycle immediately
--- following the env_valid tick they were computed from.  Same hardware
+-- following the clock_en tick they were computed from.  Same hardware
 -- as the original bit_det implementation; just split out so bit_det
 -- can be slimmed to ~16 record fields focused on bit-cadence logic.
 -- =========================================================================
@@ -35,7 +35,7 @@ use work.dcf77_pkg.all;
 
 entity dcf77_env_tracker is
     generic (
-        -- Slow trackers (SNR estimator) -- shifts at the env_valid rate.
+        -- Slow trackers (SNR estimator) -- shifts at the clock_en rate.
         K_ATK       : positive := 8;
         K_DEC       : positive := 14;
         K_NOISE     : positive := 14;
@@ -49,12 +49,12 @@ entity dcf77_env_tracker is
         rst           : in  std_logic;
 
         env_in        : in  env_word_t;
-        env_valid     : in  std_logic;
+        clock_en     : in  std_logic;
 
         env_max       : out env_word_t;
         env_min       : out env_word_t;
         noise         : out env_word_t;
-        -- 1-cycle pulse aligned with env_valid when a true falling
+        -- 1-cycle pulse aligned with clock_en when a true falling
         -- edge crosses the slope threshold (debounced).
         falling_edge  : out std_logic
     );
@@ -91,8 +91,8 @@ architecture rtl of dcf77_env_tracker is
 
     signal r, rin : reg_type;
 
-    -- Combinational falling_edge: must be aligned with the SAME env_valid
-    -- tick that produced it, so bit_det's "if env_valid = '1'" gate sees
+    -- Combinational falling_edge: must be aligned with the SAME clock_en
+    -- tick that produced it, so bit_det's "if clock_en = '1'" gate sees
     -- it within the same cycle.  Driven by the comb process below.
     signal falling_edge_comb : std_logic;
 
@@ -120,7 +120,7 @@ begin
         v := r;
         falling_edge_comb <= '0';
 
-        if env_valid = '1' then
+        if clock_en = '1' then
 
             ------------------------------------------------------------
             -- env_max (attack-fast / decay-slow)
@@ -236,12 +236,16 @@ begin
         rin <= v;
     end process;
 
+    -- Clock-enable seq.  r updates only on clock_en='1' clock edges,
+    -- so the comb process upstream re-fires when r changes = once per
+    -- env tick instead of every clock cycle.  Same hardware (FF CE
+    -- input on Xilinx/Intel is free); just lets GHDL skip dead cycles.
     seq : process (clk)
     begin
         if rising_edge(clk) then
             if rst = '1' then
                 r <= R_RESET;
-            else
+            elsif clock_en = '1' then
                 r <= rin;
             end if;
         end if;

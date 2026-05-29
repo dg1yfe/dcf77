@@ -2,7 +2,7 @@
 -- 03_dcf77_bit_det_tb.vhd
 --
 -- VUnit testbench for the single-phase symbol-structural bit detector.
--- Drives sequences of synthetic 100-tick "second" cycles at env_valid='1'
+-- Drives sequences of synthetic 100-tick "second" cycles at clock_en='1'
 -- and watches bit_valid / minute_mark / sync_quality / mm_quality outputs.
 --
 -- Tests:
@@ -32,7 +32,7 @@ architecture tb of dcf77_bit_det_tb is
     constant CLK_PERIOD : time := 8 ns;
 
     -- Detector defaults are 100 S/s; keep them.  Drive each test bit with
-    -- BIT_PERIOD = 100 env_valid ticks (= one "second" at the design rate).
+    -- BIT_PERIOD = 100 clock_en ticks (= one "second" at the design rate).
     constant BIT_PERIOD : positive := 100;
     constant DIP_BIT0   : positive := 10;     -- 100 ms equivalent
     constant DIP_BIT1   : positive := 20;     -- 200 ms equivalent
@@ -49,7 +49,7 @@ architecture tb of dcf77_bit_det_tb is
     signal clk         : std_logic := '0';
     signal rst         : std_logic := '1';
     signal env_in      : env_word_t := (others => '0');
-    signal env_valid   : std_logic := '0';
+    signal clock_en   : std_logic := '0';
 
     signal bit_value     : std_logic;
     signal bit_valid     : std_logic;
@@ -83,7 +83,7 @@ begin
             clk          => clk,
             rst          => rst,
             env_in       => env_in,
-            env_valid    => env_valid,
+            clock_en    => clock_en,
             env_max      => env_max_o,
             env_min      => env_min_o,
             noise        => noise_o,
@@ -104,7 +104,7 @@ begin
             clk           => clk,
             rst           => rst,
             env_in        => env_in,
-            env_valid     => env_valid,
+            clock_en     => clock_en,
             env_max_in    => env_max_o,
             env_min_in    => env_min_o,
             noise_in      => noise_o,
@@ -138,7 +138,7 @@ begin
                 else
                     env_in <= ENV_HIGH;
                 end if;
-                env_valid <= '1';
+                clock_en <= '1';
                 wait until rising_edge(clk);
                 if bit_valid = '1' then
                     n_seen_bit := n_seen_bit + 1;
@@ -149,9 +149,9 @@ begin
                 end if;
             end loop;
             -- Settle: one extra clock so the registered output of
-            -- sample BIT_PERIOD's end-of-bit is observable.  env_valid='0'
+            -- sample BIT_PERIOD's end-of-bit is observable.  clock_en='0'
             -- so the bit_det doesn't process another sample.
-            env_valid <= '0';
+            clock_en <= '0';
             wait until rising_edge(clk);
             if bit_valid = '1' then
                 n_seen_bit := n_seen_bit + 1;
