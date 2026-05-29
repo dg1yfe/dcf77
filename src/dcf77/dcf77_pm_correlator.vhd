@@ -510,16 +510,20 @@ begin
                     -- The engine reads buf at base = w_ptr - 1586 + DLL_OFFSET.
                     -- DLL_OFFSET is -1 for T_MINUS, 0 for T_CENTER, +1 for T_PLUS.
                     -- In unsigned mod-4096 arithmetic: subtract 1586, ±1.
+                    -- BUF_SIZE - SAMPLES_PER_PRBS ± 1 fits in 12 bits
+                    -- (2509/2510/2511 < 4096); folding into one to_unsigned
+                    -- avoids the intermediate (r.w_ptr + BUF_SIZE) that
+                    -- truncates because BUF_SIZE = 2^12 = 4096 doesn't fit.
                     case r.track_step is
                         when T_MINUS  =>
-                            next_offset := resize(r.w_ptr + BUF_SIZE
-                                                  - SAMPLES_PER_PRBS - 1, 12);
+                            next_offset := r.w_ptr + to_unsigned(
+                                BUF_SIZE - SAMPLES_PER_PRBS - 1, 12);
                         when T_CENTER =>
-                            next_offset := resize(r.w_ptr + BUF_SIZE
-                                                  - SAMPLES_PER_PRBS, 12);
+                            next_offset := r.w_ptr + to_unsigned(
+                                BUF_SIZE - SAMPLES_PER_PRBS, 12);
                         when T_PLUS   =>
-                            next_offset := resize(r.w_ptr + BUF_SIZE
-                                                  - SAMPLES_PER_PRBS + 1, 12);
+                            next_offset := r.w_ptr + to_unsigned(
+                                BUF_SIZE - SAMPLES_PER_PRBS + 1, 12);
                     end case;
                     start_engine := true;
                 end if;
