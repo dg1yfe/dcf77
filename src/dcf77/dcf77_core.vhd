@@ -36,16 +36,23 @@ use work.dcf77_cic_widths_pkg.all;
 
 entity dcf77_core is
     generic (
-        -- bit_det defaults: 2 kS/s tick rate (one envelope sample per
-        -- 500 us).  All time-constant generics scaled vs the legacy
-        -- 100 S/s defaults so continuous-time TCs are unchanged.
-        K_ATK          : positive := 8;
-        K_DEC          : positive := 14;
-        K_NOISE        : positive := 14;
-        DERIV_DELAY    : positive := 16;
+        -- AM-chain defaults: 200 S/s tick rate at env_tracker / bit_det
+        -- (CORDIC magnitude is decimated /10 from 2 kS/s by an inline
+        -- boxcar averager).  IIR time constants scaled vs the legacy
+        -- 2 kS/s defaults so continuous-time TCs are unchanged.
+        --   K_ATK   = 5  ~ Tau =  32/200 = 160 ms  (was   256/2000 = 128 ms)
+        --   K_DEC   = 11 ~ Tau = 2048/200 = 10.2 s (was 16384/2000 =  8.2 s)
+        --   K_NOISE = 11 ~ same as K_DEC.
+        --   DERIV_DELAY = 2 samples = 10 ms slope-detection window
+        --     (was 16 samples = 8 ms at 2 kS/s).  K_SLOPE unchanged
+        --     (relative threshold env_max/4).
+        K_ATK          : positive := 5;
+        K_DEC          : positive := 11;
+        K_NOISE        : positive := 11;
+        DERIV_DELAY    : positive := 2;
         K_SLOPE        : positive := 2;
         K_REF          : positive := 2;
-        SAMPLE_RATE_HZ : positive := 2000;
+        SAMPLE_RATE_HZ : positive := 200;
         T_HOLD_SEC     : positive := 120;
         T_SEARCH_SEC   : positive := 300;
 
@@ -144,6 +151,16 @@ architecture rtl of dcf77_core is
     signal mag_signed   : signed(CORDIC_IQ_W + 1 downto 0);  -- 20-b
     signal mag_filt     : signed(CORDIC_IQ_W + 1 downto 0);
     signal mag_filt_v   : std_logic;
+
+    -- /10 decimating boxcar after the magnitude IIR.  Brings the AM
+    -- chain (env_tracker + bit_det) down to 200 S/s.  Output is the
+    -- sum of 10 consecutive mag_filt samples, naturally a 24-b signed
+    -- value (20-b input + 4 b growth).  Sinc nulls at 200/400/... Hz
+    -- coincide exactly with the new sample-rate harmonics, so the
+    -- worst alias band is notched; first sidelobe ~ -13 dB.
+    constant ENV_DEC_RATE : positive := 10;
+    signal mag_dec_sum  : signed(CORDIC_IQ_W + 1 + 4 downto 0);  -- 24-b
+    signal mag_dec_v    : std_logic;
 
     -- Carrier-PLL phase input.  The CORDIC phase is amplitude-
     -- independent in 12-b at 2π=2^12 scale; the carrier_pll's PI gains
@@ -405,20 +422,49 @@ begin
             out_valid  => mag_filt_v
         );
 
-    -- env_pwr scale compensation: the OLD env_proc shifted env_sum
-    -- (~|I| in 29-b units) right by ENV_RSHIFT=4 before writing to
-    -- env_word_t.  The CORDIC consumed the top 18 of 29 bits of I/Q
-    -- (= an effective 11-bit right-shift) so its magnitude is already
-    -- 2^11/2^4 = 2^7 = 128× smaller than what bit_det expects.  Left-
-    -- shift by 7 here to restore the magnitude bit_det was tuned for.
+    -- /10 decimating boxcar.  Accumulates ENV_DEC_RATE mag_filt samples
+    -- then emits the running sum.  Free 13-dB anti-alias notches at
+    -- 200/400/... Hz; group delay ~ 4.5 input samples = 2.25 ms.
+    env_dec_proc : process(clk)
+        variable cnt : natural range 0 to ENV_DEC_RATE - 1 := 0;
+        variable acc : signed(CORDIC_IQ_W + 1 + 4 downto 0);
+    begin
+        if rising_edge(clk) then
+            if rst = '1' then
+                mag_dec_sum <= (others => '0');
+                mag_dec_v   <= '0';
+                cnt := 0;
+                acc := (others => '0');
+            else
+                mag_dec_v <= '0';
+                if mag_filt_v = '1' then
+                    if cnt = ENV_DEC_RATE - 1 then
+                        mag_dec_sum <= acc + resize(mag_filt, mag_dec_sum'length);
+                        mag_dec_v   <= '1';
+                        cnt := 0;
+                        acc := (others => '0');
+                    else
+                        acc := acc + resize(mag_filt, acc'length);
+                        cnt := cnt + 1;
+                    end if;
+                end if;
+            end if;
+        end if;
+    end process;
+
+    -- env_pwr scale: legacy env_pwr = 128 x mag_filt (= shift_left by 7).
+    -- After /10 decimation: mag_dec_sum = 10 x mag_filt on average.
+    -- shift_left by 4 -> env_pwr = 16 x sum = 160 x mag_filt = 1.25 x
+    -- legacy.  Slight scale shift but within env_tracker's relative-
+    -- threshold tolerance (env_max-based hysteresis).
     env_pwr <= resize(
         to_sfixed(std_logic_vector(
-            resize(shift_left(resize(mag_filt, CORDIC_IQ_W + 2 + 7), 7),
-                   CORDIC_IQ_W + 2 + 7)),
-            CORDIC_IQ_W + 2 + 7 - 1, 0),
+            resize(shift_left(resize(mag_dec_sum, CORDIC_IQ_W + 6 + 4), 4),
+                   CORDIC_IQ_W + 6 + 4)),
+            CORDIC_IQ_W + 6 + 4 - 1, 0),
         env_word_t'high, env_word_t'low,
         fixed_saturate, fixed_truncate);
-    env_v <= mag_filt_v;
+    env_v <= mag_dec_v;
 
     -- ------------------------------------------------------------------ --
     -- Carrier-PLL adapter: left-shift CORDIC phase by 11 bits to match  --
@@ -505,6 +551,17 @@ begin
 
     u_bit_det : entity work.dcf77_bit_det
         generic map (
+            -- 200 S/s window sizes (10x smaller than bit_det's 2 kS/s
+            -- defaults).  Symbol decision logic is unchanged; only the
+            -- sample counts shrink.  LLR shifts drop by 3 b to absorb
+            -- the 10x smaller W1/W2 accumulator sums.
+            BIT_PERIOD     => 200,
+            W1_END         => 20,
+            W2_END         => 40,
+            W3_END         => 200,
+            GIVE_UP_TICKS  => 2000,
+            AM_LLR_SHIFT   => 4,
+            MM_LLR_SHIFT   => 4,
             K_REF          => K_REF,
             SAMPLE_RATE_HZ => SAMPLE_RATE_HZ,
             T_HOLD_SEC     => T_HOLD_SEC,
