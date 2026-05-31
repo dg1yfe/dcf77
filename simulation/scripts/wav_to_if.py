@@ -160,13 +160,21 @@ def process_wav(wav: Path, if_s16: Path, if_meta: Path, *,
           f"and {if_meta.name}")
 
 
+def _wrap_for_pool(args):
+    """Helper for ProcessPoolExecutor: unpack tuple and run process_wav."""
+    wav, if_s16, if_meta, if_hz, expect_sidecar = args
+    process_wav(wav, if_s16, if_meta, if_hz=if_hz,
+                expect_sidecar=expect_sidecar)
+
+
 def process_all(samples_dir: Path, derived_dir: Path, *,
-                if_hz: float, force: bool) -> None:
+                if_hz: float, force: bool, jobs: int = 8) -> None:
     derived_dir.mkdir(parents=True, exist_ok=True)
     wavs = sorted(samples_dir.glob("*.wav"))
     if not wavs:
         print(f"[wav_to_if] no WAV files in {samples_dir}")
         return
+    jobs_pending = []
     for wav in wavs:
         if_s16  = derived_dir / f"{wav.stem}.if.s16"
         if_meta = derived_dir / f"{wav.stem}.if.meta"
@@ -174,8 +182,21 @@ def process_all(samples_dir: Path, derived_dir: Path, *,
             print(f"[wav_to_if] {wav.name}: up-to-date, skipping")
             continue
         expect = samples_dir / f"{wav.stem}.expect"
-        process_wav(wav, if_s16, if_meta, if_hz=if_hz,
-                    expect_sidecar=expect if expect.exists() else None)
+        jobs_pending.append((wav, if_s16, if_meta, if_hz,
+                             expect if expect.exists() else None))
+    if not jobs_pending:
+        return
+    if jobs <= 1 or len(jobs_pending) == 1:
+        for args in jobs_pending:
+            _wrap_for_pool(args)
+        return
+    from concurrent.futures import ProcessPoolExecutor
+    n_workers = min(jobs, len(jobs_pending))
+    print(f"[wav_to_if] processing {len(jobs_pending)} WAV(s) "
+          f"with {n_workers} parallel workers")
+    with ProcessPoolExecutor(max_workers=n_workers) as ex:
+        for _ in ex.map(_wrap_for_pool, jobs_pending):
+            pass
 
 
 def main() -> int:
@@ -206,11 +227,13 @@ def main() -> int:
                    help=f"IF position in the input WAV (default {F_IF_DEFAULT_HZ:g})")
     p.add_argument("--force", action="store_true",
                    help="re-process even if outputs are up-to-date")
+    p.add_argument("--jobs", "-j", type=int, default=8,
+                   help="parallel workers in --all mode (default 8)")
     args = p.parse_args()
 
     if args.all:
         process_all(args.samples_dir, args.derived_dir,
-                    if_hz=args.if_hz, force=args.force)
+                    if_hz=args.if_hz, force=args.force, jobs=args.jobs)
         return 0
 
     if not (args.wav_in and args.out and args.meta):

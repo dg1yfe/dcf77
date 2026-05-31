@@ -84,10 +84,23 @@ def lpf(x: np.ndarray, fs: int) -> np.ndarray:
 
 
 def decimate_to_1k(x: np.ndarray, fs_in: int) -> np.ndarray:
-    if fs_in % FS_IQ_HZ != 0:
-        raise ValueError(f"fs_in={fs_in} Hz not a multiple of {FS_IQ_HZ} Hz")
-    down = fs_in // FS_IQ_HZ
-    return resample_poly(x, up=1, down=down)
+    """Resample to FS_IQ_HZ.  Integer-multiple inputs use a clean
+    decimation; non-multiple rates fall back to a rational approximation
+    (limit_denominator=2048) and accept up to 2 % rate error."""
+    if fs_in == FS_IQ_HZ:
+        return x
+    if fs_in % FS_IQ_HZ == 0:
+        down = fs_in // FS_IQ_HZ
+        return resample_poly(x, up=1, down=down)
+    from fractions import Fraction
+    ratio = Fraction(FS_IQ_HZ, fs_in).limit_denominator(2048)
+    up, dn = ratio.numerator, ratio.denominator
+    err = abs(up * fs_in - dn * FS_IQ_HZ) / (dn * FS_IQ_HZ)
+    if err > 0.02:
+        raise ValueError(
+            f"decimate_to_1k: rational approx {up}/{dn} for "
+            f"{FS_IQ_HZ}/{fs_in} is {err*100:.2f} % off (>2 % limit)")
+    return resample_poly(x, up=up, down=dn)
 
 
 def to_int16_pair(iq: np.ndarray) -> np.ndarray:
