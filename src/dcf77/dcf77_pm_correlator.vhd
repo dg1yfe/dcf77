@@ -98,13 +98,17 @@ architecture rtl of dcf77_pm_correlator is
     constant SAMPLES_PER_BURST_SLOT : natural := BUF_SIZE;
     constant CHIP_RATE_NUM    : natural := 31;
     constant CHIP_RATE_DEN    : natural := 96;
-    -- LFSR init.  v1 uses pure m-sequence (no Hetzel force-1): init to
-    -- "000000001" and run continuously.  This is offset by 1 chip from the
-    -- broadcast's Hetzel sequence (which prepends a '0' chip from the
-    -- all-zero state), giving ~0.4 % SNR loss but consistent self-
-    -- correlation.  v2 may add the force-1 start-FF for exact Hetzel
-    -- timing alignment.
-    constant LFSR_INIT        : std_logic_vector(8 downto 0) := "000000001";
+    -- LFSR per external analysis of the DCF77 broadcast:
+    --   Fibonacci LFSR, polynomial x^9 + x^5 + 1, taps 5 & 9 (XOR of stage
+    --   5 = bit 4 and stage 9 = bit 8 feeds back into bit 0 on left shift).
+    --   Seed = 0x011 = 0b000010001 = 17 (decimal).
+    --   Output bit = MSB (bit 8) of the state, taken BEFORE the shift.
+    --   Frame extension: one '0' chip PREPENDED before chip 1 .. chip 511,
+    --   giving exactly 512 chips with 256 zeros and 256 ones (DC balance).
+    -- The engine carries a `first_chip` flag that holds chip_sign='0' for
+    -- the duration of the prepended chip; on the first Bresenham crossing
+    -- the flag clears and the LFSR-driven chips take over.
+    constant LFSR_INIT        : std_logic_vector(8 downto 0) := "000010001";
     -- Buffer holds 9-b signed phase (2π = 2^9, 1 LSB ≈ 0.7°).
     -- 4096 × 9 b = 36.9 kbit → fits in a single Xilinx 36-kbit BRAM tile.
     constant BUF_DATA_W       : natural := 9;
@@ -177,6 +181,7 @@ architecture rtl of dcf77_pm_correlator is
         acc              : signed(19 downto 0);       -- 20-b signed (max 1586·256 ≈ 406K)
         chip_acc         : unsigned(6 downto 0);
         lfsr             : std_logic_vector(8 downto 0);
+        first_chip       : std_logic;                  -- '1' during the prepended '0' chip
 
         ---- Outputs ----
         pm_soft          : signed(11 downto 0);
@@ -212,6 +217,7 @@ architecture rtl of dcf77_pm_correlator is
         acc              => (others => '0'),
         chip_acc         => (others => '0'),
         lfsr             => LFSR_INIT,
+        first_chip       => '0',
         pm_soft          => (others => '0'),
         pm_valid         => '0',
         pm_minute_mark   => '0',
@@ -353,21 +359,51 @@ begin
 
             when E_RECV =>
                 -- ram_rdata_r now holds buf[(eng_base_ptr + sample_idx)].
+                -- chip_sign is '0' during the prepended force-1 chip,
+                -- LFSR MSB output once the engine has crossed the first
+                -- Bresenham boundary.
+                --
+                -- Polarity mapping per observed broadcast convention
+                -- (Python decoder cross-check on dcf_strong: 86.8 % SIK
+                -- signature match with this assignment vs 71.7 % with
+                -- the originally-assumed mapping).  Somewhere in the
+                -- chain (mixer / CORDIC / ...) the phase ends up inverted
+                -- relative to the planning-doc convention; absorbing the
+                -- inversion here keeps the rest of the chain unchanged.
+                --   chip='0' (PNS)  -> multiply sample by -1
+                --   chip='1' (PNS̄)  -> multiply sample by +1
+                -- Net result (after the chain's own sign flip):
+                --   broadcast SIK '0' bit (data '0') -> pm_soft > 0
+                --                                    -> bit_value = '0'
+                --   broadcast SIK '1' bit (data '1') -> pm_soft < 0
+                --                                    -> bit_value = '1'
+                -- which is exactly what frame_dec's MM_SIGNATURE =
+                -- "111111111100000" expects at the signature seconds.
                 sample_in := signed(ram_rdata_r);
-                chip_sign := r.lfsr(0);     -- '0' chip → +1, '1' chip → -1
-                if chip_sign = '0' then
-                    v.acc := r.acc + resize(sample_in, 20);
+                if r.first_chip = '1' then
+                    chip_sign := '0';        -- prepended chip = '0'
                 else
+                    chip_sign := r.lfsr(8);  -- MSB output, before shift
+                end if;
+                if chip_sign = '0' then
                     v.acc := r.acc - resize(sample_in, 20);
+                else
+                    v.acc := r.acc + resize(sample_in, 20);
                 end if;
 
-                -- Bresenham chip advance: chip_acc += 31; if ≥ 96, sub 96
-                -- and shift the LFSR.
+                -- Bresenham chip advance: chip_acc += 31; if ≥ 96, sub 96.
+                -- On the first crossing, drop the first_chip flag and let
+                -- the LFSR start driving chip_sign.  Subsequent crossings
+                -- shift the LFSR left (feedback = stage5 XOR stage9).
                 chip_acc_next := resize(r.chip_acc, 8) + to_unsigned(CHIP_RATE_NUM, 8);
                 if chip_acc_next >= to_unsigned(CHIP_RATE_DEN, 8) then
                     v.chip_acc := resize(chip_acc_next - to_unsigned(CHIP_RATE_DEN, 8), 7);
-                    new_lfsr_bit := r.lfsr(4) xor r.lfsr(8);
-                    v.lfsr := r.lfsr(7 downto 0) & new_lfsr_bit;
+                    if r.first_chip = '1' then
+                        v.first_chip := '0';   -- transition to LFSR-driven chips
+                    else
+                        new_lfsr_bit := r.lfsr(4) xor r.lfsr(8);
+                        v.lfsr := r.lfsr(7 downto 0) & new_lfsr_bit;
+                    end if;
                 else
                     v.chip_acc := resize(chip_acc_next, 7);
                 end if;
@@ -605,6 +641,7 @@ begin
             v.acc          := (others => '0');
             v.chip_acc     := (others => '0');
             v.lfsr         := LFSR_INIT;
+            v.first_chip   := '1';      -- prepended force-1 '0' chip
         end if;
 
         ----------------------------------------------------------------

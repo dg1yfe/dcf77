@@ -33,31 +33,32 @@ SECOND_SAMPLES      = SAMPLE_RATE_HZ    # 2000 samples per second
 CHIP0_OFFSET_NOMINAL = 400              # 200 ms × 2 kS/s
 
 LFSR_TAPS           = (4, 8)            # 0-indexed = stages 5 and 9
-LFSR_INIT           = 0b1               # stage 1 = '1', all other stages '0'
+LFSR_INIT           = 0x011             # 17 = 0b000010001 (stages 1 & 5 set)
 
 
 def make_prbs512() -> np.ndarray:
     """Returns 512 chips of the DCF77 SIK PRBS as a ±1 int8 array.
 
-    Chip value follows Hetzel's convention: stage 1 = '1' → chip='1' →
-    phase = -Δφ (PNS̄); stage 1 = '0' → chip='0' → phase = +Δφ (PNS).
-    Returned as +1 for chip='0', -1 for chip='1' so that
-    Σ phase_err · chip_sign  has positive sign for the SIK '0' bit
-    (matching the HW pm_soft convention).
+    Per external broadcast analysis:
+      * Fibonacci LFSR, polynomial x^9 + x^5 + 1, taps 5 & 9 feeding back
+        into bit 0 on a left shift.
+      * Initial seed = 0x011 = 17.
+      * Output bit = MSB (bit 8) of state, taken BEFORE the shift.
+      * Period = 511 chips; one '0' chip is PREPENDED to balance to 512
+        chips with exactly 256 ones and 256 zeros (DC-balanced).
+
+    Returned as +1 for chip='0' (PNS, phase = +Δφ) and -1 for chip='1'
+    (PNS̄, phase = -Δφ), so Σ phase_err · chip_sign  is positive for
+    the SIK '0' bit (matching the HW pm_soft convention).
     """
     state = LFSR_INIT
     chips = np.empty(PRBS_CHIPS, dtype=np.int8)
-    for n in range(PRBS_CHIPS - 1):
-        bit = state & 1
+    chips[0] = +1                          # prepended force-1 chip = '0'
+    for n in range(1, PRBS_CHIPS):
+        bit = (state >> 8) & 1             # MSB output BEFORE shift
         chips[n] = 1 - 2 * bit             # '0' → +1, '1' → -1
         new_bit = ((state >> LFSR_TAPS[0]) & 1) ^ ((state >> LFSR_TAPS[1]) & 1)
         state = ((state << 1) | new_bit) & 0x1FF
-    # Force-1 chip closes the sequence to exactly 512 chips per Hetzel.
-    # The force mechanism slots in the otherwise-forbidden all-zero LFSR
-    # state for one cycle, during which stage 1 = '0' → chip = '0' → +1
-    # in our ±1 mapping.  This balances the chip count to exactly 256
-    # each, so Σ prbs = 0 over the full sequence.
-    chips[PRBS_CHIPS - 1] = +1
     return chips
 
 
