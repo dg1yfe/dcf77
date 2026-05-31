@@ -13,6 +13,15 @@ The amplitude modulation matches doc/dcf77_format_spec.md:
 * absenkung from second N to second N + (0.1 s for bit 0, 0.2 s for bit 1)
 * no absenkung at second 59 (minute marker)
 
+The PSK / SIK modulation (Hetzel 1988, EFTF) is layered on top of the AM:
+* PRBS-9 (taps 5 & 9, init "000000001"), period 512 chips with force-1,
+  chip rate = 77500/120 Hz ≈ 645.83 Hz
+* Phase deviation ±15.6° relative to nominal carrier
+* PRBS active from second N + 200 ms to second N + 200 ms + 793 ms
+* Sequence Inversion Keying: data bit '0' → PNS unchanged, '1' → PNS̄
+* Seconds 0..9 carry SIK '1' (signature), 10..14 + 59 carry SIK '0',
+  15..58 carry the AM frame's data bits
+
 A companion `<stem>.expect` sidecar is written next to the WAV.  It
 carries the ground-truth time fields so `wav_to_iq.py --expect` can
 cross-check its software decoder against them and surface regressions.
@@ -96,17 +105,97 @@ def build_frame(year: int, month: int, day: int, weekday: int,
     return f
 
 
+# SIK PSK constants -- match dcf77_pm_decode.py / dcf77_pm_correlator.vhd.
+# If the FPGA chain ever changes convention, mirror it here so the synth
+# fixture stays a faithful self-test.
+PRBS_CHIPS         = 512
+CHIP_RATE_HZ       = 77_500.0 / 120.0           # ≈ 645.833
+CHIP0_OFFSET_S     = 0.200                       # PRBS starts 200 ms into each second
+PRBS_DURATION_S    = PRBS_CHIPS / CHIP_RATE_HZ   # ≈ 0.7928 s
+DELTA_PHI_RAD      = math.radians(15.6)          # ±15.6° per current PTB spec
+LFSR_TAPS          = (4, 8)                      # 0-indexed = stages 5 & 9
+LFSR_INIT          = 0b1                         # stage 1 = '1', others '0'
+
+
+def make_prbs() -> np.ndarray:
+    """512-chip PRBS-9 with Hetzel force-1, returned as ±1 float array.
+
+    +1 for chip='0' (PNS, phase = +Δφ), -1 for chip='1' (PNS̄, phase = -Δφ).
+    """
+    state = LFSR_INIT
+    chips = np.empty(PRBS_CHIPS, dtype=np.float64)
+    for n in range(PRBS_CHIPS - 1):
+        bit = state & 1
+        chips[n] = 1.0 - 2.0 * bit
+        new_bit = ((state >> LFSR_TAPS[0]) & 1) ^ ((state >> LFSR_TAPS[1]) & 1)
+        state = ((state << 1) | new_bit) & 0x1FF
+    # Hetzel force-1: chip 511 is forced to '0' (+1 in our mapping).
+    chips[PRBS_CHIPS - 1] = +1.0
+    return chips
+
+
+def sik_polarity(sec_in_min: int, frame: list[int]) -> int:
+    """SIK polarity for the given second-in-minute.
+
+    Returns +1 (PNS unchanged, SIK '0') or -1 (PNS̄ inverted, SIK '1').
+    Signature: secs 0..9 → '1' (-1); 10..14 & 59 → '0' (+1).
+    Data    : secs 15..58 follow the AM frame bit (frame[sec] = 0 → +1,
+              frame[sec] = 1 → -1).
+    """
+    if 0 <= sec_in_min <= 9:
+        return -1
+    if 10 <= sec_in_min <= 14 or sec_in_min == 59:
+        return +1
+    return +1 if frame[sec_in_min] == 0 else -1
+
+
+def build_psk_phase(frames: list[list[int]],
+                    duration_s: float,
+                    fs: int) -> np.ndarray:
+    """Construct φ(t) -- the SIK PSK modulation -- at `fs` samples/sec.
+
+    φ is 0 outside the PRBS windows (= [200..993] ms within each second)
+    and ±Δφ × prbs_chip × sik_polarity inside.  The whole array is added
+    to the carrier argument so the modulated signal is
+        amp(t) · cos(2π·f_c·t + φ(t)).
+    """
+    n = int(round(duration_s * fs))
+    phi = np.zeros(n, dtype=np.float64)
+    prbs = make_prbs()
+    n_psk = int(round(PRBS_DURATION_S * fs))
+
+    for m, frame in enumerate(frames):
+        for sec in range(60):
+            sec_start_t = m * 60 + sec
+            sample_start = int(round((sec_start_t + CHIP0_OFFSET_S) * fs))
+            if sample_start >= n:
+                return phi
+            sample_end = min(sample_start + n_psk, n)
+            length = sample_end - sample_start
+            t_rel = np.arange(length) / fs
+            chip_idx = np.minimum(
+                (t_rel * CHIP_RATE_HZ).astype(int),
+                PRBS_CHIPS - 1,
+            )
+            polarity = sik_polarity(sec, frame)
+            phi[sample_start:sample_end] = \
+                DELTA_PHI_RAD * prbs[chip_idx] * polarity
+    return phi
+
+
 def synth_baseband(frames: list[list[int]],
                    duration_s: float,
                    fs: int,
                    f_carrier: float = 5_000.0,
                    amp_high: float = 0.80,
-                   amp_low: float  = 0.12) -> np.ndarray:
+                   amp_low: float  = 0.12,
+                   psk: bool       = True) -> np.ndarray:
     """Build a real-valued USB-baseband signal of length `duration_s`.
 
     `frames` lists one 59-bit frame per minute, starting at t=0.  Each
     frame's pulses land at sec 0..58 of the corresponding minute; second
-    59 has no pulse (the minute-mark gap).
+    59 has no pulse (the minute-mark gap).  When `psk=True` (default) the
+    SIK PSK is layered on top of the AM envelope.
     """
     n = int(round(duration_s * fs))
     t = np.arange(n) / fs
@@ -117,12 +206,17 @@ def synth_baseband(frames: list[list[int]],
         for sec, bit in enumerate(frame):
             start = int(round((m * 60 + sec) * fs))
             if start >= n:
-                return amp * np.cos(2.0 * math.pi * f_carrier * t)
+                break
             pulse_s = 0.1 if bit == 0 else 0.2
             end = min(start + int(round(pulse_s * fs)), n)
             amp[start:end] = amp_low
 
-    return amp * np.cos(2.0 * math.pi * f_carrier * t)
+    if psk:
+        phi = build_psk_phase(frames, duration_s, fs)
+    else:
+        phi = 0.0
+
+    return amp * np.cos(2.0 * math.pi * f_carrier * t + phi)
 
 
 def build_minute_sequence(year: int, month: int, day: int, weekday: int,
@@ -164,13 +258,16 @@ def main() -> int:
     p.add_argument("--minute",  type=int, default=42)
     p.add_argument("--dst",     type=int, default=1,
                    help="1 = MESZ summer, 0 = MEZ winter")
+    p.add_argument("--no-psk",  action="store_true",
+                   help="Generate AM only (legacy mode, no SIK PSK)")
     args = p.parse_args()
 
     num_minutes = max(1, int(args.duration // 60) + 1)
     frames = build_minute_sequence(args.year, args.month, args.day,
                                    args.weekday, args.hour, args.minute,
                                    bool(args.dst), num_minutes)
-    sig = synth_baseband(frames, args.duration, args.fs)
+    sig = synth_baseband(frames, args.duration, args.fs,
+                         psk=not args.no_psk)
 
     peak = float(np.max(np.abs(sig))) or 1.0
     sig_i16 = np.clip(sig / peak * 16_384.0, -32_768, 32_767).astype(np.int16)
