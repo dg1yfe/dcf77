@@ -102,7 +102,10 @@ def score_one(csv_path: Path) -> dict:
         if "cordic_phase" in cols else float("nan")
 
     pm_lq_end = int(data["pm_lock_qual"][-1]) if "pm_lock_qual" in cols else 0
-    t_ms = data["t_ms"].astype(int)
+    if "t_ms" in cols:
+        t_ms = data["t_ms"].astype(int)
+    else:
+        t_ms = (data["t_us"].astype(int)) // 1000
     late = t_ms > 20_000
     pm_lq_avg = float(np.mean(data["pm_lock_qual"][late])) \
         if late.any() and "pm_lock_qual" in cols else 0.0
