@@ -55,7 +55,12 @@ def plot_one(csv_path: Path) -> None:
         print(f"{csv_path}: empty")
         return
 
-    t_s = data["t_ms"] / 1000.0
+    if "t_ms" in data.dtype.names:
+        t_s = data["t_ms"] / 1000.0
+    elif "t_us" in data.dtype.names:
+        t_s = data["t_us"] / 1_000_000.0
+    else:
+        raise RuntimeError("CSV has no t_ms or t_us column")
 
     cols = list(data.dtype.names)
     has_pm = "pm_soft" in cols or "pm_lock_qual" in cols

@@ -333,15 +333,52 @@ def _configure_pm_if_replay_testbench(lib) -> None:
         if_hz   = int(float(kv.get("if_hz", 5000)))
         samples = int(kv["sample_count"])
 
-        cfg = dict(
+        base_cfg = dict(
             REPLAY_FILE         = str(if_s16),
             SAMPLE_COUNT        = samples,
             SAMPLE_RATE_HZ      = rate,
             IF_HZ               = if_hz,
             EXPECT_PM_VALID_MIN = 30,
         )
+
+        # Optional PLL-gain sweep: enumerate one config per (KP, KI) pair.
+        # Activated by DCF77_PM_PLL_SWEEP="kp1,kp2,...;ki1,ki2,..." (two
+        # comma lists separated by ';').  Each combo writes a uniquely-
+        # named telemetry CSV so the analysis script can compare them.
+        sweep = os.environ.get("DCF77_PM_PLL_SWEEP")
+        if sweep:
+            kp_str, ki_str = sweep.split(";", 1)
+            kp_list = [int(s) for s in kp_str.split(",") if s.strip()]
+            ki_list = [int(s) for s in ki_str.split(",") if s.strip()]
+            for kp in kp_list:
+                for ki in ki_list:
+                    cfg = dict(base_cfg)
+                    cfg["PLL_KP_SHIFT"] = kp
+                    cfg["PLL_KI_SHIFT"] = ki
+                    suffix = f"kp{kp}_ki{ki}"
+                    if os.environ.get("DCF77_PLL_TELEM_FAST") == "1":
+                        cfg["TELEM_PERIOD_US"] = 500
+                        cfg["TELEM_CSV"] = str(
+                            DERIVED_DIR
+                            / f"{stem}.pm.{suffix}.fast.telem.csv")
+                    else:
+                        cfg["TELEM_CSV"] = str(
+                            DERIVED_DIR
+                            / f"{stem}.pm.{suffix}.telem.csv")
+                    tb.test("pm_smoke").add_config(
+                        name=f"{stem}.{suffix}", generics=cfg)
+            continue
+
+        cfg = dict(base_cfg)
         if os.environ.get("DCF77_PLL_TELEM") == "1":
             cfg["TELEM_CSV"] = str(DERIVED_DIR / f"{stem}.pm.telem.csv")
+            # DCF77_PLL_TELEM_FAST=1 → dump every CORDIC sample (2 kHz)
+            # so the chip-rate (645 Hz) is properly resolved.  Default
+            # is 10 ms (100 Hz), heavily aliased for chip-rate analysis.
+            if os.environ.get("DCF77_PLL_TELEM_FAST") == "1":
+                cfg["TELEM_PERIOD_US"] = 500
+                cfg["TELEM_CSV"] = str(
+                    DERIVED_DIR / f"{stem}.pm.fast.telem.csv")
         tb.test("pm_smoke").add_config(name=stem, generics=cfg)
 
 
