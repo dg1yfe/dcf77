@@ -46,11 +46,26 @@ entity dcf77_pm_if_replay_tb is
         EXPECT_PM_VALID_MIN : natural := 30;
 
         -- Optional CSV telemetry dump (same idea as 07_if_replay).
-        -- Columns: t_ms, nco_offset, pll_qfilt, pll_qlock, pll_lock,
+        -- Columns: t_us, nco_offset, pll_qfilt, pll_qlock, pll_lock,
         -- cordic_phase, pm_soft, pm_valid, pm_lock_qual, pm_sync_state.
-        -- One row per TELEM_PERIOD_MS of broadcast time.
+        -- One row per TELEM_PERIOD_US of broadcast time.  Default 10000
+        -- = 10 ms (100 Hz).  Set 500 to dump every CORDIC sample (= 2 kHz)
+        -- for chip-rate spectral analysis.
         TELEM_CSV       : string  := "";
-        TELEM_PERIOD_MS : positive := 10
+        TELEM_PERIOD_US : positive := 10_000;
+
+        -- Carrier-PLL PI gain right-shifts.  Exposed for tuning sweeps.
+        -- Larger shift = smaller gain = lower loop bandwidth.  Defaults
+        -- tuned for the CORDIC adapter (= shift_left(cordic_phase, 11)
+        -- feeding the PI): KP=10 keeps the fast pole at ~0.44 Hz, well
+        -- below where broadband phase noise + PSK chip energy could
+        -- drive the loop into hunting.  See
+        -- feedback_dcf77_carrier_pll_tuning memory for the full
+        -- rationale + sweep results.  The legacy 7 / 20 was tuned for
+        -- the older amplitude-weighted sign(I)·q_box detector and is
+        -- much too aggressive with the CORDIC input.
+        PLL_KP_SHIFT    : positive := 10;
+        PLL_KI_SHIFT    : positive := 23
     );
 end entity;
 
@@ -267,8 +282,8 @@ begin
         generic map (
             Q_WIDTH         => POST_W,
             OFFSET_WIDTH    => NCO_OFFSET_W,
-            KP_SHIFT        => 7,
-            KI_SHIFT        => 20,
+            KP_SHIFT        => PLL_KP_SHIFT,
+            KI_SHIFT        => PLL_KI_SHIFT,
             LOOP_IIR_SHIFT  => LOOP_IIR_SHIFT,
             LOCK_IIR_SHIFT  => 14,
             LOCK_IN_THR     => 2**18,
@@ -374,11 +389,11 @@ begin
     -- ------------------------------------------------------------------ --
     csv_telemetry : process
         constant TICK_INTERVAL : time :=
-            TELEM_PERIOD_MS * SAMPLE_RATE_HZ * CLOCKS_PER_TICK * CLK_PERIOD
-            / 1_000;
+            TELEM_PERIOD_US * SAMPLE_RATE_HZ * CLOCKS_PER_TICK * CLK_PERIOD
+            / 1_000_000;
         file     fh        : text;
         variable lbuf      : line;
-        variable t_ms      : natural := 0;
+        variable t_us      : natural := 0;
         variable status    : file_open_status;
         variable lock_int  : integer;
         variable pmv_int   : integer;
@@ -391,16 +406,16 @@ begin
         assert status = open_ok
             report "csv_telemetry: cannot open " & TELEM_CSV
             severity failure;
-        write(lbuf, string'("t_ms,nco_offset,pll_qfilt,pll_qlock,"
+        write(lbuf, string'("t_us,nco_offset,pll_qfilt,pll_qlock,"
                             & "pll_lock,cordic_phase,pm_soft,pm_valid,"
                             & "pm_lock_qual,pm_sync_state"));
         writeline(fh, lbuf);
         loop
             wait for TICK_INTERVAL;
-            t_ms := t_ms + TELEM_PERIOD_MS;
+            t_us := t_us + TELEM_PERIOD_US;
             if pll_lock = '1'  then lock_int := 1; else lock_int := 0; end if;
             if pm_valid_s = '1' then pmv_int  := 1; else pmv_int  := 0; end if;
-            write(lbuf, integer'image(t_ms));
+            write(lbuf, integer'image(t_us));
             write(lbuf, ',');
             write(lbuf, integer'image(to_integer(pll_offset)));
             write(lbuf, ',');

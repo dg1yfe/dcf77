@@ -468,8 +468,10 @@ begin
 
     -- ------------------------------------------------------------------ --
     -- Carrier-PLL adapter: left-shift CORDIC phase by 11 bits to match  --
-    -- the magnitude scale the PI gains (KP_SHIFT=7, KI_SHIFT=20) were   --
-    -- calibrated for under the OLD amplitude-weighted detector.         --
+    -- the magnitude scale the PI gains were calibrated against.  Note    --
+    -- the gains used here (KP=10, KI=23) are *not* the legacy 7/20 from --
+    -- the amplitude-weighted sign(I)·q_box detector — see the           --
+    -- u_carrier_pll instantiation below + the carrier-pll-tuning memo.   --
     -- ------------------------------------------------------------------ --
     pll_adapter_proc : process(clk)
     begin
@@ -499,9 +501,15 @@ begin
         generic map (
             Q_WIDTH         => POST_W,          -- 29
             OFFSET_WIDTH    => NCO_OFFSET_W,    -- 24
-            -- PI gains (alpha = 2^-7, beta = 2^-25).
-            KP_SHIFT        => 7,
-            KI_SHIFT        => 20,
+            -- PI gains tuned for the CORDIC-phase detector (was 7/20
+            -- for the legacy amplitude-weighted sign(I)·q_box).  At
+            -- KP=10/KI=23 the loop's fast pole sits at 0.44 Hz and the
+            -- dominant (slow) pole at 0.04 Hz → time constant ~4 s.
+            -- See feedback_dcf77_carrier_pll_tuning memo for the full
+            -- sweep + rationale; 7/20 with the CORDIC adapter drove the
+            -- NCO into ±10 Hz hunting on dcf_strong.
+            KP_SHIFT        => 10,
+            KI_SHIFT        => 23,
             -- Internal IIRs.
             LOOP_IIR_SHIFT  => LOOP_IIR_SHIFT,  -- 4 -> ~ 20 Hz
             LOCK_IIR_SHIFT  => 14,              -- ~ 8.2 s
