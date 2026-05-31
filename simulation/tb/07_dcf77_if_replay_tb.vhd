@@ -92,7 +92,16 @@ entity dcf77_if_replay_tb is
         -- sample, 100_000 us = ~130 s of recording-time.  Needs to
         -- be at least 3-4 × LOCK_IIR Tau (= 8.2 s) plus the loop's
         -- own acquisition transient.
-        PLL_LOCK_TIMEOUT_MS : positive := 100_000
+        PLL_LOCK_TIMEOUT_MS : positive := 100_000;
+
+        -- Optional CSV telemetry dump.  Empty string disables.  When
+        -- enabled, one line per TELEM_PERIOD_MS of broadcast time
+        -- with columns t_ms, nco_offset, pll_qfilt, pll_qlock,
+        -- pll_lock, phase_err, env_pwr.  Useful for plotting the
+        -- acquisition trajectory in a Python helper (see
+        -- simulation/scripts/plot_pll_telem.py).
+        TELEM_CSV       : string  := "";
+        TELEM_PERIOD_MS : positive := 10
     );
 end entity;
 
@@ -672,6 +681,59 @@ begin
                  & "  q_lock="   & integer'image(to_integer(pll_qlock))
                  & "  lock="     & std_logic'image(pll_lock));
         end loop;
+    end process;
+
+    -- ------------------------------------------------------------------ --
+    -- CSV telemetry: dense per-sample dump of NCO offset, filtered phase
+    -- error and lock state.  Enabled by setting TELEM_CSV to a file path
+    -- (default "" disables).  Sampling rate is TELEM_PERIOD_MS of
+    -- broadcast time per row; at the default 10 ms that's 100 Hz, ≈
+    -- 22 K rows for a 220 s recording.  Render with
+    -- simulation/scripts/plot_pll_telem.py.
+    -- ------------------------------------------------------------------ --
+    csv_telemetry : process
+        constant TICK_INTERVAL : time :=
+            TELEM_PERIOD_MS * SAMPLE_RATE_HZ * CLOCKS_PER_TICK * CLK_PERIOD
+            / 1_000;
+        file     fh        : text;
+        variable lbuf      : line;
+        variable t_ms      : natural := 0;
+        variable status    : file_open_status;
+        variable lock_int  : integer;
+    begin
+        if TELEM_CSV = "" then
+            wait;
+        end if;
+        wait until rst = '0';
+        file_open(status, fh, TELEM_CSV, write_mode);
+        assert status = open_ok
+            report "csv_telemetry: cannot open " & TELEM_CSV
+            severity failure;
+        write(lbuf, string'("t_ms,nco_offset,pll_qfilt,pll_qlock,"
+                            & "pll_lock,phase_err,env_pwr"));
+        writeline(fh, lbuf);
+        loop
+            wait for TICK_INTERVAL;
+            t_ms := t_ms + TELEM_PERIOD_MS;
+            if pll_lock = '1' then lock_int := 1; else lock_int := 0; end if;
+            write(lbuf, integer'image(t_ms));
+            write(lbuf, ',');
+            write(lbuf, integer'image(to_integer(pll_offset)));
+            write(lbuf, ',');
+            write(lbuf, integer'image(to_integer(pll_qfilt)));
+            write(lbuf, ',');
+            write(lbuf, integer'image(to_integer(pll_qlock)));
+            write(lbuf, ',');
+            write(lbuf, integer'image(lock_int));
+            write(lbuf, ',');
+            write(lbuf, integer'image(to_integer(phase_err)));
+            write(lbuf, ',');
+            write(lbuf, integer'image(to_integer(env_pwr)));
+            writeline(fh, lbuf);
+            exit when stim_done = '1';
+        end loop;
+        file_close(fh);
+        wait;
     end process;
 
     -- ------------------------------------------------------------------ --

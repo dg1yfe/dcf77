@@ -43,7 +43,14 @@ entity dcf77_pm_if_replay_tb is
         SAMPLE_RATE_HZ : natural := 12_000;
         CLOCKS_PER_TICK : positive := 8;
         -- Minimum pm_valid pulses we expect by end of recording.
-        EXPECT_PM_VALID_MIN : natural := 30
+        EXPECT_PM_VALID_MIN : natural := 30;
+
+        -- Optional CSV telemetry dump (same idea as 07_if_replay).
+        -- Columns: t_ms, nco_offset, pll_qfilt, pll_qlock, pll_lock,
+        -- cordic_phase, pm_soft, pm_valid, pm_lock_qual, pm_sync_state.
+        -- One row per TELEM_PERIOD_MS of broadcast time.
+        TELEM_CSV       : string  := "";
+        TELEM_PERIOD_MS : positive := 10
     );
 end entity;
 
@@ -322,6 +329,7 @@ begin
     -- transitions.                                                        --
     -- ------------------------------------------------------------------ --
     pm_monitor : process(clk)
+        variable bit_str : string(1 to 1);
     begin
         if rising_edge(clk) then
             if rst = '1' then
@@ -332,6 +340,18 @@ begin
             else
                 if pm_valid_s = '1' then
                     pm_valid_count := pm_valid_count + 1;
+                    -- Log per-bit pm_soft to diagnose SIK signature detection.
+                    if pm_valid_count <= 200 then
+                        if pm_soft_s(11) = '1' then
+                            bit_str(1) := '1';
+                        else
+                            bit_str(1) := '0';
+                        end if;
+                        info("pm_bit #" & integer'image(pm_valid_count)
+                             & " sign=" & bit_str
+                             & " soft=" & integer'image(to_integer(pm_soft_s))
+                             & " bit_ix=" & integer'image(pm_bit_ix));
+                    end if;
                 end if;
                 if pm_frame_mm = '1' then
                     pm_mm_count := pm_mm_count + 1;
@@ -345,6 +365,65 @@ begin
                 end if;
             end if;
         end if;
+    end process;
+
+    -- ------------------------------------------------------------------ --
+    -- CSV telemetry: dense dump of PLL + PM correlator state.  Enabled
+    -- via the TELEM_CSV generic; render with
+    -- simulation/scripts/plot_pll_telem.py.
+    -- ------------------------------------------------------------------ --
+    csv_telemetry : process
+        constant TICK_INTERVAL : time :=
+            TELEM_PERIOD_MS * SAMPLE_RATE_HZ * CLOCKS_PER_TICK * CLK_PERIOD
+            / 1_000;
+        file     fh        : text;
+        variable lbuf      : line;
+        variable t_ms      : natural := 0;
+        variable status    : file_open_status;
+        variable lock_int  : integer;
+        variable pmv_int   : integer;
+    begin
+        if TELEM_CSV = "" then
+            wait;
+        end if;
+        wait until rst = '0';
+        file_open(status, fh, TELEM_CSV, write_mode);
+        assert status = open_ok
+            report "csv_telemetry: cannot open " & TELEM_CSV
+            severity failure;
+        write(lbuf, string'("t_ms,nco_offset,pll_qfilt,pll_qlock,"
+                            & "pll_lock,cordic_phase,pm_soft,pm_valid,"
+                            & "pm_lock_qual,pm_sync_state"));
+        writeline(fh, lbuf);
+        loop
+            wait for TICK_INTERVAL;
+            t_ms := t_ms + TELEM_PERIOD_MS;
+            if pll_lock = '1'  then lock_int := 1; else lock_int := 0; end if;
+            if pm_valid_s = '1' then pmv_int  := 1; else pmv_int  := 0; end if;
+            write(lbuf, integer'image(t_ms));
+            write(lbuf, ',');
+            write(lbuf, integer'image(to_integer(pll_offset)));
+            write(lbuf, ',');
+            write(lbuf, integer'image(to_integer(pll_qfilt)));
+            write(lbuf, ',');
+            write(lbuf, integer'image(to_integer(pll_qlock)));
+            write(lbuf, ',');
+            write(lbuf, integer'image(lock_int));
+            write(lbuf, ',');
+            write(lbuf, integer'image(to_integer(cordic_phase)));
+            write(lbuf, ',');
+            write(lbuf, integer'image(to_integer(pm_soft_s)));
+            write(lbuf, ',');
+            write(lbuf, integer'image(pmv_int));
+            write(lbuf, ',');
+            write(lbuf, integer'image(to_integer(pm_lock_qual_s)));
+            write(lbuf, ',');
+            write(lbuf, integer'image(to_integer(unsigned(pm_sync_state_s))));
+            writeline(fh, lbuf);
+            exit when stim_done = '1';
+        end loop;
+        file_close(fh);
+        wait;
     end process;
 
     -- ------------------------------------------------------------------ --

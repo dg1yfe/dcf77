@@ -276,6 +276,11 @@ def _configure_if_replay_testbench(lib) -> None:
                        EXPECT_FULL_FRAME      = False,
                        EXPECT_VALIDATE_TIME   = False,
                        EXPECT_DECODE_PROGRESS = has_exp)
+        # Opt-in dense PLL telemetry dump (DCF77_PLL_TELEM=1 enables).
+        # Writes <stem>.telem.csv next to the .if.s16 with one row per
+        # 10 ms of broadcast time -- render via plot_pll_telem.py.
+        if os.environ.get("DCF77_PLL_TELEM") == "1":
+            acq_cfg["TELEM_CSV"] = str(DERIVED_DIR / f"{stem}.telem.csv")
         tb.test("acquire").add_config(name=stem, generics=acq_cfg)
 
         if has_exp and want_full:
@@ -335,6 +340,8 @@ def _configure_pm_if_replay_testbench(lib) -> None:
             IF_HZ               = if_hz,
             EXPECT_PM_VALID_MIN = 30,
         )
+        if os.environ.get("DCF77_PLL_TELEM") == "1":
+            cfg["TELEM_CSV"] = str(DERIVED_DIR / f"{stem}.pm.telem.csv")
         tb.test("pm_smoke").add_config(name=stem, generics=cfg)
 
 
