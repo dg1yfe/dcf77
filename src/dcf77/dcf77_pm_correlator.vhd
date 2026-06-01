@@ -498,7 +498,13 @@ begin
                    and r.sec_phase = 0
                 then
                     v.ac_burst_armed    := '1';
-                    v.ac_hyp_idx        := (others => '0');
+                    -- Down-count: load with K-1, walk to 0.  Compare
+                    -- against 0 at burst-end is one LUT vs a 12-b
+                    -- literal compare, and the first hypothesis reads
+                    -- from buf[w_ptr_snap + K-1 .. + K-1 + 1585] --
+                    -- the newest data in the buffer, fully past the
+                    -- live writer pointer.
+                    v.ac_hyp_idx        := to_unsigned(K_HYPOTHESES - 1, 12);
                     v.ac_w_ptr_snap     := r.w_ptr;
                     v.ac_sec_phase_snap := r.sec_phase;
                 end if;
@@ -533,48 +539,50 @@ begin
                                          + resize(r.ac_hyp_idx, 12);
                     end if;
 
-                    if r.ac_hyp_idx = K_HYPOTHESES - 1 then
+                    -- Burst complete: evaluate LOCK_IN_THR against the
+                    -- true running max across all K=2510 hypotheses.
+                    -- Previously this fired at the next sec_phase=0
+                    -- wrap, but in accelerated TBs the wrap occurs
+                    -- before the burst finishes -- the check then
+                    -- evaluated a partial-burst max and was misleading.
+                    -- Tying the check to burst-complete decouples LOCK
+                    -- from buffer-wrap timing and matches the semantic
+                    -- intent ("decide once you have a full running max").
+                    -- Behaviour in live operation is unchanged: burst
+                    -- finishes ~63 ms into a 2.048 s buffer cycle, the
+                    -- old wait-until-wrap was idle time.
+                    --
+                    -- target_phase = ac_best_phase + 1586 + 4 × 2000
+                    -- (mod 4096): chip-0 sits up to ~2 buffer-cycles in
+                    -- the past, the +4 broadcast-second skip guarantees
+                    -- target_phase lands in the future regardless of
+                    -- which k won.  In 12-b natural wrap,
+                    -- (1586 + 4·2000) mod 4096 = 1394.
+                    if r.ac_hyp_idx = 0 then
                         v.ac_burst_armed := '0';
-                        v.ac_burst_count := r.ac_burst_count + 1;
+                        if v.ac_best_score >= to_unsigned(LOCK_IN_THR, 19) then
+                            v.mode := M_LOCK;
+                            v.locked_phase := v.ac_best_phase;
+                            v.target_phase := v.ac_best_phase
+                                            + to_unsigned(
+                                                  (SAMPLES_PER_PRBS
+                                                   + 4 * SAMPLES_PER_SEC)
+                                                  mod BUF_SIZE,
+                                                  12);
+                            v.track_step  := T_MINUS;
+                            v.track_armed := '0';
+                            v.track_best_idx := (others => '0');
+                            v.track_best_score := (others => '0');
+                            v.loss_count := (others => '0');
+                            v.pm_lock_qual := (others => '0');
+                            v.dll_acc      := (others => '0');
+                            v.sync_state_o := SYNC_STATE_LOCK;
+                        end if;
+                        v.ac_best_score  := (others => '0');
+                        v.ac_burst_count := (others => '0');
                     else
-                        v.ac_hyp_idx := r.ac_hyp_idx + 1;
+                        v.ac_hyp_idx := r.ac_hyp_idx - 1;
                     end if;
-                end if;
-
-                -- LOCK decision at the natural-wrap boundary (sec_phase
-                -- wraps 4095 → 0), AFTER the single big burst's K=2510
-                -- hypotheses have all been evaluated.  ac_best_score is
-                -- the true absolute peak across every chip-0 candidate
-                -- whose 1586-sample integration window fits non-wrapped
-                -- inside the buffer.
-                --
-                -- target_phase = locked_phase + 1586 + 4 × 2000 (mod 4096):
-                --   By end-of-cycle the chip-0 we found is ~5683–8192
-                --   sample ticks in the past (= 2.8–4.1 broadcast-seconds),
-                --   so we need to skip 4 future broadcast-second window-
-                --   ends to land on the first one in the future.  In
-                --   12-b natural wrap, (1586 + 4·2000) mod 4096 = 1394.
-                if phase_err_v = '1' and v.sec_phase = 0 then
-                    if r.ac_best_score >= to_unsigned(LOCK_IN_THR, 19) then
-                        v.mode := M_LOCK;
-                        v.locked_phase := r.ac_best_phase;
-                        v.target_phase := r.ac_best_phase
-                                        + to_unsigned(
-                                              (SAMPLES_PER_PRBS
-                                               + 4 * SAMPLES_PER_SEC)
-                                              mod BUF_SIZE,
-                                              12);
-                        v.track_step  := T_MINUS;
-                        v.track_armed := '0';
-                        v.track_best_idx := (others => '0');
-                        v.track_best_score := (others => '0');
-                        v.loss_count := (others => '0');
-                        v.pm_lock_qual := (others => '0');
-                        v.dll_acc      := (others => '0');
-                        v.sync_state_o := SYNC_STATE_LOCK;
-                    end if;
-                    v.ac_best_score  := (others => '0');
-                    v.ac_burst_count := (others => '0');
                 end if;
 
             when M_LOCK =>
