@@ -54,6 +54,12 @@ entity dcf77_pm_if_replay_tb is
         TELEM_CSV       : string  := "";
         TELEM_PERIOD_US : positive := 10_000;
 
+        -- ACQUIRE-debug log.  When non-empty, every per-hypothesis
+        -- engine_done pulse during ACQUIRE writes a row
+        -- (t_us, hyp_idx, abs_acc, sec_phase) so we can analyse the
+        -- autocorrelation profile offline.
+        ACQUIRE_LOG_CSV : string := "";
+
         -- Carrier-PLL PI gain right-shifts.  Exposed for tuning sweeps.
         -- Larger shift = smaller gain = lower loop bandwidth.  Defaults
         -- tuned for the CORDIC adapter (= shift_left(cordic_phase, 11)
@@ -135,6 +141,7 @@ architecture tb of dcf77_pm_if_replay_tb is
     signal pm_sync_state_s    : std_logic_vector(1 downto 0);
     signal pm_locked_phase_s  : unsigned(11 downto 0);
     signal pm_lock_qual_s     : unsigned(15 downto 0);
+    signal pm_debug_s         : dcf77_pm_debug_type;
 
     -- PM frame_dec
     signal pm_time_d   : dcf77_time_type;
@@ -319,7 +326,8 @@ begin
             pm_minute_mark_o => pm_corr_mm_s,
             pm_sync_state    => pm_sync_state_s,
             pm_locked_phase  => pm_locked_phase_s,
-            pm_lock_qual     => pm_lock_qual_s
+            pm_lock_qual     => pm_lock_qual_s,
+            pm_debug         => pm_debug_s
         );
 
     u_pm_frame : entity dcf77.dcf77_frame_dec
@@ -387,6 +395,45 @@ begin
     -- via the TELEM_CSV generic; render with
     -- simulation/scripts/plot_pll_telem.py.
     -- ------------------------------------------------------------------ --
+
+    -- ------------------------------------------------------------------ --
+    -- ACQUIRE-debug logger: writes one row per pm_debug.acquire_v pulse  --
+    -- (= per hypothesis evaluated during ACQUIRE bursts).  Enabled by    --
+    -- setting ACQUIRE_LOG_CSV.                                            --
+    -- ------------------------------------------------------------------ --
+    acquire_logger : process(clk)
+        file     fh        : text;
+        variable lbuf      : line;
+        variable status    : file_open_status;
+        variable opened    : boolean := false;
+    begin
+        if rising_edge(clk) then
+            if ACQUIRE_LOG_CSV /= "" then
+                if not opened and rst = '0' then
+                    file_open(status, fh, ACQUIRE_LOG_CSV, write_mode);
+                    if status = open_ok then
+                        write(lbuf, string'("t_us,hyp_idx,abs_acc,sec_phase"));
+                        writeline(fh, lbuf);
+                        opened := true;
+                    end if;
+                end if;
+                if opened and pm_debug_s.acquire_v = '1' then
+                    write(lbuf, integer'image(now / 1 us));
+                    write(lbuf, ',');
+                    write(lbuf, integer'image(
+                        to_integer(pm_debug_s.acquire_hyp_idx)));
+                    write(lbuf, ',');
+                    write(lbuf, integer'image(
+                        to_integer(pm_debug_s.acquire_abs_acc)));
+                    write(lbuf, ',');
+                    write(lbuf, integer'image(
+                        to_integer(pm_debug_s.acquire_sec_phase)));
+                    writeline(fh, lbuf);
+                end if;
+            end if;
+        end if;
+    end process;
+
     csv_telemetry : process
         constant TICK_INTERVAL : time :=
             TELEM_PERIOD_US * SAMPLE_RATE_HZ * CLOCKS_PER_TICK * CLK_PERIOD

@@ -74,7 +74,13 @@ entity dcf77_pm_correlator is
         pm_minute_mark_o : out std_logic;          -- = pm_valid (signature work in frame_dec)
         pm_sync_state    : out std_logic_vector(1 downto 0);  -- "00"=FILL "01"=ACQ "10"=LOCK
         pm_locked_phase  : out unsigned(11 downto 0);
-        pm_lock_qual     : out unsigned(15 downto 0)
+        pm_lock_qual     : out unsigned(15 downto 0);
+
+        -- Debug / instrumentation: bundled per dcf77_pkg's
+        -- dcf77_pm_debug_type record.  Pulses fire on each engine
+        -- completion in ACQUIRE / TRACK; lets TBs log the full
+        -- autocorrelation profile + early-late energy trace.
+        pm_debug         : out dcf77_pm_debug_type
     );
 end entity dcf77_pm_correlator;
 
@@ -164,6 +170,17 @@ architecture rtl of dcf77_pm_correlator is
         ac_w_ptr_snap    : unsigned(11 downto 0);     -- w_ptr at start of burst
         ac_sec_phase_snap: unsigned(11 downto 0);     -- sec_phase at start of burst
 
+        -- Debug / instrumentation registers (drive corresponding ports
+        -- via plain `r.field <= ...` below; one-clock pulses are cleared
+        -- to '0' at the top of the comb body).
+        dbg_acquire_v        : std_logic;
+        dbg_acquire_hyp_idx  : unsigned(11 downto 0);
+        dbg_acquire_abs_acc  : unsigned(18 downto 0);
+        dbg_acquire_sec_phase: unsigned(11 downto 0);
+        dbg_track_v          : std_logic;
+        dbg_track_step       : unsigned(1 downto 0);
+        dbg_track_abs_acc    : unsigned(18 downto 0);
+
         ---- LOCK / TRACK ----
         locked_phase     : unsigned(11 downto 0);     -- sec_phase at chip-0 arrival
         target_phase     : unsigned(11 downto 0);     -- sec_phase to dispatch TRACK
@@ -225,6 +242,13 @@ architecture rtl of dcf77_pm_correlator is
         loss_count       => (others => '0'),
         pm_lock_qual     => (others => '0'),
         dll_acc          => (others => '0'),
+        dbg_acquire_v        => '0',
+        dbg_acquire_hyp_idx  => (others => '0'),
+        dbg_acquire_abs_acc  => (others => '0'),
+        dbg_acquire_sec_phase=> (others => '0'),
+        dbg_track_v          => '0',
+        dbg_track_step       => (others => '0'),
+        dbg_track_abs_acc    => (others => '0'),
         eng_state        => E_IDLE,
         eng_base_ptr     => (others => '0'),
         sample_idx       => (others => '0'),
@@ -277,6 +301,15 @@ begin
     pm_locked_phase  <= r.locked_phase;
     pm_lock_qual     <= r.pm_lock_qual;
 
+    pm_debug.acquire_v          <= r.dbg_acquire_v;
+    pm_debug.acquire_hyp_idx    <= r.dbg_acquire_hyp_idx;
+    pm_debug.acquire_abs_acc    <= r.dbg_acquire_abs_acc;
+    pm_debug.acquire_sec_phase  <= r.dbg_acquire_sec_phase;
+    pm_debug.track_v            <= r.dbg_track_v;
+    pm_debug.track_step         <= r.dbg_track_step;
+    pm_debug.track_abs_acc      <= r.dbg_track_abs_acc;
+    pm_debug.track_locked_phase <= r.locked_phase;
+
     ----------------------------------------------------------------------
     -- BRAM read/write process.  Synchronous: write on phase_err_v,
     -- read every clock; data appears in ram_rdata_r one cycle later.
@@ -311,6 +344,8 @@ begin
         v := r;
         v.pm_valid       := '0';
         v.pm_minute_mark := '0';
+        v.dbg_acquire_v  := '0';
+        v.dbg_track_v    := '0';
         engine_done      := false;
         start_engine     := false;
         next_offset      := (others => '0');
@@ -478,6 +513,13 @@ begin
 
                 if engine_done then
                     abs_acc := abs20(v.acc);
+                    -- Per-hypothesis ACQUIRE debug pulse: records |acc|
+                    -- + hyp_idx + sec_phase_snap so the TB can dump the
+                    -- whole autocorrelation profile.
+                    v.dbg_acquire_v         := '1';
+                    v.dbg_acquire_hyp_idx   := r.ac_hyp_idx;
+                    v.dbg_acquire_abs_acc   := abs_acc;
+                    v.dbg_acquire_sec_phase := r.ac_sec_phase_snap;
                     if abs_acc > r.ac_best_score then
                         v.ac_best_score := abs_acc;
                         -- chip-0 was at buf[(w_ptr_snap + k) mod BUF_SIZE] = the
@@ -581,6 +623,15 @@ begin
 
                 if engine_done then
                     abs_acc := abs20(v.acc);
+                    -- TRACK debug pulse: |acc| per pass (M/C/P).  Lets
+                    -- the TB watch the early-late energy ratio over time.
+                    v.dbg_track_v       := '1';
+                    v.dbg_track_abs_acc := abs_acc;
+                    case r.track_step is
+                        when T_MINUS  => v.dbg_track_step := "00";
+                        when T_CENTER => v.dbg_track_step := "01";
+                        when T_PLUS   => v.dbg_track_step := "10";
+                    end case;
                     if abs_acc > r.track_best_score then
                         v.track_best_score := abs_acc;
                         case r.track_step is

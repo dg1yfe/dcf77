@@ -379,6 +379,12 @@ def _configure_pm_if_replay_testbench(lib) -> None:
                 cfg["TELEM_PERIOD_US"] = 500
                 cfg["TELEM_CSV"] = str(
                     DERIVED_DIR / f"{stem}.pm.fast.telem.csv")
+        # DCF77_PM_ACQUIRE_LOG=1 → write per-hypothesis ACQUIRE
+        # autocorrelation profile to <stem>.pm.acquire.csv (one row per
+        # hypothesis evaluated: t_us, hyp_idx, abs_acc, sec_phase).
+        if os.environ.get("DCF77_PM_ACQUIRE_LOG") == "1":
+            cfg["ACQUIRE_LOG_CSV"] = str(
+                DERIVED_DIR / f"{stem}.pm.acquire.csv")
         tb.test("pm_smoke").add_config(name=stem, generics=cfg)
 
 

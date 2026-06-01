@@ -661,7 +661,8 @@ begin
             pm_minute_mark_o => pm_corr_mm_s,
             pm_sync_state    => pm_sync_state_s,
             pm_locked_phase  => pm_locked_phase_s,
-            pm_lock_qual     => pm_lock_qual_s
+            pm_lock_qual     => pm_lock_qual_s,
+            pm_debug         => open
         );
 
     -- PM frame decoder.  PM_MODE=true → START_INDEX=15 + internal SIK

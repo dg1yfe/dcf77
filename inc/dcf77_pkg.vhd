@@ -183,6 +183,40 @@ package dcf77_pkg is
     );
 
     ---------------------------------------------------------------------------
+    -- PM-correlator debug stream.  Output-only record from
+    -- dcf77_pm_correlator.  acquire_v pulses for one clock cycle each time
+    -- the engine completes one hypothesis evaluation in ACQUIRE mode;
+    -- track_v likewise pulses for each TRACK pass (T_MINUS / T_CENTER /
+    -- T_PLUS).  Lets a TB dump the full autocorrelation profile across
+    -- all 2510 ACQUIRE hypotheses without exposing internal regs through
+    -- a thicket of individual ports.  Production wiring leaves the whole
+    -- record open / unobserved (synthesis drops the unused logic).
+    ---------------------------------------------------------------------------
+    type dcf77_pm_debug_type is record
+        -- ACQUIRE event: one pulse per hypothesis
+        acquire_v          : std_logic;
+        acquire_hyp_idx    : unsigned(11 downto 0);
+        acquire_abs_acc    : unsigned(18 downto 0);
+        acquire_sec_phase  : unsigned(11 downto 0);
+        -- TRACK event: one pulse per pass (T_MINUS/T_CENTER/T_PLUS)
+        track_v            : std_logic;
+        track_step         : unsigned(1 downto 0);    -- 0=M, 1=C, 2=P
+        track_abs_acc      : unsigned(18 downto 0);
+        track_locked_phase : unsigned(11 downto 0);
+    end record;
+
+    constant DCF77_PM_DEBUG_RESET : dcf77_pm_debug_type := (
+        acquire_v          => '0',
+        acquire_hyp_idx    => (others => '0'),
+        acquire_abs_acc    => (others => '0'),
+        acquire_sec_phase  => (others => '0'),
+        track_v            => '0',
+        track_step         => (others => '0'),
+        track_abs_acc      => (others => '0'),
+        track_locked_phase => (others => '0')
+    );
+
+    ---------------------------------------------------------------------------
     -- Host-writable control word.  Plumbed from the AXI4-Lite writemux into
     -- the core; the readmux can also read it back so the host can verify a
     -- write took effect.

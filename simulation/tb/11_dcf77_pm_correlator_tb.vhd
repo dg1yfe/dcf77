@@ -133,7 +133,8 @@ begin
             pm_minute_mark_o => pm_minute_mark,
             pm_sync_state    => pm_sync_state,
             pm_locked_phase  => pm_locked_phase,
-            pm_lock_qual     => pm_lock_qual
+            pm_lock_qual     => pm_lock_qual,
+            pm_debug         => open
         );
 
     ----------------------------------------------------------------------
