@@ -92,10 +92,13 @@ architecture rtl of dcf77_pm_correlator is
     constant BUF_SIZE         : natural := 4096;
     constant SAMPLES_PER_PRBS : natural := 1586;
     constant SAMPLES_PER_SEC  : natural := 2000;
-    -- K = BUF_SIZE - SAMPLES_PER_PRBS: every chip-0 candidate whose
-    -- 1586-sample integration window fits non-wrapped inside the buffer
-    -- is tested in a SINGLE burst.  No coverage gaps.
-    constant K_HYPOTHESES     : natural := 2510;
+    -- K = SAMPLES_PER_SEC: chip-0 occurs once per broadcast-second, so
+    -- searching 2000 candidate positions covers exactly one inter-chip-0
+    -- spacing -- guaranteed to find chip-0 in a single burst without
+    -- redundancy.  Buffer minimum is K + SAMPLES_PER_PRBS - 1 = 3585
+    -- samples; we use BUF_SIZE=4096 (one BRAM tile) leaving the natural
+    -- 12-b wrap-around for sec_phase / target_phase arithmetic.
+    constant K_HYPOTHESES     : natural := SAMPLES_PER_SEC;
     constant BURSTS_PER_CYCLE : natural := 1;
     -- Sigma-delta DLL threshold.  ±DLL_THRESH ticks of net agreement on
     -- T_MINUS/T_PLUS = one ±1-sample shift of locked_phase.  4 gives
@@ -104,8 +107,7 @@ architecture rtl of dcf77_pm_correlator is
     constant DLL_THRESH       : integer := 4;
     -- One burst per natural-wrap cycle (= 2.048 broadcast-seconds at
     -- 4096 / 2000).  Burst triggers at sec_phase = 0.
-    -- K=2510 hypotheses × ~3175 clk ≈ 7.97 M clk ≈ 128 sample-ticks of
-    -- compute per cycle.  Plenty of slack inside the 4096-tick cycle.
+    -- K=2000 hypotheses × ~3175 clk ≈ 6.35 M clk ≈ 50.8 ms wall.
     constant SAMPLES_PER_BURST_SLOT : natural := BUF_SIZE;
     constant CHIP_RATE_NUM    : natural := 31;
     constant CHIP_RATE_DEN    : natural := 96;
