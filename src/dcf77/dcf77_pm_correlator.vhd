@@ -91,6 +91,11 @@ architecture rtl of dcf77_pm_correlator is
     -- is tested in a SINGLE burst.  No coverage gaps.
     constant K_HYPOTHESES     : natural := 2510;
     constant BURSTS_PER_CYCLE : natural := 1;
+    -- Sigma-delta DLL threshold.  ±DLL_THRESH ticks of net agreement on
+    -- T_MINUS/T_PLUS = one ±1-sample shift of locked_phase.  4 gives
+    -- ~4s time constant against the per-second random ±1 noise; bumping
+    -- higher slows drift tracking, lower brings back the random walk.
+    constant DLL_THRESH       : integer := 4;
     -- One burst per natural-wrap cycle (= 2.048 broadcast-seconds at
     -- 4096 / 2000).  Burst triggers at sec_phase = 0.
     -- K=2510 hypotheses × ~3175 clk ≈ 7.97 M clk ≈ 128 sample-ticks of
@@ -173,6 +178,14 @@ architecture rtl of dcf77_pm_correlator is
         track_center_acc : signed(19 downto 0);       -- 20-b signed acc snapshot
         loss_count       : unsigned(3 downto 0);
         pm_lock_qual     : unsigned(15 downto 0);
+        -- Sigma-delta DLL accumulator.  Each TRACK cycle increments
+        -- (T_PLUS) / decrements (T_MINUS) by 1.  Actual ±1 sample shift
+        -- of locked_phase / target_phase only fires when the accumulator
+        -- reaches ±DLL_THRESH ("MSB carries out"); residual is preserved
+        -- so cumulative bias still gets tracked.  Effective time-constant
+        -- is DLL_THRESH × second-rate -> filters out per-cycle noise that
+        -- was driving locked_phase into a random walk on the 3 kHz corpus.
+        dll_acc          : signed(4 downto 0);        -- range ±15
 
         ---- Engine state (shared across ACQUIRE and TRACK) ----
         eng_state        : eng_state_t;
@@ -211,6 +224,7 @@ architecture rtl of dcf77_pm_correlator is
         track_center_acc => (others => '0'),
         loss_count       => (others => '0'),
         pm_lock_qual     => (others => '0'),
+        dll_acc          => (others => '0'),
         eng_state        => E_IDLE,
         eng_base_ptr     => (others => '0'),
         sample_idx       => (others => '0'),
@@ -514,6 +528,7 @@ begin
                         v.track_best_score := (others => '0');
                         v.loss_count := (others => '0');
                         v.pm_lock_qual := (others => '0');
+                        v.dll_acc      := (others => '0');
                         v.sync_state_o := SYNC_STATE_LOCK;
                     end if;
                     v.ac_best_score  := (others => '0');
@@ -590,18 +605,31 @@ begin
                             v.track_armed := '0';
                             v.target_phase := r.target_phase
                                             + to_unsigned(SAMPLES_PER_SEC, 12);
-                            -- DLL: ±1 sample adjustment on the winning offset.
-                            -- Applied to BOTH locked_phase (for diagnostics)
-                            -- and target_phase (for next trigger).
+                            -- Sigma-delta DLL.  Each cycle ±1 LSB into
+                            -- dll_acc; an actual sample shift fires only
+                            -- when the accumulator reaches ±DLL_THRESH
+                            -- ("MSB carries out").  Residual is preserved
+                            -- (subtract DLL_THRESH, don't reset) so any
+                            -- cumulative bias still gets tracked but
+                            -- per-cycle noise averages out -- replaces the
+                            -- ±1 sample/sec random walk seen with the
+                            -- old unfiltered DLL.
                             case v.track_best_idx is
-                                when "01" =>
-                                    v.locked_phase := r.locked_phase - 1;
-                                    v.target_phase := v.target_phase - 1;
-                                when "11" =>
-                                    v.locked_phase := r.locked_phase + 1;
-                                    v.target_phase := v.target_phase + 1;
-                                when others => null;  -- center → no change
+                                when "01" =>  -- T_MINUS won
+                                    v.dll_acc := r.dll_acc - 1;
+                                when "11" =>  -- T_PLUS won
+                                    v.dll_acc := r.dll_acc + 1;
+                                when others => null;
                             end case;
+                            if v.dll_acc >= DLL_THRESH then
+                                v.locked_phase := r.locked_phase + 1;
+                                v.target_phase := v.target_phase  + 1;
+                                v.dll_acc      := v.dll_acc - DLL_THRESH;
+                            elsif v.dll_acc <= -DLL_THRESH then
+                                v.locked_phase := r.locked_phase - 1;
+                                v.target_phase := v.target_phase  - 1;
+                                v.dll_acc      := v.dll_acc + DLL_THRESH;
+                            end if;
                             -- Latch output
                             v.pm_soft  := sat12_shr(r.track_center_acc, PM_LLR_SHIFT);
                             v.pm_valid := '1';

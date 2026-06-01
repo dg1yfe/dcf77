@@ -408,7 +408,7 @@ begin
             severity failure;
         write(lbuf, string'("t_us,nco_offset,pll_qfilt,pll_qlock,"
                             & "pll_lock,cordic_phase,pm_soft,pm_valid,"
-                            & "pm_lock_qual,pm_sync_state"));
+                            & "pm_lock_qual,pm_sync_state,pm_locked_phase"));
         writeline(fh, lbuf);
         loop
             wait for TICK_INTERVAL;
@@ -434,6 +434,8 @@ begin
             write(lbuf, integer'image(to_integer(pm_lock_qual_s)));
             write(lbuf, ',');
             write(lbuf, integer'image(to_integer(unsigned(pm_sync_state_s))));
+            write(lbuf, ',');
+            write(lbuf, integer'image(to_integer(pm_locked_phase_s)));
             writeline(fh, lbuf);
             exit when stim_done = '1';
         end loop;
