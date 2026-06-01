@@ -500,13 +500,21 @@ begin
                    and r.sec_phase = 0
                 then
                     v.ac_burst_armed    := '1';
-                    -- Down-count: load with K-1, walk to 0.  Compare
-                    -- against 0 at burst-end is one LUT vs a 12-b
-                    -- literal compare, and the first hypothesis reads
-                    -- from buf[w_ptr_snap + K-1 .. + K-1 + 1585] --
-                    -- the newest data in the buffer, fully past the
-                    -- live writer pointer.
-                    v.ac_hyp_idx        := to_unsigned(K_HYPOTHESES - 1, 12);
+                    -- Up-count: start at 0, walk to K-1.  Each
+                    -- hypothesis k reads slots [w_ptr_snap+k ..
+                    -- w_ptr_snap+k+1585].  The writer follows behind
+                    -- (also writing slots w_ptr_snap, w_ptr_snap+1,
+                    -- ... at one slot per phase_err_v pulse).  As
+                    -- long as t_writer >= t_engine_per_hyp (= writes/
+                    -- hypothesis <= 1), the writer reaches slot
+                    -- w_ptr_snap+i only AFTER the last hypothesis
+                    -- that needs to read it (= hyp k=i) has consumed
+                    -- it -- so no slot is overwritten before its last
+                    -- read.  Down-count would concentrate corruption
+                    -- in the last-evaluated (low-k) hypotheses; up-
+                    -- count spreads it uniformly at ~1 slot/hyp at
+                    -- the boundary.
+                    v.ac_hyp_idx        := (others => '0');
                     v.ac_w_ptr_snap     := r.w_ptr;
                     v.ac_sec_phase_snap := r.sec_phase;
                 end if;
@@ -560,7 +568,7 @@ begin
                     -- target_phase lands in the future regardless of
                     -- which k won.  In 12-b natural wrap,
                     -- (1586 + 4·2000) mod 4096 = 1394.
-                    if r.ac_hyp_idx = 0 then
+                    if r.ac_hyp_idx = K_HYPOTHESES - 1 then
                         v.ac_burst_armed := '0';
                         if v.ac_best_score >= to_unsigned(LOCK_IN_THR, 19) then
                             v.mode := M_LOCK;
@@ -583,7 +591,7 @@ begin
                         v.ac_best_score  := (others => '0');
                         v.ac_burst_count := (others => '0');
                     else
-                        v.ac_hyp_idx := r.ac_hyp_idx - 1;
+                        v.ac_hyp_idx := r.ac_hyp_idx + 1;
                     end if;
                 end if;
 
