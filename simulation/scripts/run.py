@@ -118,6 +118,8 @@ def _configure_testbenches(lib) -> None:
     _configure_replay_testbench(lib)
     _configure_if_replay_testbench(lib)
     _configure_pm_if_replay_testbench(lib)
+    _configure_phase_err_capture_testbench(lib)
+    _configure_pm_corr_replay_testbench(lib)
 
 
 def _configure_replay_testbench(lib) -> None:
@@ -386,6 +388,106 @@ def _configure_pm_if_replay_testbench(lib) -> None:
             cfg["ACQUIRE_LOG_CSV"] = str(
                 DERIVED_DIR / f"{stem}.pm.acquire.csv")
         tb.test("pm_smoke").add_config(name=stem, generics=cfg)
+
+
+def _configure_phase_err_capture_testbench(lib) -> None:
+    """Register phase_err capture configurations per .if.s16 recording.
+
+    For each `.if.s16` in derived/, register one `capture` configuration
+    on dcf77_phase_err_capture_tb.  The capture writes a small
+    int16-LE binary file (one sample per cordic_v pulse) to
+    `<stem>.pe.bin` for replay by dcf77_pm_correlator_replay_tb.
+
+    The capture TB instantiates only the upstream IF chain (NCO,
+    mixer, boxcars, CORDIC, carrier PLL) -- no correlator, no
+    frame_dec -- so it runs at upstream-only wall-clock cost.
+    """
+    try:
+        tb = lib.test_bench("dcf77_phase_err_capture_tb")
+    except KeyError:
+        return
+
+    if not SAMPLES_DIR.is_dir():
+        return
+
+    for wav in sorted(SAMPLES_DIR.glob("*.wav")):
+        stem    = wav.stem
+        if_s16  = DERIVED_DIR / f"{stem}.if.s16"
+        if_meta = DERIVED_DIR / f"{stem}.if.meta"
+        if not (if_s16.exists() and if_meta.exists()):
+            continue
+
+        kv      = _read_meta(if_meta)
+        rate    = int(kv.get("sample_rate_hz", 12000))
+        if_hz   = int(float(kv.get("if_hz", 5000)))
+        samples = int(kv["sample_count"])
+
+        cfg = dict(
+            REPLAY_FILE    = str(if_s16),
+            SAMPLE_COUNT   = samples,
+            SAMPLE_RATE_HZ = rate,
+            IF_HZ          = if_hz,
+            PHASE_ERR_DUMP = str(DERIVED_DIR / f"{stem}.pe.bin"),
+        )
+        # DCF77_CAPTURE_CPT overrides CLOCKS_PER_TICK (default 8).  Lower
+        # values directly reduce per-IF-sample event count; constraint is
+        # >= 2 so the CORDIC's 12-iteration pipeline fits in the
+        # 6*CLOCKS_PER_TICK clk-wide baseband window.
+        cpt = os.environ.get("DCF77_CAPTURE_CPT")
+        if cpt:
+            cfg["CLOCKS_PER_TICK"] = int(cpt)
+        tb.test("capture").add_config(name=stem, generics=cfg)
+
+
+def _configure_pm_corr_replay_testbench(lib) -> None:
+    """Register PM-correlator standalone replay configurations.
+
+    For each `<stem>.pe.bin` in derived/ (produced by 14_pm with
+    PHASE_ERR_DUMP=1), register one `pm_smoke` configuration on
+    dcf77_pm_correlator_replay_tb.  Sweepable PHASE_ERR_V_CLOCKS via
+    DCF77_PM_PERIOD_SWEEP="N1,N2,..." (default 48 = current TB rate).
+    """
+    try:
+        tb = lib.test_bench("dcf77_pm_correlator_replay_tb")
+    except KeyError:
+        return
+
+    if not DERIVED_DIR.is_dir():
+        return
+
+    sweep = os.environ.get("DCF77_PM_PERIOD_SWEEP", "")
+    if sweep:
+        period_list = [int(s) for s in sweep.split(",") if s.strip()]
+    else:
+        period_list = [48]
+
+    # DCF77_PM_REPLAY_LIMIT caps the number of baseband samples replayed.
+    # Useful for the slow-rate sweep points where the full file would be
+    # infeasible (e.g. PHASE_ERR_V_CLOCKS=31740 means 8x more sim time
+    # per sample than the default 48).  Set to e.g. 240000 (= 120
+    # broadcast-sec = 2 full SIK minute cycles) for the buffer-race test.
+    limit_str = os.environ.get("DCF77_PM_REPLAY_LIMIT", "")
+    sample_limit = int(limit_str) if limit_str else 0
+
+    for pe_bin in sorted(DERIVED_DIR.glob("*.pe.bin")):
+        stem    = pe_bin.name[:-len(".pe.bin")]
+        size_b  = pe_bin.stat().st_size
+        n_samp  = size_b // 2
+        if sample_limit and sample_limit < n_samp:
+            n_samp = sample_limit
+
+        for period in period_list:
+            cfg = dict(
+                REPLAY_FILE         = str(pe_bin),
+                SAMPLE_COUNT        = n_samp,
+                PHASE_ERR_V_CLOCKS  = period,
+                EXPECT_PM_VALID_MIN = 30,
+            )
+            if os.environ.get("DCF77_PM_ACQUIRE_LOG") == "1":
+                cfg["ACQUIRE_LOG_CSV"] = str(
+                    DERIVED_DIR / f"{stem}.pmreplay.p{period}.acquire.csv")
+            name = stem if len(period_list) == 1 else f"{stem}.p{period}"
+            tb.test("pm_smoke").add_config(name=name, generics=cfg)
 
 
 def _read_meta(path) -> dict:
