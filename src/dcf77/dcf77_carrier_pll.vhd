@@ -69,8 +69,9 @@ entity dcf77_carrier_pll is
         -- ~fs / 2^(I_FRAC_BITS+1) LSB/s.  Default 10 -> -1 LSB/s @ 2 kS/s.
         I_FRAC_BITS    : positive := 10;
 
-        -- Pre-loop IIR low-pass (cutoff ≈ fs / (2π · 2^SHIFT)).
-        LOOP_IIR_SHIFT : positive := 4;       -- ~ 20 Hz @ 2 kS/s
+        -- Pre-loop IIR low-pass (cutoff ≈ fs / (2π · 2^SHIFT)).  SHIFT=0
+        -- bypasses the filter (q_loop_iir tracks q_sample instantaneously).
+        LOOP_IIR_SHIFT : natural  := 4;       -- ~ 20 Hz @ 2 kS/s
         -- Slow IIR for lock detection (Tau = 2^SHIFT / fs seconds).
         LOCK_IIR_SHIFT : positive := 14;      -- ~ 8.2 s @ 2 kS/s
 

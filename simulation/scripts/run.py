@@ -422,21 +422,54 @@ def _configure_phase_err_capture_testbench(lib) -> None:
         if_hz   = int(float(kv.get("if_hz", 5000)))
         samples = int(kv["sample_count"])
 
-        cfg = dict(
+        base = dict(
             REPLAY_FILE    = str(if_s16),
             SAMPLE_COUNT   = samples,
             SAMPLE_RATE_HZ = rate,
             IF_HZ          = if_hz,
-            PHASE_ERR_DUMP = str(DERIVED_DIR / f"{stem}.pe.bin"),
         )
-        # DCF77_CAPTURE_CPT overrides CLOCKS_PER_TICK (default 8).  Lower
-        # values directly reduce per-IF-sample event count; constraint is
-        # >= 2 so the CORDIC's 12-iteration pipeline fits in the
-        # 6*CLOCKS_PER_TICK clk-wide baseband window.
+        # DCF77_CAPTURE_CPT overrides CLOCKS_PER_TICK (default 8).
         cpt = os.environ.get("DCF77_CAPTURE_CPT")
         if cpt:
-            cfg["CLOCKS_PER_TICK"] = int(cpt)
-        tb.test("capture").add_config(name=stem, generics=cfg)
+            base["CLOCKS_PER_TICK"] = int(cpt)
+        # DCF77_CAPTURE_MAX_SEC truncates each capture to N broadcast
+        # seconds.  Useful when sweeping PLL gains -- 30 s is plenty to
+        # see lock/no-lock and the spectral peak, at ~30 s wall per
+        # capture vs ~270 s for the full recording.
+        max_sec = os.environ.get("DCF77_CAPTURE_MAX_SEC")
+        if max_sec:
+            base["MAX_SAMPLES"] = int(max_sec) * rate
+
+        # DCF77_CAPTURE_PLL_SWEEP enumerates one capture per tuple
+        # "KP:KI[:IIR[:INV]]" (space-separated list).  INV is 0/1.
+        # Output files: <stem>.kp{KP}_ki{KI}[_iir{IIR}][_inv].pe.bin.
+        sweep = os.environ.get("DCF77_CAPTURE_PLL_SWEEP", "").strip()
+        if sweep:
+            for tup in sweep.split():
+                parts = tup.split(":")
+                kp = int(parts[0]); ki = int(parts[1])
+                iir = int(parts[2]) if len(parts) >= 3 else None
+                inv = int(parts[3]) if len(parts) >= 4 else 0
+                suffix = f"kp{kp}_ki{ki}"
+                extra  = dict()
+                if iir is not None:
+                    suffix += f"_iir{iir}"
+                    extra["PLL_LOOP_IIR_SHIFT"] = iir
+                if inv:
+                    suffix += "_inv"
+                    extra["PLL_INVERT_PHASE"] = True
+                cfg = dict(base,
+                           PLL_KP_SHIFT  = kp,
+                           PLL_KI_SHIFT  = ki,
+                           PHASE_ERR_DUMP = str(
+                               DERIVED_DIR / f"{stem}.{suffix}.pe.bin"),
+                           **extra)
+                tb.test("capture").add_config(
+                    name=f"{stem}.{suffix}", generics=cfg)
+        else:
+            cfg = dict(base,
+                       PHASE_ERR_DUMP = str(DERIVED_DIR / f"{stem}.pe.bin"))
+            tb.test("capture").add_config(name=stem, generics=cfg)
 
 
 def _configure_pm_corr_replay_testbench(lib) -> None:

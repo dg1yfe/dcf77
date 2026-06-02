@@ -44,7 +44,15 @@ entity dcf77_phase_err_capture_tb is
 
         -- Carrier-PLL PI gain right-shifts.  Same defaults as 14_pm.
         PLL_KP_SHIFT    : positive := 10;
-        PLL_KI_SHIFT    : positive := 23
+        PLL_KI_SHIFT    : positive := 23;
+        -- Pre-loop IIR cutoff: cutoff = fs / (2π · 2^SHIFT) Hz.
+        -- SHIFT=0 bypasses the IIR entirely.
+        PLL_LOOP_IIR_SHIFT : natural  := 4;
+        -- Negate cordic_phase before feeding the PI loop.  The CORDIC
+        -- atan2 output has the opposite sign to the legacy
+        -- sin(I)·q_box detector the PI loop was designed for, so the
+        -- correct sign for negative feedback is the negated phase.
+        PLL_INVERT_PHASE   : boolean  := true
     );
 end entity;
 
@@ -59,7 +67,7 @@ architecture tb of dcf77_phase_err_capture_tb is
 
     constant POST_BOX_RATE  : positive := SAMPLE_RATE_HZ / 2000;
     constant POST_W         : positive := iq_word_t'length + 3;
-    constant LOOP_IIR_SHIFT : positive := 4;
+    constant LOOP_IIR_SHIFT : natural  := PLL_LOOP_IIR_SHIFT;
 
     constant CORDIC_IQ_W    : positive := 18;
     constant CORDIC_PHASE_W : positive := 12;
@@ -190,7 +198,7 @@ begin
     u_mag_iir : entity dcf77.dcf77_iir_lpf
         generic map (
             WIDTH => CORDIC_IQ_W + 2,
-            SHIFT => LOOP_IIR_SHIFT
+            SHIFT => 4              -- fixed; mag_iir output is unused here
         )
         port map (
             clk        => clk,
@@ -202,13 +210,19 @@ begin
         );
 
     pll_adapter_proc : process(clk)
+        variable phase_signed : signed(CORDIC_PHASE_W - 1 downto 0);
     begin
         if rising_edge(clk) then
             if rst = '1' then
                 phase_for_pll   <= (others => '0');
                 phase_for_pll_v <= '0';
             else
-                phase_for_pll   <= shift_left(resize(cordic_phase, POST_W),
+                if PLL_INVERT_PHASE then
+                    phase_signed := -cordic_phase;
+                else
+                    phase_signed := cordic_phase;
+                end if;
+                phase_for_pll   <= shift_left(resize(phase_signed, POST_W),
                                               PLL_PHASE_ADAPTER_SHIFT);
                 phase_for_pll_v <= cordic_v;
             end if;

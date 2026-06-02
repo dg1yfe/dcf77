@@ -473,6 +473,13 @@ begin
     -- the amplitude-weighted sign(I)·q_box detector — see the           --
     -- u_carrier_pll instantiation below + the carrier-pll-tuning memo.   --
     -- ------------------------------------------------------------------ --
+    -- Sign inversion: the carrier_pll loop's "q ≈ A · φ" convention
+    -- comes from the legacy sign(I)·q_box detector.  CORDIC's
+    -- atan2(Q, I) output has the opposite sign for the same physical
+    -- phase shift through our mixer + boxcar geometry.  Without this
+    -- negation the loop runs positive-feedback and limit-cycles
+    -- around its IIR pole (locked-σ stuck near uniform [-π, +π]).
+    -- With negation, KP=10/KI=23 converges as designed.
     pll_adapter_proc : process(clk)
     begin
         if rising_edge(clk) then
@@ -480,7 +487,7 @@ begin
                 phase_for_pll   <= (others => '0');
                 phase_for_pll_v <= '0';
             else
-                phase_for_pll   <= shift_left(resize(cordic_phase, POST_W),
+                phase_for_pll   <= shift_left(resize(-cordic_phase, POST_W),
                                               PLL_PHASE_ADAPTER_SHIFT);
                 phase_for_pll_v <= cordic_v;
             end if;
@@ -501,13 +508,12 @@ begin
         generic map (
             Q_WIDTH         => POST_W,          -- 29
             OFFSET_WIDTH    => NCO_OFFSET_W,    -- 24
-            -- PI gains tuned for the CORDIC-phase detector (was 7/20
-            -- for the legacy amplitude-weighted sign(I)·q_box).  At
-            -- KP=10/KI=23 the loop's fast pole sits at 0.44 Hz and the
-            -- dominant (slow) pole at 0.04 Hz → time constant ~4 s.
-            -- See feedback_dcf77_carrier_pll_tuning memo for the full
-            -- sweep + rationale; 7/20 with the CORDIC adapter drove the
-            -- NCO into ±10 Hz hunting on dcf_strong.
+            -- PI gains: KP=10/KI=23 → ω_n ≈ 0.14 Hz, ζ ≈ 1.76
+            -- (heavily overdamped, narrow tracking).  Stays well below
+            -- the chip rate (645 Hz) so the PI cannot react to PSK
+            -- transitions.  These gains paired with the *negated*
+            -- cordic_phase feed (see pll_adapter_proc above) pass the
+            -- locked-σ < 400 LSB sanity check on the corpus.
             KP_SHIFT        => 10,
             KI_SHIFT        => 23,
             -- Internal IIRs.

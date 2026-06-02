@@ -271,6 +271,11 @@ begin
 
     -- Carrier-PLL adapter: left-shift CORDIC phase by 11 to match the
     -- PI gains calibrated for the old amplitude-weighted detector.
+    -- Sign inversion required: CORDIC atan2 output has the opposite
+    -- sign to the legacy sin(I)·q_box detector that the PI loop was
+    -- designed for.  Without negation the loop runs positive-feedback
+    -- and limit-cycles around its IIR pole.  See dcf77_core.vhd for
+    -- the full rationale.
     pll_adapter_proc : process(clk)
     begin
         if rising_edge(clk) then
@@ -278,7 +283,7 @@ begin
                 phase_for_pll   <= (others => '0');
                 phase_for_pll_v <= '0';
             else
-                phase_for_pll   <= shift_left(resize(cordic_phase, POST_W),
+                phase_for_pll   <= shift_left(resize(-cordic_phase, POST_W),
                                               PLL_PHASE_ADAPTER_SHIFT);
                 phase_for_pll_v <= cordic_v;
             end if;
