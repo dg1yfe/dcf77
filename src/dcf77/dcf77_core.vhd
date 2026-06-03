@@ -183,9 +183,9 @@ architecture rtl of dcf77_core is
     signal env_v      : std_logic;
 
     -- Carrier-PLL lock indicator (real-mode output gating).
-    signal pll_lock   : std_logic;
-    signal pll_qfilt  : signed(POST_W - 1 downto 0);
-    signal pll_qlock  : signed(POST_W - 1 downto 0);
+    signal pll_lock        : std_logic;
+    signal pll_phase_filt  : signed(POST_W - 1 downto 0);
+    signal pll_lock_iir    : signed(POST_W - 1 downto 0);
 
     signal bit_val    : std_logic;
     signal bit_v      : std_logic;
@@ -484,11 +484,11 @@ begin
     begin
         if rising_edge(clk) then
             if rst = '1' then
-                phase_for_pll   <= (others => '0');
-                phase_for_pll_v <= '0';
+                phase_for_pll     <= (others => '0');
+                phase_for_pll_v   <= '0';
             else
-                phase_for_pll   <= shift_left(resize(-cordic_phase, POST_W),
-                                              PLL_PHASE_ADAPTER_SHIFT);
+                phase_for_pll <= shift_left(resize(-cordic_phase, POST_W),
+                                            PLL_PHASE_ADAPTER_SHIFT);
                 phase_for_pll_v <= cordic_v;
             end if;
         end if;
@@ -506,7 +506,7 @@ begin
     -- ------------------------------------------------------------------ --
     u_carrier_pll : entity work.dcf77_carrier_pll
         generic map (
-            Q_WIDTH         => POST_W,          -- 29
+            PHASE_ERR_WIDTH => POST_W,          -- 29
             OFFSET_WIDTH    => NCO_OFFSET_W,    -- 24
             -- PI gains: KP=10/KI=23 → ω_n ≈ 0.14 Hz, ζ ≈ 1.76
             -- (heavily overdamped, narrow tracking).  Stays well below
@@ -519,10 +519,12 @@ begin
             -- Internal IIRs.
             LOOP_IIR_SHIFT  => LOOP_IIR_SHIFT,  -- 4 -> ~ 20 Hz
             LOCK_IIR_SHIFT  => 14,              -- ~ 8.2 s
-            -- Lock thresholds on the slow-IIR |phase error|.  Tune per
-            -- deployment SNR; defaults sized for ~2^20 carrier amplitude.
-            LOCK_IN_THR     => 2**18,
-            LOCK_OUT_THR    => 2**21,
+            -- Lock thresholds on lock_iir = slow_IIR(|phase_filt|).
+            -- See dcf77_carrier_pll.vhd for the budget; 2^14/2^16
+            -- gives a 4× hysteresis margin around the locked PSK
+            -- floor of ~10 K LSB.
+            LOCK_IN_THR     => 2**14,
+            LOCK_OUT_THR    => 2**16,
             LOCK_HOLD_TICKS => 256
         )
         port map (
@@ -530,12 +532,12 @@ begin
             rst              => rst,
             -- Amplitude-independent CORDIC phase, scaled into the
             -- magnitude range the PI gains were calibrated for.
-            q_sample         => phase_for_pll,
-            q_valid          => phase_for_pll_v,
+            phase_err        => phase_for_pll,
+            phase_err_valid  => phase_for_pll_v,
             phase_inc_offset => nco_phase_inc_offset,
             lock_state       => pll_lock,
-            q_filt_out       => pll_qfilt,
-            q_lock_out       => pll_qlock
+            phase_filt_out   => pll_phase_filt,
+            lock_iir_out     => pll_lock_iir
         );
 
     -- ------------------------------------------------------------------ --

@@ -1,49 +1,49 @@
 -- =========================================================================
 -- dcf77_carrier_pll.vhd
 --
--- Carrier-tracking 2nd-order PI PLL.  Reads the post-boxcar Q sample
--- (signed) and produces a signed phase-increment offset that the
+-- Carrier-tracking 2nd-order PI PLL.  Reads the scaled CORDIC phase
+-- error (signed) and produces a signed phase-increment offset that the
 -- upstream NCO adds to its nominal step, plus a lock-state indicator
 -- the receiver uses to gate downstream bit outputs.
 --
 -- Phase detector
 -- --------------
--- Under small-angle approximation `sin(phi) ~= phi`, the Q sample after
--- the mixer carries the residual carrier-phase error scaled by the
--- I-side amplitude: `q ~= A * phi`.  Driving q -> 0 locks the LO to
--- the carrier.
+-- The phase error is produced upstream by CORDIC atan2 of the mixer's
+-- post-boxcar I/Q vector, scaled into a signed PHASE_ERR_WIDTH-bit
+-- amplitude-independent unit (legacy: ~1.33 M LSB per radian after the
+-- ×2^11 adapter shift in dcf77_core).  Driving phase_err -> 0 locks
+-- the LO to the carrier.
 --
 -- Signal chain inside the PLL
 -- ---------------------------
---   q_sample ─► loop_iir (1st-order IIR, SHIFT=LOOP_IIR_SHIFT, ~20 Hz)
+--   phase_err ─► loop_iir (1st-order IIR, SHIFT=LOOP_IIR_SHIFT, ~20 Hz)
 --                    │
---                    ▼  q_filt
+--                    ▼  phase_filt
 --                  PI loop filter  ─►  phase_inc_offset
 --                    │
 --                    ▼
---                lock_iir (1st-order IIR, SHIFT=LOCK_IIR_SHIFT, ~8 s)
+--                lock_iir = slow_IIR(|phase_filt|)
 --                    │
---                    ▼  q_lock
---                |q_lock| compared to LOCK_IN_THR / LOCK_OUT_THR with
+--                    ▼
+--                lock_iir compared to LOCK_IN_THR / LOCK_OUT_THR with
 --                LOCK_HOLD_TICKS hysteresis -> lock_state
 --
 -- Loop filter (shift-only, no multipliers)
 -- ----------------------------------------
---   alpha = 2^-KP_SHIFT     (Kp,  proportional gain, default 2^-7)
---   beta  = 2^-KI_SHIFT     (Ki,  integral gain,    default 2^-25)
+--   alpha = 2^-KP_SHIFT     (Kp,  proportional gain)
+--   beta  = 2^-KI_SHIFT     (Ki,  integral gain)
 --
 -- The integral path needs full-precision accumulation: a per-sample
--- `q_filt >> KI_SHIFT` would arithmetic-shift small samples to 0/-1
--- asymmetrically, biasing the accumulator by -0.5 LSB/sample = ~1000
--- LSB/s @ 2 kS/s.  Instead the per-sample shift is only KI_SHIFT -
--- I_FRAC_BITS (=15 by default), and the resulting i_state carries
--- I_FRAC_BITS extra fractional bits below the offset LSB; those bits
--- absorb the per-sample rounding so the residual bias scales as
--- ~fs / 2^(I_FRAC_BITS+1) LSB/s (-1 LSB/s at default).
+-- `phase_filt >> KI_SHIFT` would arithmetic-shift small samples to 0/-1
+-- asymmetrically, biasing the accumulator by -0.5 LSB/sample.  Instead
+-- the per-sample shift is only KI_SHIFT - I_FRAC_BITS, and the resulting
+-- i_state carries I_FRAC_BITS extra fractional bits below the offset
+-- LSB; those bits absorb the per-sample rounding so the residual bias
+-- scales as ~fs / 2^(I_FRAC_BITS+1) LSB/s.
 --
---   i_step    = q_filt >> (KI_SHIFT - I_FRAC_BITS)
---   i_state  += i_step                          (ISTATE_W b, saturated)
---   p_path    = q_filt >> KP_SHIFT
+--   i_step           = phase_filt >> (KI_SHIFT - I_FRAC_BITS)
+--   i_state         += i_step                    (ISTATE_W b, saturated)
+--   p_path           = phase_filt >> KP_SHIFT
 --   phase_inc_offset = sat( (i_state >> I_FRAC_BITS) + p_path )
 -- =========================================================================
 
@@ -53,49 +53,50 @@ use ieee.numeric_std.all;
 
 entity dcf77_carrier_pll is
     generic (
-        Q_WIDTH        : positive := 29;     -- signed Q post-boxcar
-        OFFSET_WIDTH   : positive := 24;     -- signed NCO phase_inc_offset
+        PHASE_ERR_WIDTH : positive := 29;     -- signed phase_err input
+        OFFSET_WIDTH    : positive := 24;     -- signed NCO phase_inc_offset
 
         -- PI gains:  alpha = 2^-KP_SHIFT, beta = 2^-KI_SHIFT.
-        -- Defaults at 2 kS/s give f_n ≈ 55 mHz, dominant proportional
-        -- term (very overdamped) -- a narrow tracking loop.
         KP_SHIFT       : positive := 7;
         KI_SHIFT       : positive := 20;
 
         -- Fractional bits carried in i_state below the offset LSB
         -- (per-sample integrator shift is KI_SHIFT - I_FRAC_BITS).
-        -- Larger values reduce the per-sample rounding bias at the
-        -- cost of a wider accumulator; residual bias scales as
-        -- ~fs / 2^(I_FRAC_BITS+1) LSB/s.  Default 10 -> -1 LSB/s @ 2 kS/s.
         I_FRAC_BITS    : positive := 10;
 
         -- Pre-loop IIR low-pass (cutoff ≈ fs / (2π · 2^SHIFT)).  SHIFT=0
-        -- bypasses the filter (q_loop_iir tracks q_sample instantaneously).
+        -- bypasses the filter (phase_filt tracks phase_err instantaneously).
         LOOP_IIR_SHIFT : natural  := 4;       -- ~ 20 Hz @ 2 kS/s
         -- Slow IIR for lock detection (Tau = 2^SHIFT / fs seconds).
         LOCK_IIR_SHIFT : positive := 14;      -- ~ 8.2 s @ 2 kS/s
 
-        -- Lock detector hysteresis thresholds on |q_lock_iir|.
-        LOCK_IN_THR    : natural  := 2**18;
-        LOCK_OUT_THR   : natural  := 2**21;
+        -- Lock detector hysteresis thresholds on lock_iir =
+        -- slow_IIR(|phase_filt|).  Locked: PSK component on phase_filt
+        -- is ±177 LSB × 2^11 ÷ ~30 dB(20 Hz LPF on 645 Hz chip rate)
+        -- ≈ ±11 K LSB; rectified mean ≈ 7-9 K.  Unlocked / wrapping:
+        -- phase_filt ramps ~uniform over ±π × 2^11 between wraps, so
+        -- rectified mean is 0.5-2 M LSB.  Thresholds 2^14/2^16 sit in
+        -- the gap with a 4× hysteresis margin.
+        LOCK_IN_THR    : natural  := 2**14;
+        LOCK_OUT_THR   : natural  := 2**16;
         -- Sustained-state requirement.  Pick LOCK_HOLD_TICKS ≥ 3 *
-        -- 2^LOCK_IIR_SHIFT so the slow IIR (Tau = 2^LOCK_IIR_SHIFT
-        -- samples) has actually converged before a transition.
+        -- 2^LOCK_IIR_SHIFT so the slow IIR has actually converged
+        -- before a transition.
         LOCK_HOLD_TICKS: positive := 49152
     );
     port (
         clk              : in  std_logic;
         rst              : in  std_logic;
 
-        q_sample         : in  signed(Q_WIDTH - 1 downto 0);
-        q_valid          : in  std_logic;
+        phase_err        : in  signed(PHASE_ERR_WIDTH - 1 downto 0);
+        phase_err_valid  : in  std_logic;
 
         phase_inc_offset : out signed(OFFSET_WIDTH - 1 downto 0);
         lock_state       : out std_logic;
 
         -- Diagnostic outputs.
-        q_filt_out       : out signed(Q_WIDTH - 1 downto 0);
-        q_lock_out       : out signed(Q_WIDTH - 1 downto 0)
+        phase_filt_out   : out signed(PHASE_ERR_WIDTH - 1 downto 0);
+        lock_iir_out     : out signed(PHASE_ERR_WIDTH - 1 downto 0)
     );
 end entity dcf77_carrier_pll;
 
@@ -111,9 +112,12 @@ architecture rtl of dcf77_carrier_pll is
     -- Width used to build the (i_part + p_path) sum before saturation.
     constant SUM_W    : positive := OFFSET_WIDTH + 4;
 
+    -- Convenience alias for the phase-error data width.
+    constant PE_W     : positive := PHASE_ERR_WIDTH;
+
     type reg_type is record
-        q_loop_iir : signed(Q_WIDTH - 1 downto 0);
-        q_lock_iir : signed(Q_WIDTH - 1 downto 0);
+        phase_filt : signed(PE_W - 1 downto 0);
+        lock_iir   : signed(PE_W - 1 downto 0);
         i_state    : signed(ISTATE_W - 1 downto 0);
         offset     : signed(OFFSET_WIDTH - 1 downto 0);
         lock_state : std_logic;
@@ -122,20 +126,20 @@ architecture rtl of dcf77_carrier_pll is
 
     constant ZERO_IS : signed(ISTATE_W - 1 downto 0)     := (others => '0');
     constant ZERO_OFF: signed(OFFSET_WIDTH - 1 downto 0) := (others => '0');
-    constant ZERO_Q  : signed(Q_WIDTH - 1 downto 0)      := (others => '0');
+    constant ZERO_PE : signed(PE_W - 1 downto 0)         := (others => '0');
 
     -- Seed the slow lock IIR at LOCK_OUT_THR so a cold start doesn't
     -- satisfy `in_band` immediately and false-lock.
     function lock_iir_reset return signed is
-        variable v : signed(Q_WIDTH - 1 downto 0);
+        variable v : signed(PE_W - 1 downto 0);
     begin
-        v := to_signed(LOCK_OUT_THR, Q_WIDTH);
+        v := to_signed(LOCK_OUT_THR, PE_W);
         return v;
     end function;
 
     constant R_RESET : reg_type := (
-        q_loop_iir => ZERO_Q,
-        q_lock_iir => lock_iir_reset,
+        phase_filt => ZERO_PE,
+        lock_iir   => lock_iir_reset,
         i_state    => ZERO_IS,
         offset     => ZERO_OFF,
         lock_state => '0',
@@ -171,12 +175,12 @@ architecture rtl of dcf77_carrier_pll is
         return x(W - 1 downto 0);
     end function;
 
-    function abs_signed(x : signed) return unsigned is
+    function abs_signed(x : signed) return signed is
     begin
         if x(x'high) = '1' then
-            return unsigned(-x);
+            return -x;
         else
-            return unsigned(x);
+            return x;
         end if;
     end function;
 
@@ -184,73 +188,74 @@ begin
 
     phase_inc_offset <= r.offset;
     lock_state       <= r.lock_state;
-    q_filt_out       <= r.q_loop_iir;
-    q_lock_out       <= r.q_lock_iir;
+    phase_filt_out   <= r.phase_filt;
+    lock_iir_out     <= r.lock_iir;
 
     comb : process (all)
         variable v          : reg_type;
 
-        -- IIR scratch (one extra bit for the diff).
-        variable loop_diff  : signed(Q_WIDTH downto 0);
-        variable loop_step  : signed(Q_WIDTH downto 0);
-        variable loop_new   : signed(Q_WIDTH downto 0);
+        -- LPF scratch (one extra bit for the diff).
+        variable loop_diff  : signed(PE_W downto 0);
+        variable loop_step  : signed(PE_W downto 0);
+        variable loop_new   : signed(PE_W downto 0);
 
-        variable lock_diff  : signed(Q_WIDTH downto 0);
-        variable lock_step  : signed(Q_WIDTH downto 0);
-        variable lock_new   : signed(Q_WIDTH downto 0);
+        variable lock_diff  : signed(PE_W downto 0);
+        variable lock_step  : signed(PE_W downto 0);
+        variable lock_new   : signed(PE_W downto 0);
+        variable pf_abs     : signed(PE_W - 1 downto 0);
 
         -- Integral path.
-        variable i_step     : signed(Q_WIDTH - 1 downto 0);
-        variable i_sum      : signed(ISTATE_W downto 0);     -- +1 for overflow
+        variable i_step     : signed(PE_W - 1 downto 0);
+        variable i_sum      : signed(ISTATE_W downto 0);
         variable i_part     : signed(SUM_W - 1 downto 0);
 
         -- Proportional path + offset sum.
-        variable p_path     : signed(Q_WIDTH - 1 downto 0);
+        variable p_path     : signed(PE_W - 1 downto 0);
         variable sum_ext    : signed(SUM_W - 1 downto 0);
 
         -- Lock detector scratch.
-        variable q_lock_abs : unsigned(Q_WIDTH - 1 downto 0);
         variable in_band    : boolean;
         variable out_band   : boolean;
     begin
         v := r;
 
-        if q_valid = '1' then
+        if phase_err_valid = '1' then
 
-            -- ===== Pre-loop IIR (20 Hz LPF on q_sample) =================
-            loop_diff := resize(q_sample, Q_WIDTH + 1)
-                       - resize(r.q_loop_iir, Q_WIDTH + 1);
+            -- ===== Pre-loop IIR (20 Hz LPF on phase_err) ================
+            loop_diff := resize(phase_err, PE_W + 1)
+                       - resize(r.phase_filt, PE_W + 1);
             loop_step := shift_right(loop_diff, LOOP_IIR_SHIFT);
-            loop_new  := resize(r.q_loop_iir, Q_WIDTH + 1) + loop_step;
-            v.q_loop_iir := resize(loop_new, Q_WIDTH);
+            loop_new  := resize(r.phase_filt, PE_W + 1) + loop_step;
+            v.phase_filt := resize(loop_new, PE_W);
 
             -- ===== Integral path (wide accumulator) =====================
-            -- Per-sample shift is only K_PRE bits; the remaining
-            -- I_FRAC_BITS of right-shift happens once on the way into
-            -- the offset sum.  i_state therefore carries I_FRAC_BITS
-            -- below the offset LSB and absorbs the rounding asymmetry.
-            i_step    := shift_right(v.q_loop_iir, K_PRE);
+            i_step    := shift_right(v.phase_filt, K_PRE);
             i_sum     := resize(r.i_state, ISTATE_W + 1)
                        + resize(i_step,    ISTATE_W + 1);
             v.i_state := sat_to(i_sum, ISTATE_W);
 
             -- ===== Proportional path + offset ===========================
-            p_path  := shift_right(v.q_loop_iir, KP_SHIFT);
+            p_path  := shift_right(v.phase_filt, KP_SHIFT);
             i_part  := resize(shift_right(v.i_state, I_FRAC_BITS), SUM_W);
             sum_ext := i_part + resize(p_path, SUM_W);
             v.offset := sat_to(sum_ext, OFFSET_WIDTH);
 
-            -- ===== Slow lock IIR ========================================
-            lock_diff := resize(v.q_loop_iir, Q_WIDTH + 1)
-                       - resize(r.q_lock_iir, Q_WIDTH + 1);
+            -- ===== Slow lock IIR =======================================
+            -- Track the long-time mean of |phase_filt|.  Locked: PSK
+            -- swings cancel after rectification + IIR → small value
+            -- (~150 LSB on dcf_strong).  Unlocked: phase_filt tracks
+            -- the residual Δf beat and the rectified mean grows to
+            -- hundreds-to-thousands of LSB.
+            pf_abs    := abs_signed(v.phase_filt);
+            lock_diff := resize(pf_abs, PE_W + 1)
+                       - resize(r.lock_iir, PE_W + 1);
             lock_step := shift_right(lock_diff, LOCK_IIR_SHIFT);
-            lock_new  := resize(r.q_lock_iir, Q_WIDTH + 1) + lock_step;
-            v.q_lock_iir := resize(lock_new, Q_WIDTH);
+            lock_new  := resize(r.lock_iir, PE_W + 1) + lock_step;
+            v.lock_iir := resize(lock_new, PE_W);
 
             -- ===== Lock-state hysteresis ===============================
-            q_lock_abs := abs_signed(v.q_lock_iir);
-            in_band    := q_lock_abs <  to_unsigned(LOCK_IN_THR,  Q_WIDTH);
-            out_band   := q_lock_abs >= to_unsigned(LOCK_OUT_THR, Q_WIDTH);
+            in_band    := v.lock_iir <  to_signed(LOCK_IN_THR,  PE_W);
+            out_band   := v.lock_iir >= to_signed(LOCK_OUT_THR, PE_W);
 
             if r.lock_state = '0' then
                 if in_band then

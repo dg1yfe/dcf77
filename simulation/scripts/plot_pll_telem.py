@@ -38,9 +38,9 @@ def nco_lsb_to_hz(offset_lsb: int, fs_in: float = 12_000.0) -> float:
 
 
 # Filtered phase error in 29-b at 2π = 2^23 (= 12-b CORDIC shifted left
-# by 11, but the 07 chain's pll_qfilt is sign(I_iir)*Q_box, scale set
-# by post-boxcar magnitude).  Just plot the raw signed value; calibrate
-# to degrees only if the dump comes from 14 (CORDIC-derived).
+# by 11, but the 07 chain's pll_phase_filt is sign(I_iir)*Q_box, scale
+# set by post-boxcar magnitude).  Just plot the raw signed value;
+# calibrate to degrees only if the dump comes from 14 (CORDIC-derived).
 def lsb_to_deg(x_lsb: int, lsb_per_2pi: float) -> float:
     return x_lsb * 360.0 / lsb_per_2pi
 
@@ -77,12 +77,12 @@ def plot_one(csv_path: Path) -> None:
     ax.set_title(f"PLL telemetry — {csv_path.name}")
     ax.grid(True, alpha=0.3)
 
-    # Panel 2: filtered phase error (q_filt) and slow lock IIR (q_lock)
+    # Panel 2: filtered phase error and slow lock IIR
     ax = axes[1]
-    ax.plot(t_s, data["pll_qfilt"], color="tab:red",   linewidth=0.6,
-            label="pll_qfilt")
-    ax.plot(t_s, data["pll_qlock"], color="tab:orange", linewidth=0.6,
-            label="pll_qlock", alpha=0.8)
+    ax.plot(t_s, data["pll_phase_filt"], color="tab:red",   linewidth=0.6,
+            label="pll_phase_filt")
+    ax.plot(t_s, data["pll_lock_iir"],   color="tab:orange", linewidth=0.6,
+            label="pll_lock_iir", alpha=0.8)
     ax.axhline(0.0, color="k", linewidth=0.4, alpha=0.5)
     ax.set_ylabel("PLL filt err (LSB)")
     ax.legend(loc="upper right", fontsize=8)

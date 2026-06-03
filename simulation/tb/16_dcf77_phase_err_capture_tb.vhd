@@ -41,6 +41,15 @@ entity dcf77_phase_err_capture_tb is
         SAMPLE_RATE_HZ  : natural := 12_000;
         CLOCKS_PER_TICK : positive := 8;
         PHASE_ERR_DUMP  : string  := "";
+        -- Optional sub-Hz precision override for NCO_PHASE_INCR_VAL.
+        -- When > 0, used directly instead of the IF_HZ-derived value
+        -- (which is integer-Hz only).  run.py computes this from
+        -- `measured_if_hz` in .if.meta so the NCO starts exactly on
+        -- the carrier (sub-µHz precision), eliminating the residual
+        -- frequency offset that the phase PI would otherwise need
+        -- to pull in -- a synthetic test problem since the real
+        -- receiver's TCXO already gives sub-Hz precision.
+        NCO_PHASE_INCR_OVERRIDE : natural := 0;
 
         -- Carrier-PLL PI gain right-shifts.  Same defaults as 14_pm.
         PLL_KP_SHIFT    : positive := 10;
@@ -62,8 +71,16 @@ architecture tb of dcf77_phase_err_capture_tb is
 
     constant NCO_PHASE_W  : positive := 25;
     constant NCO_OFFSET_W : positive := 24;
-    constant NCO_PHASE_INCR_VAL : natural :=
-        natural(real(2 ** NCO_PHASE_W) * real(IF_HZ) / real(SAMPLE_RATE_HZ));
+    function pick_nco_incr return natural is
+    begin
+        if NCO_PHASE_INCR_OVERRIDE > 0 then
+            return NCO_PHASE_INCR_OVERRIDE;
+        else
+            return natural(real(2 ** NCO_PHASE_W)
+                           * real(IF_HZ) / real(SAMPLE_RATE_HZ));
+        end if;
+    end function;
+    constant NCO_PHASE_INCR_VAL : natural := pick_nco_incr;
 
     constant POST_BOX_RATE  : positive := SAMPLE_RATE_HZ / 2000;
     constant POST_W         : positive := iq_word_t'length + 3;
@@ -104,8 +121,8 @@ architecture tb of dcf77_phase_err_capture_tb is
     signal phase_for_pll_v : std_logic;
 
     signal pll_lock    : std_logic;
-    signal pll_qfilt   : signed(POST_W - 1 downto 0);
-    signal pll_qlock   : signed(POST_W - 1 downto 0);
+    signal pll_phase_filt : signed(POST_W - 1 downto 0);
+    signal pll_lock_iir   : signed(POST_W - 1 downto 0);
 
     signal stim_done : std_logic := '0';
 
@@ -214,16 +231,16 @@ begin
     begin
         if rising_edge(clk) then
             if rst = '1' then
-                phase_for_pll   <= (others => '0');
-                phase_for_pll_v <= '0';
+                phase_for_pll     <= (others => '0');
+                phase_for_pll_v   <= '0';
             else
                 if PLL_INVERT_PHASE then
                     phase_signed := -cordic_phase;
                 else
                     phase_signed := cordic_phase;
                 end if;
-                phase_for_pll   <= shift_left(resize(phase_signed, POST_W),
-                                              PLL_PHASE_ADAPTER_SHIFT);
+                phase_for_pll <= shift_left(resize(phase_signed, POST_W),
+                                            PLL_PHASE_ADAPTER_SHIFT);
                 phase_for_pll_v <= cordic_v;
             end if;
         end if;
@@ -231,25 +248,25 @@ begin
 
     u_carrier_pll : entity dcf77.dcf77_carrier_pll
         generic map (
-            Q_WIDTH         => POST_W,
+            PHASE_ERR_WIDTH => POST_W,
             OFFSET_WIDTH    => NCO_OFFSET_W,
             KP_SHIFT        => PLL_KP_SHIFT,
             KI_SHIFT        => PLL_KI_SHIFT,
             LOOP_IIR_SHIFT  => LOOP_IIR_SHIFT,
             LOCK_IIR_SHIFT  => 14,
-            LOCK_IN_THR     => 2**18,
-            LOCK_OUT_THR    => 2**21,
+            LOCK_IN_THR     => 2**14,
+            LOCK_OUT_THR    => 2**16,
             LOCK_HOLD_TICKS => 256
         )
         port map (
             clk              => clk,
             rst              => rst,
-            q_sample         => phase_for_pll,
-            q_valid          => phase_for_pll_v,
+            phase_err        => phase_for_pll,
+            phase_err_valid  => phase_for_pll_v,
             phase_inc_offset => pll_offset,
             lock_state       => pll_lock,
-            q_filt_out       => pll_qfilt,
-            q_lock_out       => pll_qlock
+            phase_filt_out   => pll_phase_filt,
+            lock_iir_out     => pll_lock_iir
         );
 
     nco_offset <= pll_offset;

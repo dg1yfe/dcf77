@@ -96,7 +96,7 @@ entity dcf77_if_replay_tb is
 
         -- Optional CSV telemetry dump.  Empty string disables.  When
         -- enabled, one line per TELEM_PERIOD_MS of broadcast time
-        -- with columns t_ms, nco_offset, pll_qfilt, pll_qlock,
+        -- with columns t_ms, nco_offset, pll_phase_filt, pll_lock_iir,
         -- pll_lock, phase_err, env_pwr.  Useful for plotting the
         -- acquisition trajectory in a Python helper (see
         -- simulation/scripts/plot_pll_telem.py).
@@ -157,13 +157,13 @@ architecture tb of dcf77_if_replay_tb is
     signal phase_err_v : std_logic;
 
     -- Multiplexed PLL input: q_box (classic) or phase_err (PE_LOOP).
-    signal pll_q_in   : signed(POST_W - 1 downto 0);
-    signal pll_q_in_v : std_logic;
+    signal pll_pe_in   : signed(POST_W - 1 downto 0);
+    signal pll_pe_in_v : std_logic;
 
     -- Carrier PLL diagnostics.
-    signal pll_lock  : std_logic;
-    signal pll_qfilt : signed(POST_W - 1 downto 0);
-    signal pll_qlock : signed(POST_W - 1 downto 0);
+    signal pll_lock       : std_logic;
+    signal pll_phase_filt : signed(POST_W - 1 downto 0);
+    signal pll_lock_iir   : signed(POST_W - 1 downto 0);
 
     -- Synchronously-detected envelope @ 2 kS/s -> bit_det.
     signal env_pwr : env_word_t;
@@ -317,13 +317,13 @@ begin
     end process;
 
     -- PLL input mux: classic raw-Q path or sign(I)*Q phase-err path.
-    pll_q_in   <= phase_err   when PE_LOOP else q_box;
-    pll_q_in_v <= phase_err_v when PE_LOOP else q_box_v;
+    pll_pe_in   <= phase_err   when PE_LOOP else q_box;
+    pll_pe_in_v <= phase_err_v when PE_LOOP else q_box_v;
 
     -- ENV_MODE='0' -> abs(I_iir); ENV_MODE='1' -> |I_iir| + 3/8 * |Q_iir|
     -- (alpha-max+beta-min magnitude approximation).  Q_iir is the same
-    -- 20 Hz LPF the carrier_pll applies to its q_sample (pll_qfilt).
-    env_proc : process (i_iir, pll_qfilt)
+    -- 20 Hz LPF the carrier_pll applies to its phase_err (pll_phase_filt).
+    env_proc : process (i_iir, pll_phase_filt)
         variable i_ext, q_ext : signed(POST_W downto 0);
         variable i_abs, q_abs : unsigned(POST_W - 1 downto 0);
         variable a_max, a_min : unsigned(POST_W - 1 downto 0);
@@ -335,7 +335,7 @@ begin
         if i_ext(POST_W) = '1' then i_ext := -i_ext; end if;
         i_abs := unsigned(i_ext(POST_W - 1 downto 0));
 
-        q_ext := resize(pll_qfilt, POST_W + 1);
+        q_ext := resize(pll_phase_filt, POST_W + 1);
         if q_ext(POST_W) = '1' then q_ext := -q_ext; end if;
         q_abs := unsigned(q_ext(POST_W - 1 downto 0));
 
@@ -393,7 +393,7 @@ begin
                 write(lbuf, string'(" "));
                 write(lbuf, to_integer(i_iir));
                 write(lbuf, string'(" "));
-                write(lbuf, to_integer(pll_qfilt));
+                write(lbuf, to_integer(pll_phase_filt));
                 write(lbuf, string'(" "));
                 write(lbuf, to_integer(phase_err));
                 writeline(f, lbuf);
@@ -403,7 +403,7 @@ begin
 
     u_carrier_pll : entity dcf77.dcf77_carrier_pll
         generic map (
-            Q_WIDTH         => POST_W,
+            PHASE_ERR_WIDTH => POST_W,
             OFFSET_WIDTH    => NCO_OFFSET_W,
             KP_SHIFT        => 7,
             KI_SHIFT        => 20,
@@ -416,12 +416,12 @@ begin
         port map (
             clk              => clk,
             rst              => rst,
-            q_sample         => pll_q_in,
-            q_valid          => pll_q_in_v,
+            phase_err        => pll_pe_in,
+            phase_err_valid  => pll_pe_in_v,
             phase_inc_offset => pll_offset,
             lock_state       => pll_lock,
-            q_filt_out       => pll_qfilt,
-            q_lock_out       => pll_qlock
+            phase_filt_out   => pll_phase_filt,
+            lock_iir_out     => pll_lock_iir
         );
 
     -- The NCO sees the live PLL output plus a one-shot seed loaded
@@ -656,7 +656,7 @@ begin
 
     -- ------------------------------------------------------------------ --
     -- PLL telemetry: every 5 seconds of recording time, dump pll_offset,
-    -- pll_qfilt, pll_qlock and lock_state.  Lets us watch how the loop
+    -- pll_phase_filt, pll_lock_iir and lock_state.  Lets us watch how the loop
     -- evolves through acquisition rather than guessing from the final
     -- snapshot.
     -- ------------------------------------------------------------------ --
@@ -677,8 +677,8 @@ begin
             info("pll_telem t=" & integer'image(tick_idx * LOG_PERIOD_MS)
                  & "ms  offset=" & integer'image(to_integer(pll_offset))
                  & "  seed="     & integer'image(to_integer(seed_offset))
-                 & "  q_filt="   & integer'image(to_integer(pll_qfilt))
-                 & "  q_lock="   & integer'image(to_integer(pll_qlock))
+                 & "  phase_filt=" & integer'image(to_integer(pll_phase_filt))
+                 & "  lock_iir="   & integer'image(to_integer(pll_lock_iir))
                  & "  lock="     & std_logic'image(pll_lock));
         end loop;
     end process;
@@ -709,7 +709,7 @@ begin
         assert status = open_ok
             report "csv_telemetry: cannot open " & TELEM_CSV
             severity failure;
-        write(lbuf, string'("t_ms,nco_offset,pll_qfilt,pll_qlock,"
+        write(lbuf, string'("t_ms,nco_offset,pll_phase_filt,pll_lock_iir,"
                             & "pll_lock,phase_err,env_pwr"));
         writeline(fh, lbuf);
         loop
@@ -720,9 +720,9 @@ begin
             write(lbuf, ',');
             write(lbuf, integer'image(to_integer(pll_offset)));
             write(lbuf, ',');
-            write(lbuf, integer'image(to_integer(pll_qfilt)));
+            write(lbuf, integer'image(to_integer(pll_phase_filt)));
             write(lbuf, ',');
-            write(lbuf, integer'image(to_integer(pll_qlock)));
+            write(lbuf, integer'image(to_integer(pll_lock_iir)));
             write(lbuf, ',');
             write(lbuf, integer'image(lock_int));
             write(lbuf, ',');
@@ -792,8 +792,8 @@ begin
             -----------------------------------------------------------------
             if run("acquire") then
                 -- Run the carrier_pll across the FULL recording.  The
-                -- periodic pll_telemetry process logs offset / q_filt /
-                -- q_lock / lock_state every so often, so we can see
+                -- periodic pll_telemetry process logs offset / phase_filt /
+                -- lock_iir / lock_state every so often, so we can see
                 -- how the loop's state evolves rather than guessing
                 -- from a single end-of-test snapshot.  After the
                 -- stream ends, snapshot the converged offset to
@@ -805,10 +805,10 @@ begin
                     wait for 1 ms;
                     info("final pll_offset = "
                          & integer'image(to_integer(pll_offset))
-                         & "  q_filt = "
-                         & integer'image(to_integer(pll_qfilt))
-                         & "  q_lock = "
-                         & integer'image(to_integer(pll_qlock))
+                         & "  phase_filt = "
+                         & integer'image(to_integer(pll_phase_filt))
+                         & "  lock_iir = "
+                         & integer'image(to_integer(pll_lock_iir))
                          & "  lock_state = "
                          & std_logic'image(pll_lock));
                     if LOCK_FILE_OUT /= "" then

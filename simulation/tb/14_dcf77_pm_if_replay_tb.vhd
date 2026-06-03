@@ -14,7 +14,7 @@
 --
 -- Adapted from 07_dcf77_if_replay_tb; uses the same NCO/mixer/boxcar
 -- input pipeline.  Post-boxcar: CORDIC → magnitude IIR (unused here)
--- + phase × 2^11 adapter → carrier_pll q_sample; phase direct → PM
+-- + phase × 2^11 adapter → carrier_pll phase_err; phase direct → PM
 -- correlator → sign(pm_soft) → PM-mode frame_dec.
 -- =========================================================================
 
@@ -46,7 +46,7 @@ entity dcf77_pm_if_replay_tb is
         EXPECT_PM_VALID_MIN : natural := 30;
 
         -- Optional CSV telemetry dump (same idea as 07_if_replay).
-        -- Columns: t_us, nco_offset, pll_qfilt, pll_qlock, pll_lock,
+        -- Columns: t_us, nco_offset, pll_phase_filt, pll_lock_iir, pll_lock,
         -- cordic_phase, pm_soft, pm_valid, pm_lock_qual, pm_sync_state.
         -- One row per TELEM_PERIOD_US of broadcast time.  Default 10000
         -- = 10 ms (100 Hz).  Set 500 to dump every CORDIC sample (= 2 kHz)
@@ -131,8 +131,8 @@ architecture tb of dcf77_pm_if_replay_tb is
     signal phase_for_pll_v : std_logic;
 
     signal pll_lock        : std_logic;
-    signal pll_qfilt       : signed(POST_W - 1 downto 0);
-    signal pll_qlock       : signed(POST_W - 1 downto 0);
+    signal pll_phase_filt  : signed(POST_W - 1 downto 0);
+    signal pll_lock_iir    : signed(POST_W - 1 downto 0);
 
     -- PM correlator outputs
     signal pm_soft_s          : signed(11 downto 0);
@@ -280,11 +280,11 @@ begin
     begin
         if rising_edge(clk) then
             if rst = '1' then
-                phase_for_pll   <= (others => '0');
-                phase_for_pll_v <= '0';
+                phase_for_pll     <= (others => '0');
+                phase_for_pll_v   <= '0';
             else
-                phase_for_pll   <= shift_left(resize(-cordic_phase, POST_W),
-                                              PLL_PHASE_ADAPTER_SHIFT);
+                phase_for_pll <= shift_left(resize(-cordic_phase, POST_W),
+                                            PLL_PHASE_ADAPTER_SHIFT);
                 phase_for_pll_v <= cordic_v;
             end if;
         end if;
@@ -292,25 +292,25 @@ begin
 
     u_carrier_pll : entity dcf77.dcf77_carrier_pll
         generic map (
-            Q_WIDTH         => POST_W,
+            PHASE_ERR_WIDTH => POST_W,
             OFFSET_WIDTH    => NCO_OFFSET_W,
             KP_SHIFT        => PLL_KP_SHIFT,
             KI_SHIFT        => PLL_KI_SHIFT,
             LOOP_IIR_SHIFT  => LOOP_IIR_SHIFT,
             LOCK_IIR_SHIFT  => 14,
-            LOCK_IN_THR     => 2**18,
-            LOCK_OUT_THR    => 2**21,
+            LOCK_IN_THR     => 2**14,
+            LOCK_OUT_THR    => 2**16,
             LOCK_HOLD_TICKS => 256
         )
         port map (
             clk              => clk,
             rst              => rst,
-            q_sample         => phase_for_pll,
-            q_valid          => phase_for_pll_v,
+            phase_err        => phase_for_pll,
+            phase_err_valid  => phase_for_pll_v,
             phase_inc_offset => pll_offset,
             lock_state       => pll_lock,
-            q_filt_out       => pll_qfilt,
-            q_lock_out       => pll_qlock
+            phase_filt_out   => pll_phase_filt,
+            lock_iir_out     => pll_lock_iir
         );
 
     nco_offset <= pll_offset;
@@ -458,7 +458,7 @@ begin
         assert status = open_ok
             report "csv_telemetry: cannot open " & TELEM_CSV
             severity failure;
-        write(lbuf, string'("t_us,nco_offset,pll_qfilt,pll_qlock,"
+        write(lbuf, string'("t_us,nco_offset,pll_phase_filt,pll_lock_iir,"
                             & "pll_lock,cordic_phase,pm_soft,pm_valid,"
                             & "pm_lock_qual,pm_sync_state,pm_locked_phase"));
         writeline(fh, lbuf);
@@ -471,9 +471,9 @@ begin
             write(lbuf, ',');
             write(lbuf, integer'image(to_integer(pll_offset)));
             write(lbuf, ',');
-            write(lbuf, integer'image(to_integer(pll_qfilt)));
+            write(lbuf, integer'image(to_integer(pll_phase_filt)));
             write(lbuf, ',');
-            write(lbuf, integer'image(to_integer(pll_qlock)));
+            write(lbuf, integer'image(to_integer(pll_lock_iir)));
             write(lbuf, ',');
             write(lbuf, integer'image(lock_int));
             write(lbuf, ',');
