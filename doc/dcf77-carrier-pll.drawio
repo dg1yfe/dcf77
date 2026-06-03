@@ -1,0 +1,249 @@
+<mxfile host="app.diagrams.net">
+  <diagram name="carrier-pll" id="cpll">
+    <mxGraphModel dx="1800" dy="900" grid="0" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1900" pageHeight="1100" math="0" shadow="0" adaptiveColors="auto">
+      <root>
+        <mxCell id="0"/>
+        <mxCell id="1" parent="0"/>
+
+        <mxCell id="title_adapter" value="ADAPTER  (dcf77_core / 14_pm_if_replay_tb / 16_phase_err_capture_tb)" style="text;html=1;align=center;verticalAlign=middle;fontSize=14;fontStyle=1;fillColor=#f5f5f5;strokeColor=#666;" vertex="1" parent="1">
+          <mxGeometry x="40" y="20" width="500" height="36" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="title_pll" value="dcf77_carrier_pll" style="text;html=1;align=center;verticalAlign=middle;fontSize=14;fontStyle=1;fillColor=#f5f5f5;strokeColor=#666;" vertex="1" parent="1">
+          <mxGeometry x="620" y="20" width="1240" height="36" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="boundary" value="entity boundary" style="text;html=1;align=center;verticalAlign=top;fontSize=10;fontStyle=2;rotation=-90;" vertex="1" parent="1">
+          <mxGeometry x="555" y="500" width="100" height="20" as="geometry"/>
+        </mxCell>
+        <mxCell id="boundary_line" value="" style="endArrow=none;dashed=1;html=1;strokeColor=#999;strokeWidth=2;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="600" y="70" as="sourcePoint"/>
+            <mxPoint x="600" y="1050" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+
+        <mxCell id="cordic_in" value="cordic_phase&#10;signed(11..0)&#10;±π = ±2048 LSB" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;align=center;" vertex="1" parent="1">
+          <mxGeometry x="40" y="100" width="140" height="60" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="phase_scale" value="phase_for_pll&#10;= -cordic_phase &lt;&lt; 11&#10;signed(28..0)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;align=center;" vertex="1" parent="1">
+          <mxGeometry x="40" y="220" width="200" height="70" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="prev_reg" value="prev_cordic_phase&#10;register&#10;(signed 12-b)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#fff;strokeColor=#000;align=center;dashed=0;" vertex="1" parent="1">
+          <mxGeometry x="300" y="220" width="180" height="60" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="mod_sub" value="dphase = cordic_phase&#10;          - prev_cordic_phase&#10;12-b modular subtract&#10;(wrap = mod-2π fold)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;align=center;" vertex="1" parent="1">
+          <mxGeometry x="300" y="320" width="200" height="80" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="df_scale" value="df_for_pll&#10;= -dphase &lt;&lt; 11&#10;signed(28..0)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;align=center;" vertex="1" parent="1">
+          <mxGeometry x="300" y="440" width="200" height="70" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="e_cordic_phase_scale" value="" style="endArrow=classic;html=1;" edge="1" parent="1" source="cordic_in" target="phase_scale">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e_cordic_subtract" value="" style="endArrow=classic;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;" edge="1" parent="1" source="cordic_in" target="mod_sub">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="260" y="130"/>
+              <mxPoint x="260" y="360"/>
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e_cordic_prev" value="store" style="endArrow=classic;html=1;dashed=1;fontSize=9;" edge="1" parent="1" source="cordic_in" target="prev_reg">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="260" y="130"/>
+              <mxPoint x="260" y="250"/>
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e_prev_to_sub" value="" style="endArrow=classic;html=1;" edge="1" parent="1" source="prev_reg" target="mod_sub">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e_sub_to_df_scale" value="" style="endArrow=classic;html=1;" edge="1" parent="1" source="mod_sub" target="df_scale">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="phase_for_pll_out" value="phase_for_pll" style="ellipse;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;align=center;" vertex="1" parent="1">
+          <mxGeometry x="450" y="225" width="130" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="df_for_pll_out" value="df_for_pll" style="ellipse;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;align=center;" vertex="1" parent="1">
+          <mxGeometry x="510" y="445" width="120" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="e_phase_to_out" value="" style="endArrow=none;html=1;" edge="1" parent="1" source="phase_scale" target="phase_for_pll_out">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e_df_to_out" value="" style="endArrow=none;html=1;" edge="1" parent="1" source="df_scale" target="df_for_pll_out">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="q_sample_in" value="q_sample&#10;signed(28..0)" style="ellipse;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;align=center;" vertex="1" parent="1">
+          <mxGeometry x="640" y="110" width="120" height="50" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="phase_lpf" value="20 Hz LPF&#10;y += (x − y) &gt;&gt; 4&#10;(LOOP_IIR_SHIFT=4)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;align=center;" vertex="1" parent="1">
+          <mxGeometry x="800" y="100" width="160" height="70" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="q_loop_iir" value="q_loop_iir" style="ellipse;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;align=center;" vertex="1" parent="1">
+          <mxGeometry x="1000" y="110" width="120" height="50" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="kp_path" value="p_path&#10;= q_loop_iir &gt;&gt; KP_SHIFT&#10;(=10)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;align=center;" vertex="1" parent="1">
+          <mxGeometry x="1170" y="60" width="200" height="60" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="kpre_path" value="i_step_phase&#10;= q_loop_iir &gt;&gt; K_PRE&#10;(K_PRE = KI_SHIFT − I_FRAC_BITS = 13)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;align=center;" vertex="1" parent="1">
+          <mxGeometry x="1170" y="150" width="240" height="70" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="e_qin_lpf" value="" style="endArrow=classic;html=1;" edge="1" parent="1" source="q_sample_in" target="phase_lpf">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e_lpf_qiir" value="" style="endArrow=classic;html=1;" edge="1" parent="1" source="phase_lpf" target="q_loop_iir">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e_qiir_kp" value="" style="endArrow=classic;html=1;" edge="1" parent="1" source="q_loop_iir" target="kp_path">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e_qiir_kpre" value="" style="endArrow=classic;html=1;" edge="1" parent="1" source="q_loop_iir" target="kpre_path">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="df_sample_in" value="df_sample&#10;signed(28..0)" style="ellipse;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;align=center;" vertex="1" parent="1">
+          <mxGeometry x="640" y="500" width="120" height="50" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="df_lpf" value="20 Hz LPF&#10;y += (x − y) &gt;&gt; 4&#10;(same SHIFT=4)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;align=center;" vertex="1" parent="1">
+          <mxGeometry x="800" y="490" width="160" height="70" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="df_filt" value="df_filt" style="ellipse;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;align=center;" vertex="1" parent="1">
+          <mxGeometry x="1000" y="500" width="120" height="50" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="kf_gate" value="i_step_df&#10;= df_filt &gt;&gt; KF_SHIFT (=4)&#10;ENABLED iff lock_state = '0'" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;align=center;dashed=0;" vertex="1" parent="1">
+          <mxGeometry x="1170" y="420" width="240" height="80" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="slow_iir" value="Slow lock IIR&#10;y += (x − y) &gt;&gt; LOCK_IIR_SHIFT&#10;(=14, τ ≈ 8 s)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;align=center;" vertex="1" parent="1">
+          <mxGeometry x="1170" y="540" width="240" height="70" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="q_lock_iir" value="q_lock_iir&#10;≈ Δf × 4194 LSB" style="ellipse;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;align=center;" vertex="1" parent="1">
+          <mxGeometry x="1450" y="545" width="160" height="60" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="lock_hyst" value="Lock hysteresis on |q_lock_iir|&#10;in_band   if |·| &lt; LOCK_IN_THR  = 2^11  (Δf &lt; ~0.49 Hz)&#10;out_band  if |·| ≥ LOCK_OUT_THR = 2^13 (Δf &gt; ~2 Hz)&#10;state change after LOCK_HOLD_TICKS = 49152 (~25 s)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;align=center;" vertex="1" parent="1">
+          <mxGeometry x="1450" y="630" width="380" height="100" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="e_dfin_dflpf" value="" style="endArrow=classic;html=1;" edge="1" parent="1" source="df_sample_in" target="df_lpf">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e_dflpf_dffilt" value="" style="endArrow=classic;html=1;" edge="1" parent="1" source="df_lpf" target="df_filt">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e_dffilt_kfgate" value="" style="endArrow=classic;html=1;" edge="1" parent="1" source="df_filt" target="kf_gate">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e_dffilt_slowiir" value="" style="endArrow=classic;html=1;" edge="1" parent="1" source="df_filt" target="slow_iir">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e_slowiir_qlock" value="" style="endArrow=classic;html=1;" edge="1" parent="1" source="slow_iir" target="q_lock_iir">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e_qlock_hyst" value="" style="endArrow=classic;html=1;" edge="1" parent="1" source="q_lock_iir" target="lock_hyst">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="integrator" value="Integrator i_state&#10;(ISTATE_W = OFFSET_W&#10;     + I_FRAC_BITS + 4)&#10;i_state += i_step_phase&#10;            + (i_step_df if !lock)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;align=center;" vertex="1" parent="1">
+          <mxGeometry x="1470" y="160" width="240" height="120" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="sum_sat" value="offset = sat_to(&#10;   i_state &gt;&gt; I_FRAC_BITS&#10; + p_path,&#10;   OFFSET_WIDTH=24)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;align=center;" vertex="1" parent="1">
+          <mxGeometry x="1470" y="310" width="240" height="100" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="offset_out" value="phase_inc_offset&#10;signed(23..0)" style="ellipse;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;align=center;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="1760" y="335" width="140" height="50" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="lock_out" value="lock_state&#10;std_logic" style="ellipse;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;align=center;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="1760" y="660" width="140" height="50" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="e_kp_to_sum" value="p_path" style="endArrow=classic;html=1;fontSize=9;" edge="1" parent="1" source="kp_path" target="sum_sat">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1430" y="90"/>
+              <mxPoint x="1430" y="360"/>
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e_kpre_to_int" value="i_step_phase" style="endArrow=classic;html=1;fontSize=9;" edge="1" parent="1" source="kpre_path" target="integrator">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e_kfgate_to_int" value="i_step_df" style="endArrow=classic;html=1;fontSize=9;" edge="1" parent="1" source="kf_gate" target="integrator">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1430" y="460"/>
+              <mxPoint x="1430" y="220"/>
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e_int_to_sum" value="i_state &gt;&gt; I_FRAC_BITS" style="endArrow=classic;html=1;fontSize=9;" edge="1" parent="1" source="integrator" target="sum_sat">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e_sum_to_off" value="" style="endArrow=classic;html=1;" edge="1" parent="1" source="sum_sat" target="offset_out">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e_hyst_to_lockout" value="" style="endArrow=classic;html=1;" edge="1" parent="1" source="lock_hyst" target="lock_out">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="e_lock_fb_to_kfgate" value="gate" style="endArrow=classic;html=1;dashed=1;strokeColor=#a53737;fontSize=9;fontColor=#a53737;" edge="1" parent="1" source="lock_hyst" target="kf_gate">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1450" y="680"/>
+              <mxPoint x="1340" y="680"/>
+              <mxPoint x="1340" y="500"/>
+            </Array>
+          </mxGeometry>
+        </mxCell>
+
+        <mxCell id="e_phase_for_pll_q" value="" style="endArrow=classic;html=1;strokeColor=#6c8ebf;strokeWidth=2;" edge="1" parent="1" source="phase_for_pll_out" target="q_sample_in">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e_df_for_pll_df" value="" style="endArrow=classic;html=1;strokeColor=#d79b00;strokeWidth=2;" edge="1" parent="1" source="df_for_pll_out" target="df_sample_in">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="legend_box" value="Legend" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#fff;strokeColor=#000;align=center;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="40" y="900" width="120" height="30" as="geometry"/>
+        </mxCell>
+        <mxCell id="legend_phase" value="phase / q-path  (LPF → PI)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;align=center;" vertex="1" parent="1">
+          <mxGeometry x="180" y="900" width="220" height="30" as="geometry"/>
+        </mxCell>
+        <mxCell id="legend_df" value="Δφ-path  (freq aid + lock detect)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;align=center;" vertex="1" parent="1">
+          <mxGeometry x="420" y="900" width="260" height="30" as="geometry"/>
+        </mxCell>
+        <mxCell id="legend_sum" value="convergence / output" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;align=center;" vertex="1" parent="1">
+          <mxGeometry x="700" y="900" width="200" height="30" as="geometry"/>
+        </mxCell>
+        <mxCell id="legend_lock" value="lock / hysteresis" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;align=center;" vertex="1" parent="1">
+          <mxGeometry x="920" y="900" width="200" height="30" as="geometry"/>
+        </mxCell>
+        <mxCell id="legend_gate" value="lock-state feedback (gates df path)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#fff;strokeColor=#a53737;align=center;dashed=1;fontColor=#a53737;" vertex="1" parent="1">
+          <mxGeometry x="1140" y="900" width="280" height="30" as="geometry"/>
+        </mxCell>
+
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

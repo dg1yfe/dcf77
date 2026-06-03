@@ -250,7 +250,7 @@ def _configure_if_replay_testbench(lib) -> None:
 
         kv      = _read_meta(if_meta)
         rate    = int(kv.get("sample_rate_hz", 12000))
-        if_hz   = int(float(kv.get("if_hz", 5000)))
+        if_hz   = _effective_if_hz(kv)
         samples = int(kv["sample_count"])
         has_exp = int(kv.get("expect_full_decode", 0)) == 1
 
@@ -332,7 +332,7 @@ def _configure_pm_if_replay_testbench(lib) -> None:
 
         kv      = _read_meta(if_meta)
         rate    = int(kv.get("sample_rate_hz", 12000))
-        if_hz   = int(float(kv.get("if_hz", 5000)))
+        if_hz   = _effective_if_hz(kv)
         samples = int(kv["sample_count"])
 
         base_cfg = dict(
@@ -390,6 +390,40 @@ def _configure_pm_if_replay_testbench(lib) -> None:
         tb.test("pm_smoke").add_config(name=stem, generics=cfg)
 
 
+def _effective_if_hz(kv: dict) -> int:
+    """Return the carrier-centred IF for the testbench's NCO (integer Hz).
+
+    Prefers the per-recording `measured_if_hz` (= the Python pre-
+    acquisition output of `measure_if_hz.py`) rounded to nearest int;
+    falls back to the nominal `if_hz`.  For sub-Hz precision use
+    `_nco_phase_incr(kv, sample_rate, nco_phase_w)` to compute an
+    integer NCO_PHASE_INCR_VAL directly.
+    """
+    measured = kv.get("measured_if_hz")
+    if measured is not None:
+        try:
+            return int(round(float(measured)))
+        except ValueError:
+            pass
+    return int(float(kv["if_hz"]))
+
+
+def _nco_phase_incr(kv: dict, sample_rate_hz: int = 12_000,
+                    nco_phase_w: int = 25) -> int:
+    """Compute the precise NCO_PHASE_INCR_VAL from .if.meta.
+
+    Uses `measured_if_hz` when available (sub-Hz precision), else
+    `if_hz`.  Returns the rounded integer.  At fs=12 kS/s and
+    NCO_PHASE_W=25 the LSB resolution is fs/2^25 ≈ 358 µHz -- well
+    below any residual offset we care about.  Pass this to the
+    testbench's NCO_PHASE_INCR_OVERRIDE generic to bypass the
+    integer-Hz-only IF_HZ path.
+    """
+    measured = kv.get("measured_if_hz")
+    src = float(measured) if measured is not None else float(kv["if_hz"])
+    return int(round(src * (1 << nco_phase_w) / sample_rate_hz))
+
+
 def _configure_phase_err_capture_testbench(lib) -> None:
     """Register phase_err capture configurations per .if.s16 recording.
 
@@ -419,7 +453,7 @@ def _configure_phase_err_capture_testbench(lib) -> None:
 
         kv      = _read_meta(if_meta)
         rate    = int(kv.get("sample_rate_hz", 12000))
-        if_hz   = int(float(kv.get("if_hz", 5000)))
+        if_hz   = _effective_if_hz(kv)
         samples = int(kv["sample_count"])
 
         base = dict(
@@ -427,6 +461,7 @@ def _configure_phase_err_capture_testbench(lib) -> None:
             SAMPLE_COUNT   = samples,
             SAMPLE_RATE_HZ = rate,
             IF_HZ          = if_hz,
+            NCO_PHASE_INCR_OVERRIDE = _nco_phase_incr(kv, rate),
         )
         # DCF77_CAPTURE_CPT overrides CLOCKS_PER_TICK (default 8).
         cpt = os.environ.get("DCF77_CAPTURE_CPT")
@@ -470,6 +505,20 @@ def _configure_phase_err_capture_testbench(lib) -> None:
             cfg = dict(base,
                        PHASE_ERR_DUMP = str(DERIVED_DIR / f"{stem}.pe.bin"))
             tb.test("capture").add_config(name=stem, generics=cfg)
+
+        # DCF77_CAPTURE_NOISE_REF=1 registers a noise-reference capture
+        # using this recording but with the NCO de-tuned to a signal-
+        # free part of the IF spectrum.  Default 1750 Hz; overridable
+        # via DCF77_CAPTURE_NOISE_HZ.  Files: <stem>.noise<HZ>.pe.bin.
+        if os.environ.get("DCF77_CAPTURE_NOISE_REF") and stem.startswith("dcf_3_5"):
+            noise_hz = int(os.environ.get("DCF77_CAPTURE_NOISE_HZ", "1750"))
+            noise_npi = int(round(noise_hz * (1 << 25) / rate))
+            ncfg = dict(base,
+                        NCO_PHASE_INCR_OVERRIDE = noise_npi,
+                        PHASE_ERR_DUMP = str(
+                            DERIVED_DIR / f"{stem}.noise{noise_hz}.pe.bin"))
+            tb.test("capture").add_config(
+                name=f"{stem}.noise{noise_hz}", generics=ncfg)
 
 
 def _configure_pm_corr_replay_testbench(lib) -> None:
