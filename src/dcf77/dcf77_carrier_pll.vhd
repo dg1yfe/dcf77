@@ -3,8 +3,13 @@
 --
 -- Carrier-tracking 2nd-order PI PLL.  Reads the scaled CORDIC phase
 -- error (signed) and produces a signed phase-increment offset that the
--- upstream NCO adds to its nominal step, plus a lock-state indicator
--- the receiver uses to gate downstream bit outputs.
+-- upstream NCO adds to its nominal step.
+--
+-- Lock / signal-quality indication is a separate concern handled by
+-- dcf77_phase_quality, which operates on the raw 12-b CORDIC phase
+-- rather than the PI-scaled / 20-Hz-LPFed phase_filt.  Keeping the
+-- two separate lets the PI loop be a pure tracker and the lock signal
+-- be a deliberate SNR call.
 --
 -- Phase detector
 -- --------------
@@ -20,13 +25,6 @@
 --                    │
 --                    ▼  phase_filt
 --                  PI loop filter  ─►  phase_inc_offset
---                    │
---                    ▼
---                lock_iir = slow_IIR(|phase_filt|)
---                    │
---                    ▼
---                lock_iir compared to LOCK_IN_THR / LOCK_OUT_THR with
---                LOCK_HOLD_TICKS hysteresis -> lock_state
 --
 -- Loop filter (shift-only, no multipliers)
 -- ----------------------------------------
@@ -66,23 +64,7 @@ entity dcf77_carrier_pll is
 
         -- Pre-loop IIR low-pass (cutoff ≈ fs / (2π · 2^SHIFT)).  SHIFT=0
         -- bypasses the filter (phase_filt tracks phase_err instantaneously).
-        LOOP_IIR_SHIFT : natural  := 4;       -- ~ 20 Hz @ 2 kS/s
-        -- Slow IIR for lock detection (Tau = 2^SHIFT / fs seconds).
-        LOCK_IIR_SHIFT : positive := 14;      -- ~ 8.2 s @ 2 kS/s
-
-        -- Lock detector hysteresis thresholds on lock_iir =
-        -- slow_IIR(|phase_filt|).  Locked: PSK component on phase_filt
-        -- is ±177 LSB × 2^11 ÷ ~30 dB(20 Hz LPF on 645 Hz chip rate)
-        -- ≈ ±11 K LSB; rectified mean ≈ 7-9 K.  Unlocked / wrapping:
-        -- phase_filt ramps ~uniform over ±π × 2^11 between wraps, so
-        -- rectified mean is 0.5-2 M LSB.  Thresholds 2^14/2^16 sit in
-        -- the gap with a 4× hysteresis margin.
-        LOCK_IN_THR    : natural  := 2**14;
-        LOCK_OUT_THR   : natural  := 2**16;
-        -- Sustained-state requirement.  Pick LOCK_HOLD_TICKS ≥ 3 *
-        -- 2^LOCK_IIR_SHIFT so the slow IIR has actually converged
-        -- before a transition.
-        LOCK_HOLD_TICKS: positive := 49152
+        LOOP_IIR_SHIFT : natural  := 4        -- ~ 20 Hz @ 2 kS/s
     );
     port (
         clk              : in  std_logic;
@@ -92,11 +74,9 @@ entity dcf77_carrier_pll is
         phase_err_valid  : in  std_logic;
 
         phase_inc_offset : out signed(OFFSET_WIDTH - 1 downto 0);
-        lock_state       : out std_logic;
 
-        -- Diagnostic outputs.
-        phase_filt_out   : out signed(PHASE_ERR_WIDTH - 1 downto 0);
-        lock_iir_out     : out signed(PHASE_ERR_WIDTH - 1 downto 0)
+        -- Diagnostic output: 20-Hz LPF state.
+        phase_filt_out   : out signed(PHASE_ERR_WIDTH - 1 downto 0)
     );
 end entity dcf77_carrier_pll;
 
@@ -117,33 +97,18 @@ architecture rtl of dcf77_carrier_pll is
 
     type reg_type is record
         phase_filt : signed(PE_W - 1 downto 0);
-        lock_iir   : signed(PE_W - 1 downto 0);
         i_state    : signed(ISTATE_W - 1 downto 0);
         offset     : signed(OFFSET_WIDTH - 1 downto 0);
-        lock_state : std_logic;
-        lock_dur   : natural range 0 to LOCK_HOLD_TICKS;
     end record;
 
     constant ZERO_IS : signed(ISTATE_W - 1 downto 0)     := (others => '0');
     constant ZERO_OFF: signed(OFFSET_WIDTH - 1 downto 0) := (others => '0');
     constant ZERO_PE : signed(PE_W - 1 downto 0)         := (others => '0');
 
-    -- Seed the slow lock IIR at LOCK_OUT_THR so a cold start doesn't
-    -- satisfy `in_band` immediately and false-lock.
-    function lock_iir_reset return signed is
-        variable v : signed(PE_W - 1 downto 0);
-    begin
-        v := to_signed(LOCK_OUT_THR, PE_W);
-        return v;
-    end function;
-
     constant R_RESET : reg_type := (
         phase_filt => ZERO_PE,
-        lock_iir   => lock_iir_reset,
         i_state    => ZERO_IS,
-        offset     => ZERO_OFF,
-        lock_state => '0',
-        lock_dur   => 0
+        offset     => ZERO_OFF
     );
 
     signal r, rin : reg_type;
@@ -175,21 +140,10 @@ architecture rtl of dcf77_carrier_pll is
         return x(W - 1 downto 0);
     end function;
 
-    function abs_signed(x : signed) return signed is
-    begin
-        if x(x'high) = '1' then
-            return -x;
-        else
-            return x;
-        end if;
-    end function;
-
 begin
 
     phase_inc_offset <= r.offset;
-    lock_state       <= r.lock_state;
     phase_filt_out   <= r.phase_filt;
-    lock_iir_out     <= r.lock_iir;
 
     comb : process (all)
         variable v          : reg_type;
@@ -199,11 +153,6 @@ begin
         variable loop_step  : signed(PE_W downto 0);
         variable loop_new   : signed(PE_W downto 0);
 
-        variable lock_diff  : signed(PE_W downto 0);
-        variable lock_step  : signed(PE_W downto 0);
-        variable lock_new   : signed(PE_W downto 0);
-        variable pf_abs     : signed(PE_W - 1 downto 0);
-
         -- Integral path.
         variable i_step     : signed(PE_W - 1 downto 0);
         variable i_sum      : signed(ISTATE_W downto 0);
@@ -212,10 +161,6 @@ begin
         -- Proportional path + offset sum.
         variable p_path     : signed(PE_W - 1 downto 0);
         variable sum_ext    : signed(SUM_W - 1 downto 0);
-
-        -- Lock detector scratch.
-        variable in_band    : boolean;
-        variable out_band   : boolean;
     begin
         v := r;
 
@@ -239,47 +184,6 @@ begin
             i_part  := resize(shift_right(v.i_state, I_FRAC_BITS), SUM_W);
             sum_ext := i_part + resize(p_path, SUM_W);
             v.offset := sat_to(sum_ext, OFFSET_WIDTH);
-
-            -- ===== Slow lock IIR =======================================
-            -- Track the long-time mean of |phase_filt|.  Locked: PSK
-            -- swings cancel after rectification + IIR → small value
-            -- (~150 LSB on dcf_strong).  Unlocked: phase_filt tracks
-            -- the residual Δf beat and the rectified mean grows to
-            -- hundreds-to-thousands of LSB.
-            pf_abs    := abs_signed(v.phase_filt);
-            lock_diff := resize(pf_abs, PE_W + 1)
-                       - resize(r.lock_iir, PE_W + 1);
-            lock_step := shift_right(lock_diff, LOCK_IIR_SHIFT);
-            lock_new  := resize(r.lock_iir, PE_W + 1) + lock_step;
-            v.lock_iir := resize(lock_new, PE_W);
-
-            -- ===== Lock-state hysteresis ===============================
-            in_band    := v.lock_iir <  to_signed(LOCK_IN_THR,  PE_W);
-            out_band   := v.lock_iir >= to_signed(LOCK_OUT_THR, PE_W);
-
-            if r.lock_state = '0' then
-                if in_band then
-                    if r.lock_dur >= LOCK_HOLD_TICKS - 1 then
-                        v.lock_state := '1';
-                        v.lock_dur   := 0;
-                    else
-                        v.lock_dur := r.lock_dur + 1;
-                    end if;
-                else
-                    v.lock_dur := 0;
-                end if;
-            else
-                if out_band then
-                    if r.lock_dur >= LOCK_HOLD_TICKS - 1 then
-                        v.lock_state := '0';
-                        v.lock_dur   := 0;
-                    else
-                        v.lock_dur := r.lock_dur + 1;
-                    end if;
-                else
-                    v.lock_dur := 0;
-                end if;
-            end if;
 
         end if;
 

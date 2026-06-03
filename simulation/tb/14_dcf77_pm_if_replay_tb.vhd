@@ -46,7 +46,7 @@ entity dcf77_pm_if_replay_tb is
         EXPECT_PM_VALID_MIN : natural := 30;
 
         -- Optional CSV telemetry dump (same idea as 07_if_replay).
-        -- Columns: t_us, nco_offset, pll_phase_filt, pll_lock_iir, pll_lock,
+        -- Columns: t_us, nco_offset, pll_phase_filt, pq_lock_counter, pll_lock,
         -- cordic_phase, pm_soft, pm_valid, pm_lock_qual, pm_sync_state.
         -- One row per TELEM_PERIOD_US of broadcast time.  Default 10000
         -- = 10 ms (100 Hz).  Set 500 to dump every CORDIC sample (= 2 kHz)
@@ -132,7 +132,8 @@ architecture tb of dcf77_pm_if_replay_tb is
 
     signal pll_lock        : std_logic;
     signal pll_phase_filt  : signed(POST_W - 1 downto 0);
-    signal pll_lock_iir    : signed(POST_W - 1 downto 0);
+    constant PQ_COUNTER_W  : positive := 12;
+    signal pq_lock_counter : signed(PQ_COUNTER_W - 1 downto 0);
 
     -- PM correlator outputs
     signal pm_soft_s          : signed(11 downto 0);
@@ -296,11 +297,7 @@ begin
             OFFSET_WIDTH    => NCO_OFFSET_W,
             KP_SHIFT        => PLL_KP_SHIFT,
             KI_SHIFT        => PLL_KI_SHIFT,
-            LOOP_IIR_SHIFT  => LOOP_IIR_SHIFT,
-            LOCK_IIR_SHIFT  => 14,
-            LOCK_IN_THR     => 2**14,
-            LOCK_OUT_THR    => 2**16,
-            LOCK_HOLD_TICKS => 256
+            LOOP_IIR_SHIFT  => LOOP_IIR_SHIFT
         )
         port map (
             clk              => clk,
@@ -308,9 +305,24 @@ begin
             phase_err        => phase_for_pll,
             phase_err_valid  => phase_for_pll_v,
             phase_inc_offset => pll_offset,
+            phase_filt_out   => pll_phase_filt
+        );
+
+    u_phase_quality : entity dcf77.dcf77_phase_quality
+        generic map (
+            PHASE_WIDTH     => CORDIC_PHASE_W,
+            COUNTER_W       => PQ_COUNTER_W,
+            LOCK_IN_THR     => 1024,
+            LOCK_OUT_THR    => -512,
+            LOCK_HOLD_TICKS => 256
+        )
+        port map (
+            clk              => clk,
+            rst              => rst,
+            cordic_phase     => cordic_phase,
+            cordic_valid     => cordic_v,
             lock_state       => pll_lock,
-            phase_filt_out   => pll_phase_filt,
-            lock_iir_out     => pll_lock_iir
+            lock_counter_out => pq_lock_counter
         );
 
     nco_offset <= pll_offset;
@@ -458,7 +470,7 @@ begin
         assert status = open_ok
             report "csv_telemetry: cannot open " & TELEM_CSV
             severity failure;
-        write(lbuf, string'("t_us,nco_offset,pll_phase_filt,pll_lock_iir,"
+        write(lbuf, string'("t_us,nco_offset,pll_phase_filt,pq_lock_counter,"
                             & "pll_lock,cordic_phase,pm_soft,pm_valid,"
                             & "pm_lock_qual,pm_sync_state,pm_locked_phase"));
         writeline(fh, lbuf);
@@ -473,7 +485,7 @@ begin
             write(lbuf, ',');
             write(lbuf, integer'image(to_integer(pll_phase_filt)));
             write(lbuf, ',');
-            write(lbuf, integer'image(to_integer(pll_lock_iir)));
+            write(lbuf, integer'image(to_integer(pq_lock_counter)));
             write(lbuf, ',');
             write(lbuf, integer'image(lock_int));
             write(lbuf, ',');

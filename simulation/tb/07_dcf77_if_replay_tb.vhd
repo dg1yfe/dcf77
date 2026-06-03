@@ -96,7 +96,7 @@ entity dcf77_if_replay_tb is
 
         -- Optional CSV telemetry dump.  Empty string disables.  When
         -- enabled, one line per TELEM_PERIOD_MS of broadcast time
-        -- with columns t_ms, nco_offset, pll_phase_filt, pll_lock_iir,
+        -- with columns t_ms, nco_offset, pll_phase_filt, pq_lock_counter,
         -- pll_lock, phase_err, env_pwr.  Useful for plotting the
         -- acquisition trajectory in a Python helper (see
         -- simulation/scripts/plot_pll_telem.py).
@@ -160,10 +160,14 @@ architecture tb of dcf77_if_replay_tb is
     signal pll_pe_in   : signed(POST_W - 1 downto 0);
     signal pll_pe_in_v : std_logic;
 
-    -- Carrier PLL diagnostics.
-    signal pll_lock       : std_logic;
-    signal pll_phase_filt : signed(POST_W - 1 downto 0);
-    signal pll_lock_iir   : signed(POST_W - 1 downto 0);
+    -- Carrier PLL diagnostics.  pll_lock / pq_lock_counter are stubbed
+    -- in this TB (no CORDIC chain available -- 07_tb runs the legacy
+    -- AM detector and doesn't test phase_quality).  Telemetry columns
+    -- stay for CSV compat; phase_quality unit-level coverage lives in
+    -- the 14/16 TBs which have the CORDIC chain.
+    signal pll_lock        : std_logic                          := '0';
+    signal pll_phase_filt  : signed(POST_W - 1 downto 0);
+    signal pq_lock_counter : signed(POST_W - 1 downto 0)        := (others => '0');
 
     -- Synchronously-detected envelope @ 2 kS/s -> bit_det.
     signal env_pwr : env_word_t;
@@ -407,11 +411,7 @@ begin
             OFFSET_WIDTH    => NCO_OFFSET_W,
             KP_SHIFT        => 7,
             KI_SHIFT        => 20,
-            LOOP_IIR_SHIFT  => LOOP_IIR_SHIFT,
-            LOCK_IIR_SHIFT  => 14,
-            LOCK_IN_THR     => 2**18,
-            LOCK_OUT_THR    => 2**21,
-            LOCK_HOLD_TICKS => 256
+            LOOP_IIR_SHIFT  => LOOP_IIR_SHIFT
         )
         port map (
             clk              => clk,
@@ -419,9 +419,7 @@ begin
             phase_err        => pll_pe_in,
             phase_err_valid  => pll_pe_in_v,
             phase_inc_offset => pll_offset,
-            lock_state       => pll_lock,
-            phase_filt_out   => pll_phase_filt,
-            lock_iir_out     => pll_lock_iir
+            phase_filt_out   => pll_phase_filt
         );
 
     -- The NCO sees the live PLL output plus a one-shot seed loaded
@@ -656,7 +654,7 @@ begin
 
     -- ------------------------------------------------------------------ --
     -- PLL telemetry: every 5 seconds of recording time, dump pll_offset,
-    -- pll_phase_filt, pll_lock_iir and lock_state.  Lets us watch how the loop
+    -- pll_phase_filt, pq_lock_counter and lock_state.  Lets us watch how the loop
     -- evolves through acquisition rather than guessing from the final
     -- snapshot.
     -- ------------------------------------------------------------------ --
@@ -678,7 +676,7 @@ begin
                  & "ms  offset=" & integer'image(to_integer(pll_offset))
                  & "  seed="     & integer'image(to_integer(seed_offset))
                  & "  phase_filt=" & integer'image(to_integer(pll_phase_filt))
-                 & "  lock_iir="   & integer'image(to_integer(pll_lock_iir))
+                 & "  lock_iir="   & integer'image(to_integer(pq_lock_counter))
                  & "  lock="     & std_logic'image(pll_lock));
         end loop;
     end process;
@@ -709,7 +707,7 @@ begin
         assert status = open_ok
             report "csv_telemetry: cannot open " & TELEM_CSV
             severity failure;
-        write(lbuf, string'("t_ms,nco_offset,pll_phase_filt,pll_lock_iir,"
+        write(lbuf, string'("t_ms,nco_offset,pll_phase_filt,pq_lock_counter,"
                             & "pll_lock,phase_err,env_pwr"));
         writeline(fh, lbuf);
         loop
@@ -722,7 +720,7 @@ begin
             write(lbuf, ',');
             write(lbuf, integer'image(to_integer(pll_phase_filt)));
             write(lbuf, ',');
-            write(lbuf, integer'image(to_integer(pll_lock_iir)));
+            write(lbuf, integer'image(to_integer(pq_lock_counter)));
             write(lbuf, ',');
             write(lbuf, integer'image(lock_int));
             write(lbuf, ',');
@@ -808,7 +806,7 @@ begin
                          & "  phase_filt = "
                          & integer'image(to_integer(pll_phase_filt))
                          & "  lock_iir = "
-                         & integer'image(to_integer(pll_lock_iir))
+                         & integer'image(to_integer(pq_lock_counter))
                          & "  lock_state = "
                          & std_logic'image(pll_lock));
                     if LOCK_FILE_OUT /= "" then

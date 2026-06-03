@@ -182,10 +182,12 @@ architecture rtl of dcf77_core is
     signal env_pwr    : env_word_t;
     signal env_v      : std_logic;
 
-    -- Carrier-PLL lock indicator (real-mode output gating).
+    -- Carrier-PLL diagnostics + separate phase-quality lock indicator.
     signal pll_lock        : std_logic;
     signal pll_phase_filt  : signed(POST_W - 1 downto 0);
-    signal pll_lock_iir    : signed(POST_W - 1 downto 0);
+    -- Signed up/down counter from phase_quality (signal-quality metric).
+    constant PQ_COUNTER_W  : positive := 12;
+    signal pq_lock_counter : signed(PQ_COUNTER_W - 1 downto 0);
 
     signal bit_val    : std_logic;
     signal bit_v      : std_logic;
@@ -516,16 +518,7 @@ begin
             -- locked-σ < 400 LSB sanity check on the corpus.
             KP_SHIFT        => 10,
             KI_SHIFT        => 23,
-            -- Internal IIRs.
-            LOOP_IIR_SHIFT  => LOOP_IIR_SHIFT,  -- 4 -> ~ 20 Hz
-            LOCK_IIR_SHIFT  => 14,              -- ~ 8.2 s
-            -- Lock thresholds on lock_iir = slow_IIR(|phase_filt|).
-            -- See dcf77_carrier_pll.vhd for the budget; 2^14/2^16
-            -- gives a 4× hysteresis margin around the locked PSK
-            -- floor of ~10 K LSB.
-            LOCK_IN_THR     => 2**14,
-            LOCK_OUT_THR    => 2**16,
-            LOCK_HOLD_TICKS => 256
+            LOOP_IIR_SHIFT  => LOOP_IIR_SHIFT   -- 4 -> ~ 20 Hz
         )
         port map (
             clk              => clk,
@@ -535,9 +528,35 @@ begin
             phase_err        => phase_for_pll,
             phase_err_valid  => phase_for_pll_v,
             phase_inc_offset => nco_phase_inc_offset,
+            phase_filt_out   => pll_phase_filt
+        );
+
+    -- ------------------------------------------------------------------ --
+    -- Phase-quality / lock indicator: saturating ±1 counter on the       --
+    -- low/high bin split at |cordic_phase| = 2^10.  Operates on the raw  --
+    -- 12-b CORDIC output, decoupled from the PI's LPF state.  See        --
+    -- dcf77_phase_quality.vhd for the corpus calibration that drives    --
+    -- the defaults.                                                       --
+    -- ------------------------------------------------------------------ --
+    u_phase_quality : entity work.dcf77_phase_quality
+        generic map (
+            PHASE_WIDTH     => CORDIC_PHASE_W,
+            COUNTER_W       => PQ_COUNTER_W,
+            -- Hysteresis on the up/down counter (CMAX = ±2^11 = ±2048).
+            -- +1024 = half-saturation, safely above noise random-walk.
+            -- -512  = unlock only after counter is driven well below
+            -- the noise's typical position near 0.
+            LOCK_IN_THR     => 1024,
+            LOCK_OUT_THR    => -512,
+            LOCK_HOLD_TICKS => 256
+        )
+        port map (
+            clk              => clk,
+            rst              => rst,
+            cordic_phase     => cordic_phase,
+            cordic_valid     => cordic_v,
             lock_state       => pll_lock,
-            phase_filt_out   => pll_phase_filt,
-            lock_iir_out     => pll_lock_iir
+            lock_counter_out => pq_lock_counter
         );
 
     -- ------------------------------------------------------------------ --
