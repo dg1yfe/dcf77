@@ -40,6 +40,11 @@ entity dcf77_pm_if_replay_tb is
         SAMPLE_COUNT   : natural := 0;     -- # of real samples in the file
         MAX_SAMPLES    : natural := 0;     -- 0 = feed every sample
         IF_HZ          : natural := 5_000;
+        -- Sub-µHz NCO precision: when > 0, used directly as the NCO
+        -- phase increment instead of the integer-Hz-rounded value
+        -- derived from IF_HZ.  run.py computes this from the FFT-
+        -- refined `measured_if_hz` in each `.if.meta`.
+        NCO_PHASE_INCR_OVERRIDE : natural := 0;
         SAMPLE_RATE_HZ : natural := 12_000;
         CLOCKS_PER_TICK : positive := 8;
         -- Minimum pm_valid pulses we expect by end of recording.
@@ -59,6 +64,13 @@ entity dcf77_pm_if_replay_tb is
         -- (t_us, hyp_idx, abs_acc, sec_phase) so we can analyse the
         -- autocorrelation profile offline.
         ACQUIRE_LOG_CSV : string := "";
+
+        -- TRACK-debug log.  When non-empty, every dbg_track_v pulse
+        -- (= per T_MINUS / T_CENTER / T_PLUS evaluation, 3 per
+        -- pm_valid) writes a row (t_us, step, abs_acc) so we can
+        -- check the early-late energy ratio + per-second magnitude
+        -- against ACQUIRE's peak.  Step: 0=MINUS, 1=CENTER, 2=PLUS.
+        TRACK_LOG_CSV   : string := "";
 
         -- Carrier-PLL PI gain right-shifts.  Exposed for tuning sweeps.
         -- Larger shift = smaller gain = lower loop bandwidth.  Defaults
@@ -81,8 +93,16 @@ architecture tb of dcf77_pm_if_replay_tb is
 
     constant NCO_PHASE_W  : positive := 25;
     constant NCO_OFFSET_W : positive := 24;
-    constant NCO_PHASE_INCR_VAL : natural :=
-        natural(real(2 ** NCO_PHASE_W) * real(IF_HZ) / real(SAMPLE_RATE_HZ));
+    function pick_nco_incr return natural is
+    begin
+        if NCO_PHASE_INCR_OVERRIDE > 0 then
+            return NCO_PHASE_INCR_OVERRIDE;
+        else
+            return natural(real(2 ** NCO_PHASE_W)
+                           * real(IF_HZ) / real(SAMPLE_RATE_HZ));
+        end if;
+    end function;
+    constant NCO_PHASE_INCR_VAL : natural := pick_nco_incr;
 
     constant POST_BOX_RATE  : positive := SAMPLE_RATE_HZ / 2000;
     constant POST_W         : positive := iq_word_t'length + 3;
@@ -445,6 +465,38 @@ begin
                     write(lbuf, ',');
                     write(lbuf, integer'image(
                         to_integer(pm_debug_s.acquire_sec_phase)));
+                    writeline(fh, lbuf);
+                end if;
+            end if;
+        end if;
+    end process;
+
+    -- TRACK debug logger: writes one row per pm_debug.track_v pulse
+    -- (= per T_MINUS / T_CENTER / T_PLUS evaluation, 3 per pm_valid).
+    track_logger : process(clk)
+        file     fh        : text;
+        variable lbuf      : line;
+        variable status    : file_open_status;
+        variable opened    : boolean := false;
+    begin
+        if rising_edge(clk) then
+            if TRACK_LOG_CSV /= "" then
+                if not opened and rst = '0' then
+                    file_open(status, fh, TRACK_LOG_CSV, write_mode);
+                    if status = open_ok then
+                        write(lbuf, string'("t_us,step,abs_acc"));
+                        writeline(fh, lbuf);
+                        opened := true;
+                    end if;
+                end if;
+                if opened and pm_debug_s.track_v = '1' then
+                    write(lbuf, integer'image(now / 1 us));
+                    write(lbuf, ',');
+                    write(lbuf, integer'image(
+                        to_integer(pm_debug_s.track_step)));
+                    write(lbuf, ',');
+                    write(lbuf, integer'image(
+                        to_integer(pm_debug_s.track_abs_acc)));
                     writeline(fh, lbuf);
                 end if;
             end if;

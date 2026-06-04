@@ -336,12 +336,20 @@ def _configure_pm_if_replay_testbench(lib) -> None:
         samples = int(kv["sample_count"])
 
         base_cfg = dict(
-            REPLAY_FILE         = str(if_s16),
-            SAMPLE_COUNT        = samples,
-            SAMPLE_RATE_HZ      = rate,
-            IF_HZ               = if_hz,
-            EXPECT_PM_VALID_MIN = 30,
+            REPLAY_FILE             = str(if_s16),
+            SAMPLE_COUNT            = samples,
+            SAMPLE_RATE_HZ          = rate,
+            IF_HZ                   = if_hz,
+            NCO_PHASE_INCR_OVERRIDE = _nco_phase_incr(kv, rate),
+            EXPECT_PM_VALID_MIN     = 30,
         )
+        # DCF77_PM_MAX_SEC truncates each pm_if_replay test to N
+        # broadcast seconds, same idea as DCF77_CAPTURE_MAX_SEC for
+        # the 16_capture TB.  Indispensable for tuning loops:
+        # serial-runtime full recordings are 200-700 s of broadcast.
+        pm_max = os.environ.get("DCF77_PM_MAX_SEC")
+        if pm_max:
+            base_cfg["MAX_SAMPLES"] = int(pm_max) * rate
 
         # Optional PLL-gain sweep: enumerate one config per (KP, KI) pair.
         # Activated by DCF77_PM_PLL_SWEEP="kp1,kp2,...;ki1,ki2,..." (two
@@ -387,6 +395,12 @@ def _configure_pm_if_replay_testbench(lib) -> None:
         if os.environ.get("DCF77_PM_ACQUIRE_LOG") == "1":
             cfg["ACQUIRE_LOG_CSV"] = str(
                 DERIVED_DIR / f"{stem}.pm.acquire.csv")
+        # DCF77_PM_TRACK_LOG=1 → write per-TRACK-pass |acc| log to
+        # <stem>.pm.track.csv (one row per T_MINUS/T_CENTER/T_PLUS
+        # evaluation: t_us, step, abs_acc).
+        if os.environ.get("DCF77_PM_TRACK_LOG") == "1":
+            cfg["TRACK_LOG_CSV"] = str(
+                DERIVED_DIR / f"{stem}.pm.track.csv")
         tb.test("pm_smoke").add_config(name=stem, generics=cfg)
 
 

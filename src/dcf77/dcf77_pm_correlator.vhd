@@ -562,23 +562,37 @@ begin
                     -- finishes ~63 ms into a 2.048 s buffer cycle, the
                     -- old wait-until-wrap was idle time.
                     --
-                    -- target_phase = ac_best_phase + 1586 + 4 × 2000
-                    -- (mod 4096): chip-0 sits up to ~2 buffer-cycles in
-                    -- the past, the +4 broadcast-second skip guarantees
-                    -- target_phase lands in the future regardless of
-                    -- which k won.  In 12-b natural wrap,
-                    -- (1586 + 4·2000) mod 4096 = 1394.
+                    -- target_phase = (ac_best_phase + SAMPLES_PER_PRBS
+                    -- + SAMPLES_PER_SEC) mod BUF_SIZE.  Fires TRACK at
+                    -- the END of the NEXT broadcast PRBS:
+                    --   1. wait SAMPLES_PER_SEC for the next chip-0
+                    --      to arrive in the buffer
+                    --   2. wait SAMPLES_PER_PRBS for the whole PRBS
+                    --      to be written
+                    -- Engine reads buf[w_ptr - 1586 .. w_ptr - 1], so
+                    -- w_ptr at fire = chip-0 + SAMPLES_PER_PRBS.
+                    -- The previous formula +(SAMPLES_PER_PRBS +
+                    -- 4*SAMPLES_PER_SEC) mod BUF_SIZE was off by 192
+                    -- samples: SAMPLES_PER_SEC=2000 mod BUF_SIZE=4096
+                    -- ≠ 0, so "skip 4 seconds" inside the mod doesn't
+                    -- preserve alignment.  12-b natural wrap handles
+                    -- future-ness automatically.
                     if r.ac_hyp_idx = K_HYPOTHESES - 1 then
                         v.ac_burst_armed := '0';
                         if v.ac_best_score >= to_unsigned(LOCK_IN_THR, 19) then
                             v.mode := M_LOCK;
                             v.locked_phase := v.ac_best_phase;
+                            -- −1 compensates for the 1-cycle pipeline
+                            -- between the trigger (sec_phase = target)
+                            -- and the engine start: w_ptr increments by
+                            -- 1 in that gap, so the engine reads at
+                            -- (w_ptr+1) − SAMPLES_PER_PRBS.  Subtracting
+                            -- 1 from target_phase puts the read base
+                            -- exactly at chip-0.
                             v.target_phase := v.ac_best_phase
                                             + to_unsigned(
-                                                  (SAMPLES_PER_PRBS
-                                                   + 4 * SAMPLES_PER_SEC)
-                                                  mod BUF_SIZE,
-                                                  12);
+                                                  SAMPLES_PER_PRBS
+                                                + SAMPLES_PER_SEC - 1, 12);
                             v.track_step  := T_MINUS;
                             v.track_armed := '0';
                             v.track_best_idx := (others => '0');
