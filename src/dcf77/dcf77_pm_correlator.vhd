@@ -192,6 +192,14 @@ architecture rtl of dcf77_pm_correlator is
                                                       -- 96-sample slip)
         track_step       : track_step_t;
         track_armed      : std_logic;
+        -- w_ptr snapshot captured at TRACK trigger.  All three passes
+        -- (T_MINUS / T_CENTER / T_PLUS) compute next_offset from this
+        -- frozen value so they integrate over the SAME broadcast PRBS
+        -- window shifted by ±1 sample.  Without snapshotting, the
+        -- ~396-tick engine latency lets w_ptr drift between passes,
+        -- and each pass ends up reading a window ~400 samples offset
+        -- from the previous — randomized correlation, dead DLL.
+        track_w_ptr_snap : unsigned(11 downto 0);
         track_best_idx   : unsigned(1 downto 0);      -- 0=undecided 1=- 2=center 3=+
         track_best_score : unsigned(18 downto 0);
         track_center_acc : signed(19 downto 0);       -- 20-b signed acc snapshot
@@ -238,6 +246,7 @@ architecture rtl of dcf77_pm_correlator is
         target_phase     => (others => '0'),
         track_step       => T_MINUS,
         track_armed      => '0',
+        track_w_ptr_snap => (others => '0'),
         track_best_idx   => (others => '0'),
         track_best_score => (others => '0'),
         track_center_acc => (others => '0'),
@@ -582,17 +591,17 @@ begin
                         if v.ac_best_score >= to_unsigned(LOCK_IN_THR, 19) then
                             v.mode := M_LOCK;
                             v.locked_phase := v.ac_best_phase;
-                            -- −1 compensates for the 1-cycle pipeline
-                            -- between the trigger (sec_phase = target)
-                            -- and the engine start: w_ptr increments by
-                            -- 1 in that gap, so the engine reads at
-                            -- (w_ptr+1) − SAMPLES_PER_PRBS.  Subtracting
-                            -- 1 from target_phase puts the read base
-                            -- exactly at chip-0.
+                            -- track_w_ptr_snap captures w_ptr at the
+                            -- trigger cycle (where r.sec_phase =
+                            -- r.target_phase), so no pipeline-delay
+                            -- compensation is needed.  target_phase
+                            -- = ac_best_phase + SAMPLES_PER_PRBS +
+                            -- SAMPLES_PER_SEC lands w_ptr_snap at the
+                            -- end of the next PRBS window exactly.
                             v.target_phase := v.ac_best_phase
                                             + to_unsigned(
                                                   SAMPLES_PER_PRBS
-                                                + SAMPLES_PER_SEC - 1, 12);
+                                                + SAMPLES_PER_SEC, 12);
                             v.track_step  := T_MINUS;
                             v.track_armed := '0';
                             v.track_best_idx := (others => '0');
@@ -629,25 +638,36 @@ begin
                     v.track_step := T_MINUS;
                     v.track_best_idx := (others => '0');
                     v.track_best_score := (others => '0');
+                    -- Snapshot w_ptr at trigger.  All 3 passes
+                    -- (M / C / P) read from this frozen value plus
+                    -- (BUF_SIZE - SAMPLES_PER_PRBS ± 1), so they
+                    -- integrate over the SAME PRBS window with a
+                    -- ±1-sample shift.  Without this, the engine's
+                    -- ~396-tick latency lets w_ptr drift between
+                    -- passes -- each pass reads a ~+400-sample
+                    -- offset window, randomizing correlation.
+                    v.track_w_ptr_snap := r.w_ptr;
                 end if;
 
                 if r.track_armed = '1' and r.eng_state = E_IDLE then
-                    -- The engine reads buf at base = w_ptr - 1586 + DLL_OFFSET.
-                    -- DLL_OFFSET is -1 for T_MINUS, 0 for T_CENTER, +1 for T_PLUS.
-                    -- In unsigned mod-4096 arithmetic: subtract 1586, ±1.
-                    -- BUF_SIZE - SAMPLES_PER_PRBS ± 1 fits in 12 bits
-                    -- (2509/2510/2511 < 4096); folding into one to_unsigned
-                    -- avoids the intermediate (r.w_ptr + BUF_SIZE) that
-                    -- truncates because BUF_SIZE = 2^12 = 4096 doesn't fit.
+                    -- The engine reads buf at base = w_ptr_snap - 1586
+                    -- + DLL_OFFSET.  DLL_OFFSET is -1 for T_MINUS, 0
+                    -- for T_CENTER, +1 for T_PLUS.  In unsigned mod-
+                    -- 4096 arithmetic: subtract 1586, ±1.  BUF_SIZE -
+                    -- SAMPLES_PER_PRBS ± 1 fits in 12 bits
+                    -- (2509/2510/2511 < 4096); folding into one
+                    -- to_unsigned avoids the intermediate (w_ptr_snap
+                    -- + BUF_SIZE) that truncates because BUF_SIZE =
+                    -- 2^12 = 4096 doesn't fit.
                     case r.track_step is
                         when T_MINUS  =>
-                            next_offset := r.w_ptr + to_unsigned(
+                            next_offset := r.track_w_ptr_snap + to_unsigned(
                                 BUF_SIZE - SAMPLES_PER_PRBS - 1, 12);
                         when T_CENTER =>
-                            next_offset := r.w_ptr + to_unsigned(
+                            next_offset := r.track_w_ptr_snap + to_unsigned(
                                 BUF_SIZE - SAMPLES_PER_PRBS, 12);
                         when T_PLUS   =>
-                            next_offset := r.w_ptr + to_unsigned(
+                            next_offset := r.track_w_ptr_snap + to_unsigned(
                                 BUF_SIZE - SAMPLES_PER_PRBS + 1, 12);
                     end case;
                     start_engine := true;
