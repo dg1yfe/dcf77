@@ -182,6 +182,7 @@ architecture rtl of dcf77_pm_correlator is
         dbg_track_v          : std_logic;
         dbg_track_step       : unsigned(1 downto 0);
         dbg_track_abs_acc    : unsigned(18 downto 0);
+        dbg_track_next_offset: unsigned(11 downto 0);
 
         ---- LOCK / TRACK ----
         locked_phase     : unsigned(11 downto 0);     -- sec_phase at chip-0 arrival
@@ -260,6 +261,7 @@ architecture rtl of dcf77_pm_correlator is
         dbg_track_v          => '0',
         dbg_track_step       => (others => '0'),
         dbg_track_abs_acc    => (others => '0'),
+        dbg_track_next_offset=> (others => '0'),
         eng_state        => E_IDLE,
         eng_base_ptr     => (others => '0'),
         sample_idx       => (others => '0'),
@@ -320,6 +322,7 @@ begin
     pm_debug.track_step         <= r.dbg_track_step;
     pm_debug.track_abs_acc      <= r.dbg_track_abs_acc;
     pm_debug.track_locked_phase <= r.locked_phase;
+    pm_debug.track_next_offset  <= r.dbg_track_next_offset;
 
     ----------------------------------------------------------------------
     -- BRAM read/write process.  Synchronous: write on phase_err_v,
@@ -677,8 +680,12 @@ begin
                     abs_acc := abs20(v.acc);
                     -- TRACK debug pulse: |acc| per pass (M/C/P).  Lets
                     -- the TB watch the early-late energy ratio over time.
-                    v.dbg_track_v       := '1';
-                    v.dbg_track_abs_acc := abs_acc;
+                    -- Also expose eng_base_ptr (= the buffer position
+                    -- the engine just read chip-0 from) so we can
+                    -- verify alignment vs ACQUIRE's ac_best_phase.
+                    v.dbg_track_v           := '1';
+                    v.dbg_track_abs_acc     := abs_acc;
+                    v.dbg_track_next_offset := r.eng_base_ptr;
                     case r.track_step is
                         when T_MINUS  => v.dbg_track_step := "00";
                         when T_CENTER => v.dbg_track_step := "01";

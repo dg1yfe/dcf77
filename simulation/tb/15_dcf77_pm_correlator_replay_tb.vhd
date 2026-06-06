@@ -40,14 +40,51 @@ entity dcf77_pm_correlator_replay_tb is
         runner_cfg          : string;
         REPLAY_FILE         : string  := "";
         SAMPLE_COUNT        : natural := 0;       -- # of baseband samples in file
-        -- Clocks between consecutive phase_err_v='1' pulses.  Engine
-        -- runtime is ~3174 clk per hypothesis, so writes-per-hyp =
-        -- 3174 / PHASE_ERR_V_CLOCKS.  Reference values:
-        --   48     : matches current 14_pm at CLOCKS_PER_TICK=8 (~66 writes/hyp, full race)
-        --   3174   : 1 write/hyp (mild race)
-        --   31740  : 0.1 writes/hyp (10x LIVE-like)
-        --   62500  : LIVE rate (= 2 kHz baseband at 125 MHz clk)
-        PHASE_ERR_V_CLOCKS  : positive := 48;
+        -- Clocks between consecutive phase_err_v='1' pulses.  This
+        -- sets the writer-vs-engine race ratio inside the PM
+        -- correlator's BRAM ring buffer:
+        --
+        --   * The engine takes ~3174 clk to evaluate one hypothesis
+        --     (E_REQ + E_RECV × 1586 samples + E_DONE).
+        --   * The writer fires once every PHASE_ERR_V_CLOCKS clk.
+        --   * So writes-per-hyp = 3174 / PHASE_ERR_V_CLOCKS, and
+        --     race-impacted samples per integration window = the
+        --     same.
+        --
+        -- **Recommended default: 3174 (= 1 write/hyp).**  At that
+        -- value, the writer touches at most ONE of the 1586 read
+        -- positions per hypothesis (≈ 0.06 % of the integration),
+        -- which is mathematically negligible for PRBS correlation
+        -- magnitude.  Lower values introduce race noise that scales
+        -- linearly; higher values cost simulation wall time without
+        -- any further correlation improvement.
+        --
+        -- Why not lower for speed?
+        --
+        --   PHASE_ERR_V_CLOCKS | writes/hyp | race fraction
+        --   48                 | 66         | 4.2 %  (matches 14_pm
+        --                                              CLOCKS_PER_TICK=8 --
+        --                                              breaks ACQUIRE on
+        --                                              the corpus)
+        --   200                | 16         | 1.0 %  (marginal on noisy
+        --                                              recordings)
+        --   1000               |  3         | 0.2 %  (still safe; saves
+        --                                              ~30 s wall time)
+        --   3174               |  1         | 0.06 % (theoretical floor
+        --                                              for non-zero race)
+        --   31740              |  0.1       | 0       (10× over-engineered;
+        --                                              wall time grows 10×)
+        --
+        -- Why 3174 specifically?  It's the engine's per-hyp clock
+        -- cost.  Anything > 3174 means the engine OUTRUNS the writer
+        -- (engine pulls ahead, never races); anything < 3174 means
+        -- the writer catches up and overwrites samples mid-read.
+        -- 3174 is the inflection point where the race noise is at
+        -- its natural minimum (= exactly 1 write per hyp, write hits
+        -- exactly 1 read position per hyp).  See
+        -- feedback_pm_phase_err_v_clocks memory for the full
+        -- analysis.
+        PHASE_ERR_V_CLOCKS  : positive := 3174;
         EXPECT_PM_VALID_MIN : natural := 30;
         ACQUIRE_LOG_CSV     : string  := ""
     );

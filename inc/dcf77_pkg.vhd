@@ -203,6 +203,10 @@ package dcf77_pkg is
         track_step         : unsigned(1 downto 0);    -- 0=M, 1=C, 2=P
         track_abs_acc      : unsigned(18 downto 0);
         track_locked_phase : unsigned(11 downto 0);
+        -- Buffer base address used to read this pass (= chip-0
+        -- position the engine integrated from).  Lets the TB verify
+        -- TRACK alignment vs ACQUIRE's ac_best_phase.
+        track_next_offset  : unsigned(11 downto 0);
     end record;
 
     constant DCF77_PM_DEBUG_RESET : dcf77_pm_debug_type := (
@@ -213,7 +217,8 @@ package dcf77_pkg is
         track_v            => '0',
         track_step         => (others => '0'),
         track_abs_acc      => (others => '0'),
-        track_locked_phase => (others => '0')
+        track_locked_phase => (others => '0'),
+        track_next_offset  => (others => '0')
     );
 
     ---------------------------------------------------------------------------

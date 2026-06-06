@@ -484,7 +484,8 @@ begin
                 if not opened and rst = '0' then
                     file_open(status, fh, TRACK_LOG_CSV, write_mode);
                     if status = open_ok then
-                        write(lbuf, string'("t_us,step,abs_acc"));
+                        write(lbuf, string'(
+                            "t_us,step,abs_acc,next_offset,locked_phase"));
                         writeline(fh, lbuf);
                         opened := true;
                     end if;
@@ -497,6 +498,12 @@ begin
                     write(lbuf, ',');
                     write(lbuf, integer'image(
                         to_integer(pm_debug_s.track_abs_acc)));
+                    write(lbuf, ',');
+                    write(lbuf, integer'image(
+                        to_integer(pm_debug_s.track_next_offset)));
+                    write(lbuf, ',');
+                    write(lbuf, integer'image(
+                        to_integer(pm_debug_s.track_locked_phase)));
                     writeline(fh, lbuf);
                 end if;
             end if;

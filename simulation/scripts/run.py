@@ -551,11 +551,18 @@ def _configure_pm_corr_replay_testbench(lib) -> None:
     if not DERIVED_DIR.is_dir():
         return
 
+    # Default PHASE_ERR_V_CLOCKS=3174 is the "1 write per hypothesis"
+    # natural minimum -- the writer touches at most ONE of the engine's
+    # 1586 read positions per pass (= 0.06 % of the integration),
+    # mathematically negligible race noise.  Below 3174 the writer
+    # catches up mid-read and pollutes correlation; above is needlessly
+    # slow.  See 15_dcf77_pm_correlator_replay_tb.vhd / feedback memory
+    # for the full analysis.  Override via DCF77_PM_PERIOD_SWEEP.
     sweep = os.environ.get("DCF77_PM_PERIOD_SWEEP", "")
     if sweep:
         period_list = [int(s) for s in sweep.split(",") if s.strip()]
     else:
-        period_list = [48]
+        period_list = [3174]
 
     # DCF77_PM_REPLAY_LIMIT caps the number of baseband samples replayed.
     # Useful for the slow-rate sweep points where the full file would be
