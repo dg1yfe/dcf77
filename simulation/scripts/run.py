@@ -565,15 +565,24 @@ def _configure_pm_corr_replay_testbench(lib) -> None:
         period_list = [3174]
 
     # DCF77_PM_REPLAY_LIMIT caps the number of baseband samples replayed.
-    # Useful for the slow-rate sweep points where the full file would be
-    # infeasible (e.g. PHASE_ERR_V_CLOCKS=31740 means 8x more sim time
-    # per sample than the default 48).  Set to e.g. 240000 (= 120
-    # broadcast-sec = 2 full SIK minute cycles) for the buffer-race test.
-    limit_str = os.environ.get("DCF77_PM_REPLAY_LIMIT", "")
+    # Default 120000 = 60 broadcast-sec, plenty for ACQUIRE + ~30 TRACK
+    # iterations, and keeps each test under ~6 min wall time at
+    # PHASE_ERR_V_CLOCKS=3174 (full 700 K-sample .pe.bin would take ~80
+    # min/test).  Override via env var; set to 0 to replay full file.
+    limit_str = os.environ.get("DCF77_PM_REPLAY_LIMIT", "120000")
     sample_limit = int(limit_str) if limit_str else 0
+
+    # Skip the kp*_ki*_iir* .pe.bin variants -- those are leftover PLL
+    # sweep captures from earlier work and bloat the corpus 4x.  Only
+    # the bare recording captures (and the noise reference) count.
+    # Override via DCF77_PM_REPLAY_ALL_PE_BINS=1 to include sweeps.
+    include_sweeps = os.environ.get("DCF77_PM_REPLAY_ALL_PE_BINS") == "1"
+    sweep_pattern = __import__("re").compile(r"kp\d+_ki\d+")
 
     for pe_bin in sorted(DERIVED_DIR.glob("*.pe.bin")):
         stem    = pe_bin.name[:-len(".pe.bin")]
+        if not include_sweeps and sweep_pattern.search(stem):
+            continue
         size_b  = pe_bin.stat().st_size
         n_samp  = size_b // 2
         if sample_limit and sample_limit < n_samp:
