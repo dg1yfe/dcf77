@@ -323,6 +323,7 @@ begin
     pm_debug.track_abs_acc      <= r.dbg_track_abs_acc;
     pm_debug.track_locked_phase <= r.locked_phase;
     pm_debug.track_next_offset  <= r.dbg_track_next_offset;
+    pm_debug.engine_active      <= '1' when r.eng_state /= E_IDLE else '0';
 
     ----------------------------------------------------------------------
     -- BRAM read/write process.  Synchronous: write on phase_err_v,

@@ -207,6 +207,13 @@ package dcf77_pkg is
         -- position the engine integrated from).  Lets the TB verify
         -- TRACK alignment vs ACQUIRE's ac_best_phase.
         track_next_offset  : unsigned(11 downto 0);
+        -- '1' while the per-hypothesis engine is running (E_REQ /
+        -- E_RECV / E_DONE).  Used by the gated-clock TB to keep the
+        -- clock toggling only while there's actual engine work to do
+        -- -- in idle gaps between phase_err_v pulses the clock can
+        -- pause and GHDL skips ahead in sim time without burning
+        -- per-cycle event-processing wall time.
+        engine_active      : std_logic;
     end record;
 
     constant DCF77_PM_DEBUG_RESET : dcf77_pm_debug_type := (
@@ -218,7 +225,8 @@ package dcf77_pkg is
         track_step         => (others => '0'),
         track_abs_acc      => (others => '0'),
         track_locked_phase => (others => '0'),
-        track_next_offset  => (others => '0')
+        track_next_offset  => (others => '0'),
+        engine_active      => '0'
     );
 
     ---------------------------------------------------------------------------
