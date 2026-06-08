@@ -564,24 +564,23 @@ def _configure_pm_corr_replay_testbench(lib) -> None:
     if not DERIVED_DIR.is_dir():
         return
 
-    # Default PHASE_ERR_V_CLOCKS=3174 is the "1 write per hypothesis"
-    # natural minimum -- the writer touches at most ONE of the engine's
-    # 1586 read positions per pass (= 0.06 % of the integration),
-    # mathematically negligible race noise.  Below 3174 the writer
-    # catches up mid-read and pollutes correlation; above is needlessly
-    # slow.  See 15_dcf77_pm_correlator_replay_tb.vhd / feedback memory
-    # for the full analysis.  Override via DCF77_PM_PERIOD_SWEEP.
+    # Default PHASE_ERR_V_CLOCKS=62500 = live HW rate (125 MHz / 2 kS/s).
+    # The 15_tb gates its clock during inter-sample idle windows, so wall
+    # time scales with engine-active cycles (ACQUIRE burst + TRACK
+    # 3-pass), not with the per-sample interval.  Running at the live
+    # rate eliminates TB acceleration artefacts in the BRAM ring buffer
+    # (writer wraps it during ACQUIRE+wait at lower values, see git
+    # history).  Override via DCF77_PM_PERIOD_SWEEP for diagnostics.
     sweep = os.environ.get("DCF77_PM_PERIOD_SWEEP", "")
     if sweep:
         period_list = [int(s) for s in sweep.split(",") if s.strip()]
     else:
-        period_list = [3174]
+        period_list = [62500]
 
     # DCF77_PM_REPLAY_LIMIT caps the number of baseband samples replayed.
     # Default 120000 = 60 broadcast-sec, plenty for ACQUIRE + ~30 TRACK
-    # iterations, and keeps each test under ~6 min wall time at
-    # PHASE_ERR_V_CLOCKS=3174 (full 700 K-sample .pe.bin would take ~80
-    # min/test).  Override via env var; set to 0 to replay full file.
+    # iterations including the SIK-signature window.  Set to 0 to replay
+    # the full .pe.bin.
     limit_str = os.environ.get("DCF77_PM_REPLAY_LIMIT", "120000")
     sample_limit = int(limit_str) if limit_str else 0
 
@@ -606,7 +605,8 @@ def _configure_pm_corr_replay_testbench(lib) -> None:
                 REPLAY_FILE         = str(pe_bin),
                 SAMPLE_COUNT        = n_samp,
                 PHASE_ERR_V_CLOCKS  = period,
-                EXPECT_PM_VALID_MIN = 30,
+                EXPECT_PM_VALID_MIN = int(os.environ.get(
+                    "DCF77_PM_EXPECT_VALID_MIN", "30")),
             )
             tag = stem if len(period_list) == 1 else f"{stem}.p{period}"
             if os.environ.get("DCF77_PM_ACQUIRE_LOG") == "1":
