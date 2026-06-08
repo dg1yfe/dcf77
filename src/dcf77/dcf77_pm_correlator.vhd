@@ -448,10 +448,18 @@ begin
                 else
                     chip_sign := r.lfsr(8);  -- MSB output, before shift
                 end if;
+                -- Polarity: HW pm_soft signs match Python's SIK polarity
+                -- (cross-checked on dcf_strong replay with TRACK locked at
+                -- saturation, 37/37 bits = 100 % match when chip='0' adds
+                -- and chip='1' subtracts).  The earlier "absorb chain
+                -- inversion" mapping was opposite-sense and never matched
+                -- the SIK signature in frame_dec.
+                --   chip='0' (PNS)  -> multiply sample by +1 (add)
+                --   chip='1' (PNS̄)  -> multiply sample by -1 (subtract)
                 if chip_sign = '0' then
-                    v.acc := r.acc - resize(sample_in, 20);
-                else
                     v.acc := r.acc + resize(sample_in, 20);
+                else
+                    v.acc := r.acc - resize(sample_in, 20);
                 end if;
 
                 -- Bresenham chip advance: chip_acc += 31; if ≥ 96, sub 96.
