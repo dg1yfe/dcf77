@@ -36,9 +36,22 @@ def _add_sources(lib, path: Path) -> None:
             lib.add_source_file(str(f))
 
 
+def _default_parallel_flag(argv: list[str]) -> list[str]:
+    # Inject `-p 8` if the user hasn't explicitly set a parallel level.
+    # VUnit's default is serial which makes corpus runs glacial.  Override
+    # by passing `-p N` explicitly (incl. `-p 1` for serial), or set env
+    # DCF77_VUNIT_PARALLEL=N.
+    has_p = any(a == "-p" or a.startswith("-p") or a == "--num-threads"
+                or a.startswith("--num-threads") for a in argv)
+    if has_p:
+        return argv
+    n = os.environ.get("DCF77_VUNIT_PARALLEL", "8")
+    return argv + ["-p", n]
+
+
 def build() -> VUnit:
     vu = VUnit.from_argv(
-        argv=sys.argv[1:],
+        argv=_default_parallel_flag(sys.argv[1:]),
         compile_builtins=False,
     )
     vu.add_vhdl_builtins()
