@@ -40,51 +40,21 @@ entity dcf77_pm_correlator_replay_tb is
         runner_cfg          : string;
         REPLAY_FILE         : string  := "";
         SAMPLE_COUNT        : natural := 0;       -- # of baseband samples in file
-        -- Clocks between consecutive phase_err_v='1' pulses.  This
-        -- sets the writer-vs-engine race ratio inside the PM
-        -- correlator's BRAM ring buffer:
+        -- Clocks between consecutive phase_err_v='1' pulses.  Default
+        -- 62500 = live HW rate (125 MHz clk / 2 kS/s baseband).  With
+        -- the gated clock generator (see clk_gen below) the wall-time
+        -- cost is set by ACQUIRE-engine cycles, not the inter-sample
+        -- idle, so running at live rate is FAST and the buffer state
+        -- the DUT sees is *exactly* what silicon will see.
         --
-        --   * The engine takes ~3174 clk to evaluate one hypothesis
-        --     (E_REQ + E_RECV × 1586 samples + E_DONE).
-        --   * The writer fires once every PHASE_ERR_V_CLOCKS clk.
-        --   * So writes-per-hyp = 3174 / PHASE_ERR_V_CLOCKS, and
-        --     race-impacted samples per integration window = the
-        --     same.
-        --
-        -- **Recommended default: 3174 (= 1 write/hyp).**  At that
-        -- value, the writer touches at most ONE of the 1586 read
-        -- positions per hypothesis (≈ 0.06 % of the integration),
-        -- which is mathematically negligible for PRBS correlation
-        -- magnitude.  Lower values introduce race noise that scales
-        -- linearly; higher values cost simulation wall time without
-        -- any further correlation improvement.
-        --
-        -- Why not lower for speed?
-        --
-        --   PHASE_ERR_V_CLOCKS | writes/hyp | race fraction
-        --   48                 | 66         | 4.2 %  (matches 14_pm
-        --                                              CLOCKS_PER_TICK=8 --
-        --                                              breaks ACQUIRE on
-        --                                              the corpus)
-        --   200                | 16         | 1.0 %  (marginal on noisy
-        --                                              recordings)
-        --   1000               |  3         | 0.2 %  (still safe; saves
-        --                                              ~30 s wall time)
-        --   3174               |  1         | 0.06 % (theoretical floor
-        --                                              for non-zero race)
-        --   31740              |  0.1       | 0       (10× over-engineered;
-        --                                              wall time grows 10×)
-        --
-        -- Why 3174 specifically?  It's the engine's per-hyp clock
-        -- cost.  Anything > 3174 means the engine OUTRUNS the writer
-        -- (engine pulls ahead, never races); anything < 3174 means
-        -- the writer catches up and overwrites samples mid-read.
-        -- 3174 is the inflection point where the race noise is at
-        -- its natural minimum (= exactly 1 write per hyp, write hits
-        -- exactly 1 read position per hyp).  See
-        -- feedback_pm_phase_err_v_clocks memory for the full
-        -- analysis.
-        PHASE_ERR_V_CLOCKS  : positive := 3174;
+        -- Lower values "compress" sample timing: writer fires faster
+        -- relative to the engine, so the BRAM ring buffer wraps more
+        -- often during ACQUIRE+wait and TRACK reads scrambled data.
+        -- This is a TB acceleration artefact that biased earlier
+        -- experiments; do not lower below ~10 000 without re-checking
+        -- TRACK correlation magnitudes.  See git history for the
+        -- buffer-wrap investigation.
+        PHASE_ERR_V_CLOCKS  : positive := 62500;
         EXPECT_PM_VALID_MIN : natural := 30;
         ACQUIRE_LOG_CSV     : string  := "";
         TRACK_LOG_CSV       : string  := ""
@@ -99,8 +69,15 @@ architecture tb of dcf77_pm_correlator_replay_tb is
     constant SYNC_ACQUIRE : std_logic_vector(1 downto 0) := "01";
     constant SYNC_LOCK    : std_logic_vector(1 downto 0) := "10";
 
-    signal clk : std_logic := '0';
-    signal rst : std_logic := '1';
+    signal clk      : std_logic := '0';
+    signal rst      : std_logic := '1';
+
+    -- Gated-clock control.  Default '1' = free-running clock (legacy
+    -- behaviour, preserves existing rst handshake in test_runner).
+    -- stim drops it to '0' during the long idle gaps between
+    -- phase_err_v=1 pulses to skip sim wall-time on clock events that
+    -- have no useful effect on the DUT.
+    signal clk_gate : std_logic := '1';
 
     signal phase_err   : signed(8 downto 0) := (others => '0');
     signal phase_err_v : std_logic          := '0';
@@ -138,7 +115,20 @@ architecture tb of dcf77_pm_correlator_replay_tb is
 
 begin
 
-    clk <= not clk after CLK_PERIOD / 2;
+    -- Gated clock generator.  Toggles every CLK_PERIOD/2 while clk_gate='1';
+    -- forced to '0' (and held there) when clk_gate='0'.  Because the LHS
+    -- of the conditional re-fires only on RHS-sensitivity changes and clk
+    -- no longer changes once forced to '0', the toggle cascade STOPS --
+    -- GHDL stops scheduling clock events during the gated window, which
+    -- is where the wall-time win comes from.
+    --
+    -- Why a conditional concurrent statement and not a process?  Empirically
+    -- (see git history of the rev that added this), `process / wait for /
+    -- clk <= not clk` formulations break the DUT in this environment --
+    -- FILL never completes, even with the gate stuck at '1'.  Concurrent
+    -- statements work; the conditional preserves correctness while still
+    -- letting clk_gate=0 short-circuit the toggle.
+    clk <= not clk after CLK_PERIOD / 2 when clk_gate = '1' else '0';
 
     dut : entity dcf77.dcf77_pm_correlator
         port map (
@@ -183,10 +173,14 @@ begin
         type byte_file_t is file of character;
         file replay_handle : byte_file_t;
 
-        variable status     : file_open_status;
-        variable lo, hi     : character;
-        variable val_slv    : std_logic_vector(15 downto 0);
-        variable feed       : natural := 0;
+        constant DEFAULT_SETTLE : natural := 16;
+        constant TRACK_BUDGET   : natural := 15_000;     -- 3 passes × 3174 + slack
+
+        variable status         : file_open_status;
+        variable lo, hi         : character;
+        variable val_slv        : std_logic_vector(15 downto 0);
+        variable feed           : natural := 0;
+        variable active_clocks  : natural := 0;
     begin
         wait until rst = '0';
         wait until rising_edge(clk);
@@ -205,22 +199,71 @@ begin
             report "cannot open replay file " & REPLAY_FILE
             severity failure;
 
+        -- ---------------------------------------------------------------
+        -- Per-sample loop with clock gating.
+        --
+        -- Each iteration drives one phase_err_v=1 pulse + lets the clock
+        -- run long enough for the DUT to settle, then halts the clock
+        -- for the remaining `PHASE_ERR_V_CLOCKS - <active>` cycles via
+        -- clk_gate='0'.  Sim time advances normally through the halted
+        -- window (other processes' `wait for` is not blocked) -- only
+        -- the clock-edge events are skipped, which is where the wall-
+        -- time win comes from.
+        --
+        -- Budgets per FSM state:
+        --   SYNC_FILL  - no engine activity, halt after DEFAULT_SETTLE.
+        --   SYNC_ACQUIRE - engine grinds through 2000 hyps across ~128
+        --                  samples at live rate; don't halt, let the
+        --                  clock run continuously through the whole
+        --                  sample interval.
+        --   SYNC_LOCK  - TRACK 3-pass takes ~10 k clk on the ~1-in-2000
+        --                sample that triggers it; poll engine_active in
+        --                256-clk chunks and halt once it drops.
+        -- ---------------------------------------------------------------
         while feed < SAMPLE_COUNT loop
             read(replay_handle, lo);
             read(replay_handle, hi);
             val_slv := std_logic_vector(to_unsigned(character'pos(hi), 8))
                      & std_logic_vector(to_unsigned(character'pos(lo), 8));
 
-            -- phase_err = top 9 of the 12-b cordic_phase (= bits 11..3)
+            -- Begin the active window: drive sample, raise clk_gate.
             phase_err   <= signed(val_slv(11 downto 3));
             pll_locked  <= val_slv(15);
             phase_err_v <= '1';
+            clk_gate    <= '1';
             wait until rising_edge(clk);
             phase_err_v <= '0';
 
-            for k in 1 to PHASE_ERR_V_CLOCKS - 1 loop
+            active_clocks := 1;
+
+            -- Default settle: covers CORDIC pipeline (12 clk) +
+            -- phase_quality register + slack.
+            for k in 1 to DEFAULT_SETTLE - 1 loop
                 wait until rising_edge(clk);
             end loop;
+            active_clocks := active_clocks + DEFAULT_SETTLE - 1;
+
+            case pm_sync_state_s is
+                when SYNC_ACQUIRE =>
+                    -- Engine spans multiple samples; clock free-runs.
+                    wait for (PHASE_ERR_V_CLOCKS - active_clocks) * CLK_PERIOD;
+                when SYNC_LOCK =>
+                    -- Poll engine_active in chunks; halt once idle.
+                    while pm_debug_s.engine_active = '1'
+                          and active_clocks + 256 <= PHASE_ERR_V_CLOCKS loop
+                        wait for 256 * CLK_PERIOD;
+                        active_clocks := active_clocks + 256;
+                    end loop;
+                    if PHASE_ERR_V_CLOCKS > active_clocks then
+                        clk_gate <= '0';
+                        wait for (PHASE_ERR_V_CLOCKS - active_clocks) * CLK_PERIOD;
+                    end if;
+                when others =>  -- SYNC_FILL
+                    if PHASE_ERR_V_CLOCKS > active_clocks then
+                        clk_gate <= '0';
+                        wait for (PHASE_ERR_V_CLOCKS - active_clocks) * CLK_PERIOD;
+                    end if;
+            end case;
 
             feed := feed + 1;
         end loop;
