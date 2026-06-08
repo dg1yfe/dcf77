@@ -86,7 +86,8 @@ entity dcf77_pm_correlator_replay_tb is
         -- analysis.
         PHASE_ERR_V_CLOCKS  : positive := 3174;
         EXPECT_PM_VALID_MIN : natural := 30;
-        ACQUIRE_LOG_CSV     : string  := ""
+        ACQUIRE_LOG_CSV     : string  := "";
+        TRACK_LOG_CSV       : string  := ""
     );
 end entity;
 
@@ -303,6 +304,47 @@ begin
                     write(lbuf, ',');
                     write(lbuf, integer'image(
                         to_integer(pm_debug_s.acquire_sec_phase)));
+                    writeline(fh, lbuf);
+                end if;
+            end if;
+        end if;
+    end process;
+
+    -- ------------------------------------------------------------------ --
+    -- TRACK-debug logger (mirrors 14_pm).  One line per dbg_track_v       --
+    -- pulse with step / |acc| / next_offset / locked_phase.               --
+    -- ------------------------------------------------------------------ --
+    track_logger : process(clk)
+        file     fh        : text;
+        variable lbuf      : line;
+        variable status    : file_open_status;
+        variable opened    : boolean := false;
+    begin
+        if rising_edge(clk) then
+            if TRACK_LOG_CSV /= "" then
+                if not opened and rst = '0' then
+                    file_open(status, fh, TRACK_LOG_CSV, write_mode);
+                    if status = open_ok then
+                        write(lbuf, string'(
+                            "t_us,step,abs_acc,next_offset,locked_phase"));
+                        writeline(fh, lbuf);
+                        opened := true;
+                    end if;
+                end if;
+                if opened and pm_debug_s.track_v = '1' then
+                    write(lbuf, integer'image(now / 1 us));
+                    write(lbuf, ',');
+                    write(lbuf, integer'image(
+                        to_integer(pm_debug_s.track_step)));
+                    write(lbuf, ',');
+                    write(lbuf, integer'image(
+                        to_integer(pm_debug_s.track_abs_acc)));
+                    write(lbuf, ',');
+                    write(lbuf, integer'image(
+                        to_integer(pm_debug_s.track_next_offset)));
+                    write(lbuf, ',');
+                    write(lbuf, integer'image(
+                        to_integer(pm_debug_s.track_locked_phase)));
                     writeline(fh, lbuf);
                 end if;
             end if;

@@ -608,11 +608,14 @@ def _configure_pm_corr_replay_testbench(lib) -> None:
                 PHASE_ERR_V_CLOCKS  = period,
                 EXPECT_PM_VALID_MIN = 30,
             )
+            tag = stem if len(period_list) == 1 else f"{stem}.p{period}"
             if os.environ.get("DCF77_PM_ACQUIRE_LOG") == "1":
                 cfg["ACQUIRE_LOG_CSV"] = str(
-                    DERIVED_DIR / f"{stem}.pmreplay.p{period}.acquire.csv")
-            name = stem if len(period_list) == 1 else f"{stem}.p{period}"
-            tb.test("pm_smoke").add_config(name=name, generics=cfg)
+                    DERIVED_DIR / f"{tag}.acquire.csv")
+            if os.environ.get("DCF77_PM_TRACK_LOG") == "1":
+                cfg["TRACK_LOG_CSV"] = str(
+                    DERIVED_DIR / f"{tag}.track.csv")
+            tb.test("pm_smoke").add_config(name=tag, generics=cfg)
 
 
 def _read_meta(path) -> dict:
