@@ -138,6 +138,20 @@ package dcf77_pkg is
         pm_time         : dcf77_time_type;            -- PM-decoded time
         pm_time_valid   : std_logic;                  -- PM frame decoded OK
         pm_last_frame   : std_logic_vector(0 to 58);  -- raw PM frame bits
+
+        -- Carrier-PLL snapshots, latched on each pm_valid (= once per
+        -- locked second).  Both are in NCO-offset units (i_state has
+        -- been right-shifted by I_FRAC_BITS internally) so software
+        -- can compare/subtract directly.
+        --   pll_phase_filt : 20-Hz LPF state, signed 29 b
+        --   pll_i_state    : PI integrator >> I_FRAC, signed 28 b
+        --   pll_offset     : current phase_inc_offset (live, not
+        --                    snapshotted -- it's the actual NCO drive,
+        --                    useful for the host's REG_PLL_OFFSET
+        --                    readback)
+        pll_phase_filt  : signed(28 downto 0);
+        pll_i_state     : signed(27 downto 0);
+        pll_offset      : signed(23 downto 0);
     end record;
 
     constant DCF77_STATUS_RESET : dcf77_status_type := (
@@ -167,7 +181,10 @@ package dcf77_pkg is
         pm_lock_qual    => (others => '0'),
         pm_time         => DCF77_TIME_RESET,
         pm_time_valid   => '0',
-        pm_last_frame   => (others => '0')
+        pm_last_frame   => (others => '0'),
+        pll_phase_filt  => (others => '0'),
+        pll_i_state     => (others => '0'),
+        pll_offset      => (others => '0')
     );
 
     ---------------------------------------------------------------------------
@@ -249,6 +266,28 @@ package dcf77_pkg is
     );
 
     ---------------------------------------------------------------------------
+    -- Carrier-PLL software overrides.  Both writes generate a one-cycle
+    -- pulse on the corresponding _wr signal; the carrier_pll latches the
+    -- value immediately on that clk (no phase_err_valid sync, no held-
+    -- override semantics).  Read-back goes through dcf77_status_type and
+    -- always reports the current HW state -- the register IS the
+    -- hardware, no software-side buffering.
+    ---------------------------------------------------------------------------
+    type dcf77_pll_override_type is record
+        offset_wr  : std_logic;                     -- 1-cycle pulse
+        offset_val : signed(23 downto 0);
+        i_state_wr : std_logic;                     -- 1-cycle pulse
+        i_state_val: signed(27 downto 0);
+    end record;
+
+    constant DCF77_PLL_OVERRIDE_RESET : dcf77_pll_override_type := (
+        offset_wr   => '0',
+        offset_val  => (others => '0'),
+        i_state_wr  => '0',
+        i_state_val => (others => '0')
+    );
+
+    ---------------------------------------------------------------------------
     -- AXI4-Lite register map (word index = addr(7 downto 2)).
     ---------------------------------------------------------------------------
     constant REG_CTRL        : natural := 0;   -- 0x00 RW
@@ -271,6 +310,27 @@ package dcf77_pkg is
     constant REG_PM_FLAGS       : natural := 17;  -- 0x44 R   PM-decoded flags
     constant REG_PM_LAST_FRAME0 : natural := 18;  -- 0x48 R   PM frame bits 0..31
     constant REG_PM_LAST_FRAME1 : natural := 19;  -- 0x4C R   PM frame bits 32..58
+    -- Carrier-PLL telemetry & overrides (read snapshot, write = jam).
+    --
+    -- PLL_PHASE_FILT : R-only.  Snapshot of 20-Hz LPF state, signed
+    --                 29 b sign-extended to 32 b.  Sampled on pm_valid.
+    -- PLL_I_STATE    : R/W.
+    --                 R = snapshot of integrator >> I_FRAC_BITS,
+    --                     signed 28 b sign-extended to 32 b.
+    --                 W = jam the integrator with bits[27:0].  The
+    --                     write event itself is the trigger -- the
+    --                     value is latched in carrier_pll and applied
+    --                     on the next phase_err_valid pulse.
+    -- PLL_OFFSET     : R/W.
+    --                 R = current phase_inc_offset (signed 24 b in
+    --                     bits[23:0], sign-extended to 32 b).
+    --                 W = jam the NCO offset with bits[23:0] for one
+    --                     phase_err_valid cycle (PI resumes the cycle
+    --                     after).  Useful for bench testing & for
+    --                     bumping the PLL with a known step.
+    constant REG_PLL_PHASE_FILT : natural := 20;  -- 0x50 R
+    constant REG_PLL_I_STATE    : natural := 21;  -- 0x54 RW
+    constant REG_PLL_OFFSET     : natural := 22;  -- 0x58 RW
 
     ---------------------------------------------------------------------------
     -- 32-b register pack / unpack helpers.  The bit layouts below match the
@@ -343,6 +403,13 @@ package dcf77_pkg is
     -- PM_LAST_FRAME0 / 1: PM frame bits 0..31 / 32..58.
     function pm_last_frame0_to_slv (s : dcf77_status_type) return std_logic_vector;
     function pm_last_frame1_to_slv (s : dcf77_status_type) return std_logic_vector;
+
+    -- PLL_PHASE_FILT register: sign-extended 29-b filt state in bits 31..0.
+    -- PLL_I_STATE    register: sign-extended 28-b integrator in  bits 31..0.
+    -- PLL_OFFSET     register: sign-extended 24-b NCO offset in  bits 31..0.
+    function pll_phase_filt_to_slv (s : dcf77_status_type) return std_logic_vector;
+    function pll_i_state_to_slv    (s : dcf77_status_type) return std_logic_vector;
+    function pll_offset_to_slv     (s : dcf77_status_type) return std_logic_vector;
 
     ---------------------------------------------------------------------------
     -- Helper functions.
@@ -582,6 +649,24 @@ package body dcf77_pkg is
             r(i - 32) := s.pm_last_frame(i);
         end loop;
         return r;
+    end function;
+
+    function pll_phase_filt_to_slv (s : dcf77_status_type) return std_logic_vector is
+    begin
+        -- Sign-extend 29-b signed to 32 b.
+        return std_logic_vector(resize(s.pll_phase_filt, 32));
+    end function;
+
+    function pll_i_state_to_slv (s : dcf77_status_type) return std_logic_vector is
+    begin
+        -- Sign-extend 28-b signed to 32 b.
+        return std_logic_vector(resize(s.pll_i_state, 32));
+    end function;
+
+    function pll_offset_to_slv (s : dcf77_status_type) return std_logic_vector is
+    begin
+        -- Sign-extend 24-b signed to 32 b.
+        return std_logic_vector(resize(s.pll_offset, 32));
     end function;
 
 end package body dcf77_pkg;
