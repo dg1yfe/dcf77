@@ -47,7 +47,21 @@ entity dcf77_frame_dec is
     generic (
         -- false = AM (external minute_mark, START_INDEX = 0)
         -- true  = PM (SIK signature detector internal, START_INDEX = 15)
-        PM_MODE : boolean := false
+        PM_MODE : boolean := false;
+        -- PM-mode SIK signature tolerance.  Max bit errors allowed in
+        -- the 12 non-edge bits of the 16-bit extended signature
+        -- (sec 59 prefix + sec 0..14 = "0_111111111_1_00000").  The 4
+        -- edge bits flanking the two transitions ('0'→'1' at sec59/sec0
+        -- and '1'→'0' at sec9/sec10) ALWAYS require an exact match --
+        -- this protects against off-by-1 false alignments where naive
+        -- T-tolerance would collide with the +1 shift 50 % of the time.
+        --
+        -- Defaults to 1.  At a weak-signal regime of ε≈0.13 bit-error
+        -- per second (= dcf_3_5 in the corpus), this gives ~29 %
+        -- detect-per-minute vs ~12 % at T=0, while the false-positive
+        -- MTBF against random data is ~84 min (vs ~33 min for naive
+        -- T=1, ~55 h for T=0).
+        MM_SIG_T_NON_EDGE : natural := 1
     );
     port (
         clk             : in  std_logic;
@@ -84,10 +98,21 @@ architecture rtl of dcf77_frame_dec is
 
     constant START_INDEX  : bit_index_t := start_index_value;
 
-    -- SIK minute-mark signature in the LSB-input convention: after s0..s14
-    -- have been shifted in, the bottom 15 bits of shift_reg hold
-    -- (s14, s13, ..., s0) = ('0','0','0','0','0','1','1','1','1','1','1','1','1','1','1').
-    constant MM_SIGNATURE : std_logic_vector(14 downto 0) := "111111111100000";
+    -- Edge-protected SIK signature.  Extended to 16 bits including sec
+    -- 59 (= '0' in PM, fixed by spec) as a prefix.  shift_reg position
+    -- ↔ broadcast second (newest = bit_value just shifted in):
+    --
+    --   pos 15: sec 59 = '0'  ──┐
+    --   pos 14: sec 0  = '1'  ──┘  EDGE bits ('0'→'1' transition anchor)
+    --   pos 13..6: sec 1..8 = "11111111"  (non-edge, ≤T errors allowed)
+    --   pos 5 : sec 9  = '1'  ──┐
+    --   pos 4 : sec 10 = '0'  ──┘  EDGE bits ('1'→'0' transition anchor)
+    --   pos 3..0: sec 11..14 = "0000"  (non-edge, shares the same T budget)
+    --
+    -- Off-by-1 alignments always violate >=1 edge bit (independent of
+    -- data bits), so they reject regardless of T.  Off-by-N for N>=2
+    -- has even larger edge violations.  T applies only to symbol
+    -- errors strictly inside the constant-run regions.
 
     type reg_type is record
         shift_reg   : std_logic_vector(42 downto 0);
@@ -141,6 +166,8 @@ begin
     comb : process (all)
         variable v             : reg_type;
         variable pattern_match : std_logic;
+        variable edge_ok       : boolean;
+        variable non_edge_errs : natural range 0 to 12;
         variable mm_eff        : std_logic;
         variable do_decode     : boolean;
         variable frm           : std_logic_vector(0 to 58);
@@ -157,11 +184,27 @@ begin
         v := r;
         do_decode := false;
 
-        -- Pattern match on REGISTERED shift_reg (deliberately one-cycle
-        -- delayed).  This makes the mm_internal pulse non-coincident with
-        -- the bit_valid that completed the signature, which keeps the
-        -- shift / reset logic non-overlapping below.
-        if r.shift_reg(14 downto 0) = MM_SIGNATURE then
+        -- Edge-protected SIK signature comparator on REGISTERED shift_reg
+        -- (deliberately one-cycle delayed so the mm_internal pulse is
+        -- non-coincident with the bit_valid that completed the signature).
+        edge_ok :=     r.shift_reg(15) = '0'   -- sec 59
+                   and r.shift_reg(14) = '1'   -- sec 0
+                   and r.shift_reg(5)  = '1'   -- sec 9
+                   and r.shift_reg(4)  = '0';  -- sec 10
+
+        non_edge_errs := 0;
+        for i in 6 to 13 loop                   -- sec 1..8 expected '1'
+            if r.shift_reg(i) = '0' then
+                non_edge_errs := non_edge_errs + 1;
+            end if;
+        end loop;
+        for i in 0 to 3 loop                    -- sec 11..14 expected '0'
+            if r.shift_reg(i) = '1' then
+                non_edge_errs := non_edge_errs + 1;
+            end if;
+        end loop;
+
+        if edge_ok and non_edge_errs <= MM_SIG_T_NON_EDGE then
             pattern_match := '1';
         else
             pattern_match := '0';
