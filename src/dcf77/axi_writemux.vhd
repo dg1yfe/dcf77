@@ -20,6 +20,12 @@ use work.axi4lite_interface_pkg.all;
 use work.dcf77_pkg.all;
 
 entity axi_writemux is
+    generic (
+        -- See dcf77_axi_lite for full description.  When false, writes
+        -- to the PLL telemetry registers (0x54 / 0x58) return SLVERR
+        -- and the ToPllOverride output stays at reset.
+        WITH_PM_DEBUG : boolean := false
+    );
     port (
         ACLK    : in  std_logic;
         ARESETN : in  std_logic;
@@ -181,16 +187,24 @@ begin
                     -- The carrier_pll latches the value on the
                     -- offset_wr pulse cycle; PI loop resumes from the
                     -- jammed value on the next phase_err_valid.
-                    v.pll.offset_wr  := '1';
-                    v.pll.offset_val := signed(r.wi.data(23 downto 0));
-                    v.bo.resp := AXI_RESPONSE_OKAY;
+                    if WITH_PM_DEBUG then
+                        v.pll.offset_wr  := '1';
+                        v.pll.offset_val := signed(r.wi.data(23 downto 0));
+                        v.bo.resp := AXI_RESPONSE_OKAY;
+                    else
+                        v.bo.resp := AXI_RESPONSE_SLVERR;
+                    end if;
                 when REG_PLL_I_STATE =>
                     -- Write = jam the PI integrator with bits[27:0]
                     -- (in NCO-offset units; carrier_pll shifts left
                     -- by I_FRAC_BITS internally).
-                    v.pll.i_state_wr  := '1';
-                    v.pll.i_state_val := signed(r.wi.data(27 downto 0));
-                    v.bo.resp := AXI_RESPONSE_OKAY;
+                    if WITH_PM_DEBUG then
+                        v.pll.i_state_wr  := '1';
+                        v.pll.i_state_val := signed(r.wi.data(27 downto 0));
+                        v.bo.resp := AXI_RESPONSE_OKAY;
+                    else
+                        v.bo.resp := AXI_RESPONSE_SLVERR;
+                    end if;
                 when others =>
                     v.bo.resp := AXI_RESPONSE_SLVERR;
             end case;

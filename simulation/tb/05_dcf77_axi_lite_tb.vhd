@@ -59,6 +59,9 @@ begin
     aclk <= not aclk after CLK_PERIOD / 2;
 
     dut : entity dcf77.dcf77_axi_lite
+        generic map (
+            WITH_PM_DEBUG => true
+        )
         port map (
             s_axi_aclk    => aclk,
             s_axi_aresetn => aresetn,

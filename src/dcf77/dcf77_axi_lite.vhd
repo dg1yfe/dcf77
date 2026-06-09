@@ -58,7 +58,17 @@ entity dcf77_axi_lite is
         SAMPLE_RATE_HZ: positive := 2000;
         T_HOLD_SEC    : positive := 120;
         T_SEARCH_SEC  : positive := 300;
-        NCO_PHASE_INCR: natural  := 10_399_018
+        NCO_PHASE_INCR: natural  := 10_399_018;
+
+        -- Synthesis switch: include carrier-PLL telemetry / override
+        -- registers and the supporting datapath (snapshots, jam mux).
+        -- When false (default = production):
+        --   * Reads to 0x50/0x54/0x58 return DECERR.
+        --   * Writes to 0x54/0x58 return SLVERR.
+        --   * pll_override held at reset → no jam path.
+        --   * snap_tick tied low → carrier_pll's snapshot registers
+        --     stay at reset and synthesis prunes them.
+        WITH_PM_DEBUG : boolean  := false
     );
     port (
         -- AXI4-Lite slave (system clock = ACLK; matches dcf77_core's clk).
@@ -163,6 +173,9 @@ begin
     -- Read-side decoder                                                  --
     ------------------------------------------------------------------ --
     u_readmux : entity work.axi_readmux
+        generic map (
+            WITH_PM_DEBUG => WITH_PM_DEBUG
+        )
         port map (
             ACLK    => s_axi_aclk,
             ARESETN => s_axi_aresetn,
@@ -181,6 +194,9 @@ begin
     -- Write-side decoder                                                 --
     ------------------------------------------------------------------ --
     u_writemux : entity work.axi_writemux
+        generic map (
+            WITH_PM_DEBUG => WITH_PM_DEBUG
+        )
         port map (
             ACLK    => s_axi_aclk,
             ARESETN => s_axi_aresetn,
@@ -236,7 +252,8 @@ begin
             SAMPLE_RATE_HZ => SAMPLE_RATE_HZ,
             T_HOLD_SEC     => T_HOLD_SEC,
             T_SEARCH_SEC   => T_SEARCH_SEC,
-            NCO_PHASE_INCR => NCO_PHASE_INCR
+            NCO_PHASE_INCR => NCO_PHASE_INCR,
+            WITH_PM_DEBUG  => WITH_PM_DEBUG
         )
         port map (
             clk             => s_axi_aclk,

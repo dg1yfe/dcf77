@@ -58,7 +58,13 @@ entity dcf77_core is
 
         -- NCO frequency increment for 25 b acc @ 250 kS/s mixer tick.
         -- 2^25 * 77500 / 250000 = 10_399_018.6...
-        NCO_PHASE_INCR : natural := 10_399_018
+        NCO_PHASE_INCR : natural := 10_399_018;
+
+        -- See dcf77_axi_lite for full description.  When false, the
+        -- snap_tick and pll_override wiring into carrier_pll is tied
+        -- off (constants); synthesis prunes the snapshot registers
+        -- and the jam mux.
+        WITH_PM_DEBUG  : boolean := false
     );
     port (
         clk       : in  std_logic;
@@ -77,6 +83,8 @@ entity dcf77_core is
         -- dcf77_pll_override_type: one-cycle write strobes from the
         -- AXI writemux on REG_PLL_I_STATE / REG_PLL_OFFSET writes.
         -- Defaulted so older instantiations (TBs) compile unchanged.
+        -- Only effective when WITH_PM_DEBUG=true (otherwise tied off
+        -- below before reaching carrier_pll).
         pll_override : in  dcf77_pll_override_type := DCF77_PLL_OVERRIDE_RESET;
 
         -- Raw phase-error tap: sign(I_iir) * Q_box at boxcar rate.
@@ -195,6 +203,9 @@ architecture rtl of dcf77_core is
     -- status.pll_phase_filt / pll_i_state for AXI readback.
     signal pll_phase_filt_s : signed(POST_W - 1 downto 0);
     signal pll_i_state_s    : signed(NCO_OFFSET_W + 3 downto 0);
+    -- WITH_PM_DEBUG-gated wiring into carrier_pll.
+    signal snap_tick_int    : std_logic;
+    signal pll_override_int : dcf77_pll_override_type;
     -- Signed up/down counter from phase_quality (signal-quality metric).
     constant PQ_COUNTER_W  : positive := 12;
     signal pq_lock_counter : signed(PQ_COUNTER_W - 1 downto 0);
@@ -539,20 +550,25 @@ begin
             phase_err_valid  => phase_for_pll_v,
             phase_inc_offset => nco_phase_inc_offset,
             phase_filt_out   => pll_phase_filt,
-            -- 1-Hz snapshot tick: pm_valid pulses once per locked
-            -- broadcast second from the PM correlator.  When PM hasn't
-            -- locked yet, snapshots stay at their reset value -- soft-
-            -- ware only reads them once the receiver is up.
-            snap_tick        => pm_valid_s,
+            -- Snap + override wiring only active when WITH_PM_DEBUG.
+            -- The carrier_pll's snap/jam paths have port defaults so
+            -- the unused ones synthesise as constant inputs (= the
+            -- snapshot registers + jam mux get pruned).
+            snap_tick        => snap_tick_int,
             phase_filt_snap  => pll_phase_filt_s,
             i_state_snap     => pll_i_state_s,
-            -- AXI-side jam ports (defaults are tied low so 14_pm /
-            -- 16_capture / 07_replay don't have to wire them).
-            offset_wr        => pll_override.offset_wr,
-            offset_val       => pll_override.offset_val,
-            i_state_wr       => pll_override.i_state_wr,
-            i_state_val      => pll_override.i_state_val
+            offset_wr        => pll_override_int.offset_wr,
+            offset_val       => pll_override_int.offset_val,
+            i_state_wr       => pll_override_int.i_state_wr,
+            i_state_val      => pll_override_int.i_state_val
         );
+
+    -- WITH_PM_DEBUG gate: when false, snap_tick = '0' and the
+    -- override is held at reset.  carrier_pll's snapshot registers
+    -- never update; the jam mux always passes the PI-computed value.
+    snap_tick_int    <= pm_valid_s when WITH_PM_DEBUG else '0';
+    pll_override_int <= pll_override when WITH_PM_DEBUG
+                                     else DCF77_PLL_OVERRIDE_RESET;
 
     -- ------------------------------------------------------------------ --
     -- Phase-quality / lock indicator: saturating ±1 counter on the       --

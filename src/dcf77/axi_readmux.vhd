@@ -17,6 +17,12 @@ use work.axi4lite_interface_pkg.all;
 use work.dcf77_pkg.all;
 
 entity axi_readmux is
+    generic (
+        -- See dcf77_axi_lite for full description.  When false, the
+        -- PLL telemetry registers (0x50 / 0x54 / 0x58) return DECERR
+        -- instead of being served from the snapshot fields.
+        WITH_PM_DEBUG : boolean := false
+    );
     port (
         ACLK    : in  std_logic;
         ARESETN : in  std_logic;
@@ -141,9 +147,27 @@ begin
                 when REG_PM_FLAGS       => v.ro.data := pm_flags_to_slv(r.st);
                 when REG_PM_LAST_FRAME0 => v.ro.data := pm_last_frame0_to_slv(r.st);
                 when REG_PM_LAST_FRAME1 => v.ro.data := pm_last_frame1_to_slv(r.st);
-                when REG_PLL_PHASE_FILT => v.ro.data := pll_phase_filt_to_slv(r.st);
-                when REG_PLL_I_STATE    => v.ro.data := pll_i_state_to_slv(r.st);
-                when REG_PLL_OFFSET     => v.ro.data := pll_offset_to_slv(r.st);
+                when REG_PLL_PHASE_FILT =>
+                    if WITH_PM_DEBUG then
+                        v.ro.data := pll_phase_filt_to_slv(r.st);
+                    else
+                        v.ro.data := (others => '0');
+                        v.ro.resp := AXI_RESPONSE_DECERR;
+                    end if;
+                when REG_PLL_I_STATE =>
+                    if WITH_PM_DEBUG then
+                        v.ro.data := pll_i_state_to_slv(r.st);
+                    else
+                        v.ro.data := (others => '0');
+                        v.ro.resp := AXI_RESPONSE_DECERR;
+                    end if;
+                when REG_PLL_OFFSET =>
+                    if WITH_PM_DEBUG then
+                        v.ro.data := pll_offset_to_slv(r.st);
+                    else
+                        v.ro.data := (others => '0');
+                        v.ro.resp := AXI_RESPONSE_DECERR;
+                    end if;
                 when REG_SOFT_IRQ    =>
                     -- Mixed register: bit 0 is the sticky second_tick
                     -- (W1C from the writemux); bits 2..1 mirror per-bit
