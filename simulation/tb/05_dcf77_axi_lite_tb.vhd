@@ -241,8 +241,9 @@ begin
 
             -----------------------------------------------------------------
             elsif run("read_unmapped_decerr") then
-                -- 0x50 is past the last mapped register (PM_LAST_FRAME1 at 0x4C) -> DECERR.
-                axi_read(x"50", rd, AXI_RESPONSE_DECERR);
+                -- 0x5C is past the last mapped register (REG_PLL_OFFSET at
+                -- 0x58) -> DECERR.
+                axi_read(x"5C", rd, AXI_RESPONSE_DECERR);
 
             -----------------------------------------------------------------
             elsif run("pm_registers_reset") then

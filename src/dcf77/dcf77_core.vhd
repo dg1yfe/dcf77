@@ -73,6 +73,12 @@ entity dcf77_core is
         -- CW interferers the PLL doesn't track).  Default '1'.
         env_mode  : in  std_logic := '1';
 
+        -- Carrier-PLL software overrides.  See dcf77_pkg.
+        -- dcf77_pll_override_type: one-cycle write strobes from the
+        -- AXI writemux on REG_PLL_I_STATE / REG_PLL_OFFSET writes.
+        -- Defaulted so older instantiations (TBs) compile unchanged.
+        pll_override : in  dcf77_pll_override_type := DCF77_PLL_OVERRIDE_RESET;
+
         -- Raw phase-error tap: sign(I_iir) * Q_box at boxcar rate.
         -- This is the input to carrier_pll's internal IIR; it carries
         -- the full post-boxcar bandwidth (≈ 1 kHz), suitable for a
@@ -183,8 +189,12 @@ architecture rtl of dcf77_core is
     signal env_v      : std_logic;
 
     -- Carrier-PLL diagnostics + separate phase-quality lock indicator.
-    signal pll_lock        : std_logic;
-    signal pll_phase_filt  : signed(POST_W - 1 downto 0);
+    signal pll_lock         : std_logic;
+    signal pll_phase_filt   : signed(POST_W - 1 downto 0);
+    -- Per-pm_valid PLL snapshots (= 1 Hz when locked).  Wired to
+    -- status.pll_phase_filt / pll_i_state for AXI readback.
+    signal pll_phase_filt_s : signed(POST_W - 1 downto 0);
+    signal pll_i_state_s    : signed(NCO_OFFSET_W + 3 downto 0);
     -- Signed up/down counter from phase_quality (signal-quality metric).
     constant PQ_COUNTER_W  : positive := 12;
     signal pq_lock_counter : signed(PQ_COUNTER_W - 1 downto 0);
@@ -528,7 +538,20 @@ begin
             phase_err        => phase_for_pll,
             phase_err_valid  => phase_for_pll_v,
             phase_inc_offset => nco_phase_inc_offset,
-            phase_filt_out   => pll_phase_filt
+            phase_filt_out   => pll_phase_filt,
+            -- 1-Hz snapshot tick: pm_valid pulses once per locked
+            -- broadcast second from the PM correlator.  When PM hasn't
+            -- locked yet, snapshots stay at their reset value -- soft-
+            -- ware only reads them once the receiver is up.
+            snap_tick        => pm_valid_s,
+            phase_filt_snap  => pll_phase_filt_s,
+            i_state_snap     => pll_i_state_s,
+            -- AXI-side jam ports (defaults are tied low so 14_pm /
+            -- 16_capture / 07_replay don't have to wire them).
+            offset_wr        => pll_override.offset_wr,
+            offset_val       => pll_override.offset_val,
+            i_state_wr       => pll_override.i_state_wr,
+            i_state_val      => pll_override.i_state_val
         );
 
     -- ------------------------------------------------------------------ --
@@ -767,5 +790,8 @@ begin
     status_out.pm_time        <= pm_time_d;
     status_out.pm_time_valid  <= pm_time_v_d;
     status_out.pm_last_frame  <= pm_last_frm;
+    status_out.pll_phase_filt <= pll_phase_filt_s;
+    status_out.pll_i_state    <= pll_i_state_s;
+    status_out.pll_offset     <= nco_phase_inc_offset;
 
 end architecture rtl;

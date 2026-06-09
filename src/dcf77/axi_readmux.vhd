@@ -141,6 +141,9 @@ begin
                 when REG_PM_FLAGS       => v.ro.data := pm_flags_to_slv(r.st);
                 when REG_PM_LAST_FRAME0 => v.ro.data := pm_last_frame0_to_slv(r.st);
                 when REG_PM_LAST_FRAME1 => v.ro.data := pm_last_frame1_to_slv(r.st);
+                when REG_PLL_PHASE_FILT => v.ro.data := pll_phase_filt_to_slv(r.st);
+                when REG_PLL_I_STATE    => v.ro.data := pll_i_state_to_slv(r.st);
+                when REG_PLL_OFFSET     => v.ro.data := pll_offset_to_slv(r.st);
                 when REG_SOFT_IRQ    =>
                     -- Mixed register: bit 0 is the sticky second_tick
                     -- (W1C from the writemux); bits 2..1 mirror per-bit

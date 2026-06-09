@@ -35,6 +35,12 @@ entity axi_writemux is
 
         ToControl : out dcf77_control_type;
 
+        -- Carrier-PLL software overrides.  offset_force_en is level-
+        -- held (= bypass PI loop as long as REG_PLL_OFFSET_FRC[31]
+        -- reads '1'); i_state_jam_en is a one-cycle pulse generated
+        -- on each '1' write to REG_PLL_I_STATE_JAM[31].
+        ToPllOverride : out dcf77_pll_override_type;
+
         -- One-cycle pulse: AXI host wrote '1' to SOFT_IRQ[0].  The
         -- containing axi_lite block uses this to clear its sticky
         -- second_tick flop.
@@ -52,6 +58,7 @@ architecture rtl of axi_writemux is
         bi  : axi4lite_write_response_channel_input_type;
         bo  : axi4lite_write_response_channel_output_type;
         ctrl: dcf77_control_type;
+        pll : dcf77_pll_override_type;
         soft_irq_clear : std_logic;       -- one-cycle pulse
     end record;
 
@@ -81,6 +88,7 @@ architecture rtl of axi_writemux is
         bi   => BI_RESET,
         bo   => BO_RESET,
         ctrl => DCF77_CONTROL_RESET,
+        pll  => DCF77_PLL_OVERRIDE_RESET,
         soft_irq_clear => '0'
     );
 
@@ -92,6 +100,7 @@ begin
     WOutput   <= r.wo;
     BOutput   <= r.bo;
     ToControl <= r.ctrl;
+    ToPllOverride <= r.pll;
     SoftIrqClear <= r.soft_irq_clear;
 
     comb : process (all)
@@ -107,8 +116,10 @@ begin
         -- write decoder below sets it to '1' only on the matching write
         -- transaction, so the registered output is high for exactly one
         -- clock.
-        v.ctrl.soft_reset := '0';
-        v.soft_irq_clear  := '0';
+        v.ctrl.soft_reset    := '0';
+        v.pll.offset_wr      := '0';   -- one-cycle pulses on register write
+        v.pll.i_state_wr     := '0';
+        v.soft_irq_clear     := '0';
 
         -- Register incoming AXI signals.
         v.awi := AWInput;
@@ -164,6 +175,21 @@ begin
                     if r.wi.data(0) = '1' then
                         v.soft_irq_clear := '1';
                     end if;
+                    v.bo.resp := AXI_RESPONSE_OKAY;
+                when REG_PLL_OFFSET =>
+                    -- Write = jam phase_inc_offset with bits[23:0].
+                    -- The carrier_pll latches the value on the
+                    -- offset_wr pulse cycle; PI loop resumes from the
+                    -- jammed value on the next phase_err_valid.
+                    v.pll.offset_wr  := '1';
+                    v.pll.offset_val := signed(r.wi.data(23 downto 0));
+                    v.bo.resp := AXI_RESPONSE_OKAY;
+                when REG_PLL_I_STATE =>
+                    -- Write = jam the PI integrator with bits[27:0]
+                    -- (in NCO-offset units; carrier_pll shifts left
+                    -- by I_FRAC_BITS internally).
+                    v.pll.i_state_wr  := '1';
+                    v.pll.i_state_val := signed(r.wi.data(27 downto 0));
                     v.bo.resp := AXI_RESPONSE_OKAY;
                 when others =>
                     v.bo.resp := AXI_RESPONSE_SLVERR;

@@ -27,6 +27,13 @@
 --   0x44 R    PM_FLAGS        PM-decoded DST/leap flags (layout = FLAGS)
 --   0x48 R    PM_LAST_FRAME0  PM frame bits 0..31
 --   0x4C R    PM_LAST_FRAME1  PM frame bits 32..58
+--   0x50 R    PLL_PHASE_FILT  carrier-PLL LPF state, snapshot, signed 29 b
+--   0x54 R/W  PLL_I_STATE     PI integrator >> I_FRAC, signed 28 b
+--                             R = snapshot (sampled on pm_valid)
+--                             W = jam integrator with bits[27:0]
+--   0x58 R/W  PLL_OFFSET      NCO phase_inc_offset, signed 24 b
+--                             R = live offset
+--                             W = jam offset with bits[23:0]
 -- =========================================================================
 
 library ieee;
@@ -105,8 +112,9 @@ architecture rtl of dcf77_axi_lite is
     signal b_out   : axi4lite_write_response_channel_output_type;
 
     -- Core <-> AXI signals.
-    signal control     : dcf77_control_type;
-    signal status      : dcf77_status_type;
+    signal control      : dcf77_control_type;
+    signal pll_override : dcf77_pll_override_type;
+    signal status       : dcf77_status_type;
 
     -- Sticky second_tick (set on every bit_valid pulse from the core's
     -- bit_det, cleared when the host writes '1' to SOFT_IRQ[0]).
@@ -184,8 +192,9 @@ begin
             BInput   => b_in,
             BOutput  => b_out,
 
-            ToControl    => control,
-            SoftIrqClear => soft_irq_clr
+            ToControl     => control,
+            ToPllOverride => pll_override,
+            SoftIrqClear  => soft_irq_clr
         );
 
     ------------------------------------------------------------------ --
@@ -235,6 +244,7 @@ begin
             in_sample       => adc_sample,
             in_valid        => core_valid,
             env_mode        => control.env_mode,
+            pll_override    => pll_override,
             phase_err_out   => open,
             phase_err_valid => open,
             status_out      => status
