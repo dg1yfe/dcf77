@@ -75,8 +75,37 @@ entity dcf77_carrier_pll is
 
         phase_inc_offset : out signed(OFFSET_WIDTH - 1 downto 0);
 
-        -- Diagnostic output: 20-Hz LPF state.
-        phase_filt_out   : out signed(PHASE_ERR_WIDTH - 1 downto 0)
+        -- Diagnostic output: 20-Hz LPF state (live, not sampled).
+        phase_filt_out   : out signed(PHASE_ERR_WIDTH - 1 downto 0);
+
+        -- Snapshot outputs.  Updated on snap_tick='1' (typically driven
+        -- by pm_valid, = once per locked second).  Software polls these
+        -- via AXI for per-second carrier-state telemetry.
+        --   * phase_filt_snap : current 20-Hz LPF state (1st-order signal).
+        --   * i_state_snap    : PI integrator state, shifted right by
+        --                       I_FRAC_BITS so the units match
+        --                       phase_inc_offset (= NCO phase-increment
+        --                       units, same as i_part contributes).
+        snap_tick        : in  std_logic := '0';
+        phase_filt_snap  : out signed(PHASE_ERR_WIDTH - 1 downto 0);
+        i_state_snap     : out signed(OFFSET_WIDTH + 3 downto 0);
+
+        -- Writable PI overrides.  When the *_en input is '1', the
+        -- corresponding register is forced from the *_val input on the
+        -- next phase_err_valid pulse (PI loop continues to run; the
+        -- jam is a single-cycle preset, not a hold).
+        --   * offset_force_*  : bypass the PI loop entirely, drive
+        --                       phase_inc_offset directly.  Stays
+        --                       forced as long as offset_force_en='1'.
+        --   * i_state_jam_*   : pre-load the integrator (e.g., from a
+        --                       software-side long-term oscillator
+        --                       drift estimate).  i_state_jam_val is
+        --                       in same units as phase_inc_offset; HW
+        --                       shifts left by I_FRAC_BITS internally.
+        offset_force_en  : in  std_logic := '0';
+        offset_force_val : in  signed(OFFSET_WIDTH - 1 downto 0) := (others => '0');
+        i_state_jam_en   : in  std_logic := '0';
+        i_state_jam_val  : in  signed(OFFSET_WIDTH + 3 downto 0) := (others => '0')
     );
 end entity dcf77_carrier_pll;
 
@@ -95,20 +124,29 @@ architecture rtl of dcf77_carrier_pll is
     -- Convenience alias for the phase-error data width.
     constant PE_W     : positive := PHASE_ERR_WIDTH;
 
+    -- i_state expressed in NCO-offset units (= shifted right by
+    -- I_FRAC_BITS).  Both for the read snapshot and the jam-write input.
+    constant ISNAP_W  : positive := OFFSET_WIDTH + 4;
+
     type reg_type is record
-        phase_filt : signed(PE_W - 1 downto 0);
-        i_state    : signed(ISTATE_W - 1 downto 0);
-        offset     : signed(OFFSET_WIDTH - 1 downto 0);
+        phase_filt   : signed(PE_W - 1 downto 0);
+        i_state      : signed(ISTATE_W - 1 downto 0);
+        offset       : signed(OFFSET_WIDTH - 1 downto 0);
+        phase_filt_s : signed(PE_W - 1 downto 0);          -- snapshot
+        i_state_s    : signed(ISNAP_W - 1 downto 0);       -- snapshot (shifted)
     end record;
 
-    constant ZERO_IS : signed(ISTATE_W - 1 downto 0)     := (others => '0');
-    constant ZERO_OFF: signed(OFFSET_WIDTH - 1 downto 0) := (others => '0');
-    constant ZERO_PE : signed(PE_W - 1 downto 0)         := (others => '0');
+    constant ZERO_IS  : signed(ISTATE_W - 1 downto 0)     := (others => '0');
+    constant ZERO_OFF : signed(OFFSET_WIDTH - 1 downto 0) := (others => '0');
+    constant ZERO_PE  : signed(PE_W - 1 downto 0)         := (others => '0');
+    constant ZERO_SN  : signed(ISNAP_W - 1 downto 0)      := (others => '0');
 
     constant R_RESET : reg_type := (
-        phase_filt => ZERO_PE,
-        i_state    => ZERO_IS,
-        offset     => ZERO_OFF
+        phase_filt   => ZERO_PE,
+        i_state      => ZERO_IS,
+        offset       => ZERO_OFF,
+        phase_filt_s => ZERO_PE,
+        i_state_s    => ZERO_SN
     );
 
     signal r, rin : reg_type;
@@ -144,6 +182,8 @@ begin
 
     phase_inc_offset <= r.offset;
     phase_filt_out   <= r.phase_filt;
+    phase_filt_snap  <= r.phase_filt_s;
+    i_state_snap     <= r.i_state_s;
 
     comb : process (all)
         variable v          : reg_type;
@@ -179,12 +219,37 @@ begin
                        + resize(i_step,    ISTATE_W + 1);
             v.i_state := sat_to(i_sum, ISTATE_W);
 
+            -- Optional integrator-state jam: software writes a 28-b
+            -- NCO-offset-units value, HW shifts left by I_FRAC_BITS to
+            -- pre-load the integer part of i_state (fractional zeroed).
+            if i_state_jam_en = '1' then
+                v.i_state := resize(shift_left(
+                                 resize(i_state_jam_val, ISTATE_W),
+                                 I_FRAC_BITS),
+                             ISTATE_W);
+            end if;
+
             -- ===== Proportional path + offset ===========================
             p_path  := shift_right(v.phase_filt, KP_SHIFT);
             i_part  := resize(shift_right(v.i_state, I_FRAC_BITS), SUM_W);
             sum_ext := i_part + resize(p_path, SUM_W);
             v.offset := sat_to(sum_ext, OFFSET_WIDTH);
 
+            -- Optional NCO-offset force: bypass the PI loop entirely
+            -- while offset_force_en='1' (jam-style, held as long as en).
+            if offset_force_en = '1' then
+                v.offset := offset_force_val;
+            end if;
+
+        end if;
+
+        -- Snapshot capture (independent of phase_err_valid -- snap_tick
+        -- is asynchronous to the PI loop's 2 kS/s rate; both i_state
+        -- and phase_filt are slow-varying so a one-cycle skew is fine).
+        if snap_tick = '1' then
+            v.phase_filt_s := r.phase_filt;
+            v.i_state_s    := resize(shift_right(r.i_state, I_FRAC_BITS),
+                                     ISNAP_W);
         end if;
 
         rin <= v;
