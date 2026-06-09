@@ -90,22 +90,27 @@ entity dcf77_carrier_pll is
         phase_filt_snap  : out signed(PHASE_ERR_WIDTH - 1 downto 0);
         i_state_snap     : out signed(OFFSET_WIDTH + 3 downto 0);
 
-        -- Writable PI overrides.  When the *_en input is '1', the
-        -- corresponding register is forced from the *_val input on the
-        -- next phase_err_valid pulse (PI loop continues to run; the
-        -- jam is a single-cycle preset, not a hold).
-        --   * offset_force_*  : bypass the PI loop entirely, drive
-        --                       phase_inc_offset directly.  Stays
-        --                       forced as long as offset_force_en='1'.
-        --   * i_state_jam_*   : pre-load the integrator (e.g., from a
-        --                       software-side long-term oscillator
-        --                       drift estimate).  i_state_jam_val is
-        --                       in same units as phase_inc_offset; HW
-        --                       shifts left by I_FRAC_BITS internally.
-        offset_force_en  : in  std_logic := '0';
-        offset_force_val : in  signed(OFFSET_WIDTH - 1 downto 0) := (others => '0');
-        i_state_jam_en   : in  std_logic := '0';
-        i_state_jam_val  : in  signed(OFFSET_WIDTH + 3 downto 0) := (others => '0')
+        -- Writable PI jams.  On each *_wr='1' clk pulse (driven by
+        -- the AXI writemux on a register write), the corresponding
+        -- internal register is overwritten with *_val.  Jams take
+        -- effect on the same clk (any clk, not gated by
+        -- phase_err_valid -- so AXI writes can't fall between sample
+        -- ticks and be missed).  PI loop resumes normally on the
+        -- next phase_err_valid using the jammed value as its new
+        -- starting point.
+        --   * offset_wr / offset_val
+        --       Jam phase_inc_offset.  Single-cycle effect until
+        --       the next phase_err_valid, then PI overwrites.  Mostly
+        --       useful for bench-bumping the NCO.
+        --   * i_state_wr / i_state_val
+        --       Jam the PI integrator.  i_state_val is in NCO-offset
+        --       units; HW shifts left by I_FRAC_BITS to land in the
+        --       integer part of i_state (fractional zeroed).  PI
+        --       continues to accumulate from there.
+        offset_wr        : in  std_logic := '0';
+        offset_val       : in  signed(OFFSET_WIDTH - 1 downto 0) := (others => '0');
+        i_state_wr       : in  std_logic := '0';
+        i_state_val      : in  signed(OFFSET_WIDTH + 3 downto 0) := (others => '0')
     );
 end entity dcf77_carrier_pll;
 
@@ -219,28 +224,25 @@ begin
                        + resize(i_step,    ISTATE_W + 1);
             v.i_state := sat_to(i_sum, ISTATE_W);
 
-            -- Optional integrator-state jam: software writes a 28-b
-            -- NCO-offset-units value, HW shifts left by I_FRAC_BITS to
-            -- pre-load the integer part of i_state (fractional zeroed).
-            if i_state_jam_en = '1' then
-                v.i_state := resize(shift_left(
-                                 resize(i_state_jam_val, ISTATE_W),
-                                 I_FRAC_BITS),
-                             ISTATE_W);
-            end if;
-
             -- ===== Proportional path + offset ===========================
             p_path  := shift_right(v.phase_filt, KP_SHIFT);
             i_part  := resize(shift_right(v.i_state, I_FRAC_BITS), SUM_W);
             sum_ext := i_part + resize(p_path, SUM_W);
             v.offset := sat_to(sum_ext, OFFSET_WIDTH);
 
-            -- Optional NCO-offset force: bypass the PI loop entirely
-            -- while offset_force_en='1' (jam-style, held as long as en).
-            if offset_force_en = '1' then
-                v.offset := offset_force_val;
-            end if;
+        end if;
 
+        -- AXI write jams.  Applied OUTSIDE the phase_err_valid gate so
+        -- a single-clk pulse from the writemux always lands.  On the
+        -- next phase_err_valid the PI loop continues from the jammed
+        -- state -- the override is one-clk; it doesn't hold.
+        if i_state_wr = '1' then
+            v.i_state := resize(shift_left(resize(i_state_val, ISTATE_W),
+                                           I_FRAC_BITS),
+                                ISTATE_W);
+        end if;
+        if offset_wr = '1' then
+            v.offset := offset_val;
         end if;
 
         -- Snapshot capture (independent of phase_err_valid -- snap_tick
