@@ -57,7 +57,12 @@ entity dcf77_pm_correlator_replay_tb is
         PHASE_ERR_V_CLOCKS  : positive := 62500;
         EXPECT_PM_VALID_MIN : natural := 30;
         ACQUIRE_LOG_CSV     : string  := "";
-        TRACK_LOG_CSV       : string  := ""
+        TRACK_LOG_CSV       : string  := "";
+        -- For noise-reference replays (e.g., a recording de-tuned to a
+        -- signal-free spectrum slice): inverts the assertions to expect
+        -- the correlator to STAY in FILL and emit no pm_valid pulses.
+        -- A PASS here proves the receiver correctly rejects noise.
+        EXPECT_NOISE_REJECT : boolean := false
     );
 end entity;
 
@@ -423,14 +428,28 @@ begin
                          & integer'image(pm_valid_count)
                          & "  pm_mm = " & integer'image(pm_mm_count));
 
-                    check(pm_state_changes >= 1,
-                          "pm_sync_state advanced past FILL (changes = "
-                          & integer'image(pm_state_changes) & ")");
-
-                    check(pm_valid_count >= EXPECT_PM_VALID_MIN,
-                          "at least " & integer'image(EXPECT_PM_VALID_MIN)
-                          & " pm_valid pulses (got "
-                          & integer'image(pm_valid_count) & ")");
+                    if EXPECT_NOISE_REJECT then
+                        -- Noise reference: PASSES iff the correlator
+                        -- correctly STAYS in FILL and emits no pm_valid.
+                        check(pm_state_changes = 0,
+                              "noise reference must stay in FILL "
+                              & "(state changes = "
+                              & integer'image(pm_state_changes) & ")");
+                        check(pm_valid_count = 0,
+                              "noise reference must emit no pm_valid "
+                              & "(got " & integer'image(pm_valid_count)
+                              & ")");
+                    else
+                        check(pm_state_changes >= 1,
+                              "pm_sync_state advanced past FILL "
+                              & "(changes = "
+                              & integer'image(pm_state_changes) & ")");
+                        check(pm_valid_count >= EXPECT_PM_VALID_MIN,
+                              "at least "
+                              & integer'image(EXPECT_PM_VALID_MIN)
+                              & " pm_valid pulses (got "
+                              & integer'image(pm_valid_count) & ")");
+                    end if;
                 end if;
             end if;
         end loop;

@@ -600,6 +600,10 @@ def _configure_pm_corr_replay_testbench(lib) -> None:
         if sample_limit and sample_limit < n_samp:
             n_samp = sample_limit
 
+        # Noise references (de-tuned-spectrum captures) carry "noise"
+        # in the stem and PASS iff the correlator rejects them.
+        is_noise = "noise" in stem
+
         for period in period_list:
             cfg = dict(
                 REPLAY_FILE         = str(pe_bin),
@@ -607,6 +611,7 @@ def _configure_pm_corr_replay_testbench(lib) -> None:
                 PHASE_ERR_V_CLOCKS  = period,
                 EXPECT_PM_VALID_MIN = int(os.environ.get(
                     "DCF77_PM_EXPECT_VALID_MIN", "30")),
+                EXPECT_NOISE_REJECT = is_noise,
             )
             tag = stem if len(period_list) == 1 else f"{stem}.p{period}"
             if os.environ.get("DCF77_PM_ACQUIRE_LOG") == "1":
