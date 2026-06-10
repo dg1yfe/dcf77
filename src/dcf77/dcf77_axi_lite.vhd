@@ -8,10 +8,10 @@
 --
 -- Register map (per dcf77_pkg):
 --   0x00 RW   CTRL         enable, soft_reset, env_mode
---   0x04 R    STATUS       sync_state, time_valid, bit_index, RSSI
---   0x08 R    TIME_HMS     minute, hour
---   0x0C R    DATE         year, month, day, weekday
---   0x10 R    FLAGS        dst_active, dst_announce, leap_announce
+--   0x04 R    STATUS       sync_state, time_valid, pll_lock, anchor_held, bit_index, RSSI
+--   0x08 R    TIME_HMS     minute, hour     -- read latches SHADOW = DATE
+--   0x0C R    DATE         year/month/day/weekday + DST flags packed in bits 29..27
+--   0x10                   reserved (was FLAGS; flags now packed into DATE)
 --   0x14 R    RSSI         16-b magnitude (mirrors STATUS bits 31..16)
 --   0x18 R    LAST_FRAME0  frame bits 0..31
 --   0x1C R    LAST_FRAME1  frame bits 32..58
@@ -19,12 +19,12 @@
 --   0x24 R    NOISE        noise_iir top 16 b
 --   0x28 R    SYNC_DIAG    sync_q / mm_q / cycle_in_min
 --   0x2C R    SOFT_AM         am_soft + mm_soft + sec_index + valid + mm
---   0x30 R    SOFT_PM         pm_soft + sec_index + valid + minute_mark
+--   0x30 R    SOFT_PM         pm_soft + sec_index + valid + mm    -- read latches SHADOW = SOFT_AM
 --   0x34 R/W1C IRQ_FLAG       per-source sticky flags (see IRQ_*_BIT in dcf77_pkg)
 --   0x38 R    PM_STATUS       pm_bit_index + sync_state + time_valid + lock_qual
---   0x3C R    PM_TIME_HMS     PM-decoded HH:MM (layout = TIME_HMS)
---   0x40 R    PM_DATE         PM-decoded year/month/day/weekday (layout = DATE)
---   0x44 R    PM_FLAGS        PM-decoded DST/leap flags (layout = FLAGS)
+--   0x3C R    PM_TIME_HMS     PM-decoded HH:MM (layout = TIME_HMS) -- read latches SHADOW = PM_DATE
+--   0x40 R    PM_DATE         PM-decoded date + flags (layout = DATE)
+--   0x44                   reserved (was PM_FLAGS; flags now packed into PM_DATE)
 --   0x48 R    PM_LAST_FRAME0  PM frame bits 0..31
 --   0x4C R    PM_LAST_FRAME1  PM frame bits 32..58
 -- The 0x30, 0x38-0x4C block is gated by WITH_PM (reads return DECERR
@@ -39,6 +39,16 @@
 --                             W = jam offset with bits[23:0]
 --   0x5C R/W  IRQ_MASK        per-source enable for the `irq` output
 --                             (bit positions match IRQ_FLAG one-for-one)
+--   0x60 R    SHADOW          shared atomic-pair shadow.  Latched from
+--                             dcf77_status_type on the same readmux
+--                             comb cycle that a "primary" register is
+--                             read.  Triggers:
+--                                * SOFT_PM      → SHADOW ← SOFT_AM
+--                                * TIME_HMS     → SHADOW ← DATE
+--                                * PM_TIME_HMS  → SHADOW ← PM_DATE
+--                             Lets the host obtain self-consistent
+--                             AM+PM LLR pairs / TIME+DATE+flags
+--                             snapshots without race retries.
 --
 -- Interrupt: a level-sensitive `irq` output goes high while any
 -- unmasked IRQ_FLAG bit is set (OR(IRQ_FLAG & IRQ_MASK)).  Hardware

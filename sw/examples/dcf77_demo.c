@@ -68,7 +68,14 @@ static void handle_second_tick(dcf77_handle_t *dcf, dcf77_mld_t *mld,
                                uint8_t *last_sec)
 {
     dcf77_soft_metrics_t s;
-    if (!dcf77_read_soft(dcf, &s)) {
+    /* Prefer the atomic pair-read when PM is present: the SHADOW
+     * register guarantees the AM and PM LLRs are from the same
+     * readmux comb cycle, so the MLD never feeds on a mismatched
+     * second. */
+    bool ok = dcf->pm_present
+            ? dcf77_read_soft_atomic(dcf, &s)
+            : dcf77_read_soft(dcf, &s);
+    if (!ok) {
         return;
     }
 
@@ -140,13 +147,15 @@ int main(void)
         /* Surface HW-decoded times when they pass parity. */
         if (flags & DCF77_IRQ_PM_TIME_VALID_BIT) {
             dcf77_time_t ht;
-            if (dcf77_read_pm_time(&dcf, &ht)) {
+            /* Atomic variant pairs PM_TIME_HMS with PM_DATE through
+             * the SHADOW latch so the date and flags can't drift. */
+            if (dcf77_read_pm_time_atomic(&dcf, &ht)) {
                 print_time(&ht, DCF77_SOURCE_PM);
             }
         }
         if (flags & DCF77_IRQ_AM_TIME_VALID_BIT) {
             dcf77_time_t ht;
-            if (dcf77_read_am_time(&dcf, &ht)) {
+            if (dcf77_read_am_time_atomic(&dcf, &ht)) {
                 print_time(&ht, DCF77_SOURCE_AM);
             }
         }

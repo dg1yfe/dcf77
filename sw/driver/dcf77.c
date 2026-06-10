@@ -70,7 +70,6 @@ void dcf77_enable(const dcf77_handle_t *h, bool en)
 
 void dcf77_unpack_time(uint32_t time_hms,
                        uint32_t date,
-                       uint32_t flags,
                        dcf77_source_t src,
                        dcf77_time_t *t)
 {
@@ -80,9 +79,9 @@ void dcf77_unpack_time(uint32_t time_hms,
     t->month         = (uint8_t)((date     >>  8) & 0x0Fu);
     t->day           = (uint8_t)((date     >> 16) & 0x1Fu);
     t->weekday       = (uint8_t)((date     >> 24) & 0x07u);
-    t->dst_active    =  (flags        & 1u) != 0u;
-    t->dst_announce  = ((flags >> 1)  & 1u) != 0u;
-    t->leap_announce = ((flags >> 2)  & 1u) != 0u;
+    t->dst_active    = (date & DCF77_DATE_DST_ACTIVE_BIT)    != 0u;
+    t->dst_announce  = (date & DCF77_DATE_DST_ANNOUNCE_BIT)  != 0u;
+    t->leap_announce = (date & DCF77_DATE_LEAP_ANNOUNCE_BIT) != 0u;
     t->source        = src;
 }
 
@@ -92,10 +91,27 @@ bool dcf77_read_am_time(const dcf77_handle_t *h, dcf77_time_t *t)
     if ((status & DCF77_STATUS_TIME_VALID_BIT) == 0u) {
         return false;
     }
+    /* Two non-atomic reads.  The race window between them is tiny
+     * (TIME and DATE only update on the same frame_dec decode trigger,
+     * once per minute) but callers needing strict atomicity should
+     * use dcf77_read_am_time_atomic(). */
     dcf77_unpack_time(reg_read(h, DCF77_REG_TIME_HMS),
                       reg_read(h, DCF77_REG_DATE),
-                      reg_read(h, DCF77_REG_FLAGS),
                       DCF77_SOURCE_AM, t);
+    return true;
+}
+
+bool dcf77_read_am_time_atomic(const dcf77_handle_t *h, dcf77_time_t *t)
+{
+    uint32_t status = reg_read(h, DCF77_REG_STATUS);
+    if ((status & DCF77_STATUS_TIME_VALID_BIT) == 0u) {
+        return false;
+    }
+    /* TIME_HMS read latches the shared shadow with DATE from the same
+     * readmux comb cycle; the SHADOW read returns the paired value. */
+    uint32_t time_hms = reg_read(h, DCF77_REG_TIME_HMS);
+    uint32_t date     = reg_read(h, DCF77_REG_SHADOW);
+    dcf77_unpack_time(time_hms, date, DCF77_SOURCE_AM, t);
     return true;
 }
 
@@ -110,8 +126,22 @@ bool dcf77_read_pm_time(const dcf77_handle_t *h, dcf77_time_t *t)
     }
     dcf77_unpack_time(reg_read(h, DCF77_REG_PM_TIME_HMS),
                       reg_read(h, DCF77_REG_PM_DATE),
-                      reg_read(h, DCF77_REG_PM_FLAGS),
                       DCF77_SOURCE_PM, t);
+    return true;
+}
+
+bool dcf77_read_pm_time_atomic(const dcf77_handle_t *h, dcf77_time_t *t)
+{
+    if (!h->pm_present) {
+        return false;
+    }
+    uint32_t pm_status = reg_read(h, DCF77_REG_PM_STATUS);
+    if ((pm_status & (1u << 8)) == 0u) {
+        return false;
+    }
+    uint32_t pm_time = reg_read(h, DCF77_REG_PM_TIME_HMS);
+    uint32_t pm_date = reg_read(h, DCF77_REG_SHADOW);
+    dcf77_unpack_time(pm_time, pm_date, DCF77_SOURCE_PM, t);
     return true;
 }
 
@@ -189,6 +219,22 @@ uint32_t dcf77_irq_get_mask(const dcf77_handle_t *h)
 void dcf77_irq_set_mask(const dcf77_handle_t *h, uint32_t mask)
 {
     reg_write(h, DCF77_REG_IRQ_MASK, mask);
+}
+
+bool dcf77_read_soft_atomic(const dcf77_handle_t *h,
+                            dcf77_soft_metrics_t *s)
+{
+    if (!h->pm_present) {
+        return false;
+    }
+    /* SOFT_PM read latches SOFT_AM into the shared shadow on the same
+     * readmux comb cycle.  Subsequent SHADOW read returns the paired
+     * SOFT_AM value. */
+    uint32_t soft_pm = reg_read(h, DCF77_REG_SOFT_PM);
+    uint32_t soft_am = reg_read(h, DCF77_REG_SHADOW);
+    dcf77_unpack_soft_pm(soft_pm, s);
+    dcf77_unpack_soft_am(soft_am, s);
+    return s->pm_valid || s->am_valid;
 }
 
 void dcf77_unpack_soft_pm(uint32_t soft_pm, dcf77_soft_metrics_t *s)

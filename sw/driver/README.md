@@ -63,6 +63,31 @@ for (;;) {
 }
 ```
 
+### Atomic-pair reads
+
+The hardware exposes a shared `SHADOW` register (0x60) that captures
+the "secondary" of a paired field group at the same readmux cycle a
+"primary" read returns. Use the `_atomic` variants when consistency
+matters:
+
+```c
+/* AM + PM LLR pair, guaranteed from the same status snapshot */
+dcf77_soft_metrics_t s;
+dcf77_read_soft_atomic(&h, &s);
+
+/* AM time triple (TIME + DATE-with-flags) read atomically */
+dcf77_time_t t;
+dcf77_read_am_time_atomic(&h, &t);
+
+/* Same for PM */
+dcf77_read_pm_time_atomic(&h, &t);
+```
+
+The DST / leap-announce flags now live in `DATE` bits 29..27
+(`DCF77_DATE_*_BIT`); the standalone `FLAGS` register has been
+removed in favour of the packed layout, which makes the time triple
+a true pair.
+
 ## Capability detection
 
 `dcf77_init` reads `STATUS` once and stores two bits:

@@ -143,14 +143,15 @@ static void test_ctrl(void)
 static void test_unpack_time(void)
 {
     printf("test_unpack_time\n");
-    /* TIME_HMS bit layout: [5:0] minute, [12:8] hour                 */
-    /* DATE    : [7:0] year, [11:8] month, [20:16] day, [26:24] wday  */
-    /* FLAGS   : [0] dst, [1] dst_ann, [2] leap_ann                    */
+    /* TIME_HMS : [5:0] minute, [12:8] hour
+     * DATE     : [7:0] year, [11:8] month, [20:16] day, [26:24] weekday,
+     *            [27] dst_active, [28] dst_announce, [29] leap_announce.
+     * FLAGS register no longer exists. */
     uint32_t time_hms = (0x3u << 8) | 0x2Au;            /* hour=3, minute=42 */
     uint32_t date     = (0x5u << 24) | (0x15u << 16) | (0x6u << 8) | 0x18u;
-    uint32_t flags    = 0x5u;                            /* dst + leap_ann */
+    date |= DCF77_DATE_DST_ACTIVE_BIT | DCF77_DATE_LEAP_ANNOUNCE_BIT;
     dcf77_time_t t;
-    dcf77_unpack_time(time_hms, date, flags, DCF77_SOURCE_PM, &t);
+    dcf77_unpack_time(time_hms, date, DCF77_SOURCE_PM, &t);
     EXPECT_EQ_INT(t.minute, 42);
     EXPECT_EQ_INT(t.hour, 3);
     EXPECT_EQ_INT(t.year, 0x18);
@@ -161,6 +162,54 @@ static void test_unpack_time(void)
     EXPECT(!t.dst_announce);
     EXPECT(t.leap_announce);
     EXPECT(t.source == DCF77_SOURCE_PM);
+}
+
+static void test_atomic_reads(void)
+{
+    printf("test_atomic_reads\n");
+    clear_regs();
+    fake_regs[DCF77_REG_STATUS / 4] =
+        DCF77_STATUS_PM_PRESENT_BIT | DCF77_STATUS_TIME_VALID_BIT;
+
+    /* Plant TIME_HMS, DATE+packed flags, SOFT_AM, SOFT_PM. */
+    fake_regs[DCF77_REG_TIME_HMS / 4] = (0x9u << 8) | 0x1Eu;   /* 09:30 */
+    fake_regs[DCF77_REG_DATE / 4] =
+        (0x3u << 24) | (0x15u << 16) | (0x6u << 8) | 0x18u
+        | DCF77_DATE_DST_ACTIVE_BIT;
+    fake_regs[DCF77_REG_SOFT_AM / 4] =
+        ((uint32_t)42u << 24) | (1u << 30) | 0x0FFu;          /* +255, valid */
+    fake_regs[DCF77_REG_SOFT_PM / 4] =
+        42u | ((uint32_t)0x100u << 6) | (1u << 30);           /* +256, valid */
+
+    /* Note: the host-test fake register file doesn't model the
+     * readmux's shadow latch (that's pure HW logic).  The driver's
+     * *_atomic helpers will read SHADOW back from fake_regs[SHADOW/4],
+     * which the test plants directly to simulate the latched value. */
+
+    /* Atomic time-pair: TIME_HMS read latches DATE into SHADOW. */
+    fake_regs[DCF77_REG_SHADOW / 4] = fake_regs[DCF77_REG_DATE / 4];
+
+    dcf77_handle_t h;
+    dcf77_init(&h, FAKE_BASE);
+
+    dcf77_time_t t = {0};
+    EXPECT(dcf77_read_am_time_atomic(&h, &t));
+    EXPECT_EQ_INT(t.minute, 30);
+    EXPECT_EQ_INT(t.hour,   9);
+    EXPECT_EQ_INT(t.day,    0x15);
+    EXPECT(t.dst_active);
+    EXPECT(t.source == DCF77_SOURCE_AM);
+
+    /* Atomic soft-pair: SOFT_PM read latches SOFT_AM into SHADOW. */
+    fake_regs[DCF77_REG_SHADOW / 4] = fake_regs[DCF77_REG_SOFT_AM / 4];
+
+    dcf77_soft_metrics_t s = {0};
+    EXPECT(dcf77_read_soft_atomic(&h, &s));
+    EXPECT_EQ_INT(s.sec_index, 42);
+    EXPECT_EQ_INT(s.pm_soft,   256);
+    EXPECT_EQ_INT(s.am_soft,   255);
+    EXPECT(s.pm_valid);
+    EXPECT(s.am_valid);
 }
 
 static void test_unpack_soft_pm(void)
@@ -394,6 +443,7 @@ int main(void)
     test_pll_gating();
     test_read_am_frame();
     test_irq_access();
+    test_atomic_reads();
 
     if (fails == 0) {
         printf("\nAll driver unit tests passed.\n");

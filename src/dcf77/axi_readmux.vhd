@@ -57,6 +57,16 @@ architecture rtl of axi_readmux is
         ro  : axi4lite_read_data_channel_output_type;
         st  : dcf77_status_type;
         ct  : dcf77_control_type;
+        -- Shared shadow register, latched by a defined set of
+        -- "primary" register reads (see REG_SHADOW comment in
+        -- dcf77_pkg).  Sourced from r.st on the same comb cycle the
+        -- primary's data is returned, so both values bit-for-bit
+        -- pair to the same status snapshot.  Content's bit layout
+        -- depends on which primary just triggered the latch:
+        --   * SOFT_PM      → shadow holds soft_am_to_slv(status)
+        --   * TIME_HMS     → shadow holds date_to_slv(status)
+        --   * PM_TIME_HMS  → shadow holds pm_date_to_slv(status)
+        shadow : std_logic_vector(31 downto 0);
     end record;
 
     constant ARI_RESET : axi4lite_address_channel_input_type := (
@@ -78,7 +88,8 @@ architecture rtl of axi_readmux is
         ri  => RI_RESET,
         ro  => RO_RESET,
         st  => DCF77_STATUS_RESET,
-        ct  => DCF77_CONTROL_RESET
+        ct  => DCF77_CONTROL_RESET,
+        shadow => (others => '0')
     );
 
     signal r, rin : rmux_reg_type;
@@ -129,9 +140,13 @@ begin
                     -- Synthesis-time capability bits (constant per build).
                     if WITH_PM       then v.ro.data(REG_STATUS_PM_PRESENT_BIT)       := '1'; end if;
                     if WITH_PM_DEBUG then v.ro.data(REG_STATUS_PM_DEBUG_PRESENT_BIT) := '1'; end if;
-                when REG_TIME_HMS    => v.ro.data := time_hms_to_slv(r.st);
+                when REG_TIME_HMS =>
+                    v.ro.data := time_hms_to_slv(r.st);
+                    -- Atomic-pair side effect: snapshot the AM date+flags
+                    -- word into the shared shadow so a follow-up SHADOW
+                    -- read returns a value paired to this exact TIME read.
+                    v.shadow  := date_to_slv(r.st);
                 when REG_DATE        => v.ro.data := date_to_slv(r.st);
-                when REG_FLAGS       => v.ro.data := flags_to_slv(r.st);
                 when REG_RSSI        =>
                     v.ro.data := (31 downto 16 => std_logic_vector(r.st.rssi),
                                   others => '0');
@@ -148,19 +163,37 @@ begin
                 when REG_SYNC_DIAG   => v.ro.data := sync_diag_to_slv(r.st);
                 when REG_SOFT_AM     => v.ro.data := soft_am_to_slv(r.st);
                 when REG_SOFT_PM =>
-                    if WITH_PM then v.ro.data := soft_pm_to_slv(r.st);
-                    else v.ro.data := (others => '0'); v.ro.resp := AXI_RESPONSE_DECERR; end if;
+                    if WITH_PM then
+                        v.ro.data := soft_pm_to_slv(r.st);
+                        -- Atomic-pair side effect: snapshot SOFT_AM from
+                        -- the same status record so a follow-up SHADOW
+                        -- read returns a value paired to this PM read.
+                        v.shadow := soft_am_to_slv(r.st);
+                    else
+                        v.ro.data := (others => '0');
+                        v.ro.resp := AXI_RESPONSE_DECERR;
+                    end if;
+                when REG_SHADOW =>
+                    -- Return the shadow value latched by the most
+                    -- recent triggering primary read.  Independent of
+                    -- WITH_PM (the shadow itself is just 32 flops; if
+                    -- only the AM-side triggers ever fire, it's still
+                    -- meaningful).
+                    v.ro.data := r.shadow;
                 when REG_PM_STATUS =>
                     if WITH_PM then v.ro.data := pm_status_to_slv(r.st);
                     else v.ro.data := (others => '0'); v.ro.resp := AXI_RESPONSE_DECERR; end if;
                 when REG_PM_TIME_HMS =>
-                    if WITH_PM then v.ro.data := pm_time_hms_to_slv(r.st);
-                    else v.ro.data := (others => '0'); v.ro.resp := AXI_RESPONSE_DECERR; end if;
+                    if WITH_PM then
+                        v.ro.data := pm_time_hms_to_slv(r.st);
+                        -- Atomic-pair side effect for the PM time/date.
+                        v.shadow := pm_date_to_slv(r.st);
+                    else
+                        v.ro.data := (others => '0');
+                        v.ro.resp := AXI_RESPONSE_DECERR;
+                    end if;
                 when REG_PM_DATE =>
                     if WITH_PM then v.ro.data := pm_date_to_slv(r.st);
-                    else v.ro.data := (others => '0'); v.ro.resp := AXI_RESPONSE_DECERR; end if;
-                when REG_PM_FLAGS =>
-                    if WITH_PM then v.ro.data := pm_flags_to_slv(r.st);
                     else v.ro.data := (others => '0'); v.ro.resp := AXI_RESPONSE_DECERR; end if;
                 when REG_PM_LAST_FRAME0 =>
                     if WITH_PM then v.ro.data := pm_last_frame0_to_slv(r.st);

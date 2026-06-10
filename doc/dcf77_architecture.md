@@ -156,9 +156,9 @@ where the matched filter still has its full ~27 dB despreading gain.
 | ------ | ----- | ----------------- | ------------- | ------------------------------------------------------------------------ |
 | 0x00   | RW    | CTRL              | —             | enable, soft_reset, env_mode                                              |
 | 0x04   | RO    | STATUS            | —             | sync_state, time_valid, PM_PRESENT, PM_DEBUG_PRESENT, pll_lock, anchor_held, bit_index, RSSI |
-| 0x08   | RO    | TIME_HMS          | —             | AM-decoded minute, hour                                                   |
-| 0x0C   | RO    | DATE              | —             | AM-decoded year, month, day, weekday                                      |
-| 0x10   | RO    | FLAGS             | —             | AM-decoded DST/leap flags                                                 |
+| 0x08   | RO    | TIME_HMS          | —             | AM-decoded minute, hour. **Read latches SHADOW = DATE.**                  |
+| 0x0C   | RO    | DATE              | —             | AM-decoded year/month/day/weekday + DST/leap flags packed in bits 29..27  |
+| 0x10   | —     | _reserved_        | —             | Former FLAGS; flags packed into DATE. DECERR on read.                     |
 | 0x14   | RO    | RSSI              | —             | env_max top 16 b                                                          |
 | 0x18   | RO    | LAST_FRAME0       | —             | AM raw frame bits 0..31                                                   |
 | 0x1C   | RO    | LAST_FRAME1       | —             | AM raw frame bits 32..58                                                  |
@@ -166,22 +166,23 @@ where the matched filter still has its full ~27 dB despreading gain.
 | 0x24   | RO    | NOISE             | —             | noise-MAD IIR top 16 b                                                    |
 | 0x28   | RO    | SYNC_DIAG         | —             | sync_q, mm_q, cycle_in_min                                                |
 | 0x2C   | RO    | SOFT_AM           | —             | AM bit LLR (12 b signed) + per-bit flags                                  |
-| 0x30   | RO    | **SOFT_PM**       | WITH_PM       | PM bit LLR (12 b signed) + sec_index + valid + minute_mark                |
+| 0x30   | RO    | **SOFT_PM**       | WITH_PM       | PM bit LLR + sec_index + valid + minute_mark. **Read latches SHADOW = SOFT_AM.** |
 | 0x34   | R/W1C | **IRQ_FLAG**      | —             | Per-source sticky interrupt flags (see §4.1)                              |
 | 0x38   | RO    | **PM_STATUS**     | WITH_PM       | pm_bit_index, pm_sync_state, pm_time_valid, pm_lock_qual                  |
-| 0x3C   | RO    | **PM_TIME_HMS**   | WITH_PM       | PM-decoded minute, hour                                                   |
-| 0x40   | RO    | **PM_DATE**       | WITH_PM       | PM-decoded year, month, day, weekday                                      |
-| 0x44   | RO    | **PM_FLAGS**      | WITH_PM       | PM-decoded DST/leap flags                                                 |
+| 0x3C   | RO    | **PM_TIME_HMS**   | WITH_PM       | PM-decoded minute, hour. **Read latches SHADOW = PM_DATE.**               |
+| 0x40   | RO    | **PM_DATE**       | WITH_PM       | PM-decoded year/month/day/weekday + DST/leap flags (layout = DATE)        |
+| 0x44   | —     | _reserved_        | WITH_PM       | Former PM_FLAGS; flags packed into PM_DATE. DECERR on read.               |
 | 0x48   | RO    | **PM_LAST_FRAME0**| WITH_PM       | PM raw frame bits 0..31                                                   |
 | 0x4C   | RO    | **PM_LAST_FRAME1**| WITH_PM       | PM raw frame bits 32..58                                                  |
 | 0x50   | RO    | **PLL_PHASE_FILT**| WITH_PM_DEBUG | Carrier-PLL LPF state, signed 29 b (snapshot)                             |
 | 0x54   | RW    | **PLL_I_STATE**   | WITH_PM_DEBUG | Carrier-PLL integrator state (jam-write)                                  |
 | 0x58   | RW    | **PLL_OFFSET**    | WITH_PM_DEBUG | NCO `phase_inc_offset` (jam-write)                                        |
 | 0x5C   | RW    | **IRQ_MASK**      | —             | Per-source enable for the `irq` output line (see §4.1)                    |
+| 0x60   | RO    | **SHADOW**        | —             | Shared atomic-pair shadow. Latched by SOFT_PM / TIME_HMS / PM_TIME_HMS reads (see §4.2) |
 
 Writes to read-only offsets return **SLVERR**. Reads at unmapped or
 gate-disabled offsets return **DECERR**. Reads/writes at offsets ≥
-`0x60` return DECERR.
+`0x64` return DECERR.
 
 ### 4.1 Interrupt registers (IRQ_FLAG / IRQ_MASK)
 
@@ -235,6 +236,51 @@ one-clock jam pulse into the carrier PLL's PI integrator (or NCO
 offset). Reads sample the live HW value. Useful for forcing a coarse
 acquisition (write a known offset) or for observing the loop response
 to a step.
+
+### 4.2 Atomic-pair reads via SHADOW
+
+Several status fields naturally come in pairs that must be read
+self-consistently — AM and PM LLRs that belong to the same broadcast
+second, or the time / date fields that update atomically inside
+`frame_dec`. The host can't read two AXI registers in a single bus
+cycle, so a naïve sequence can straddle a status update and emit a
+half-stale pair.
+
+The `SHADOW` register at 0x60 solves this with a single 32-b flop
+that the readmux latches as a side effect of reading a "primary"
+register. The latched value comes from the **same** `dcf77_status_type`
+snapshot that the primary read returned, so the pair is bit-for-bit
+coherent:
+
+| Primary read   | Latches SHADOW with                       |
+| -------------- | ----------------------------------------- |
+| `SOFT_PM`      | `SOFT_AM` (paired LLRs at the PM-read instant) |
+| `TIME_HMS`     | `DATE` (paired AM time triple)            |
+| `PM_TIME_HMS`  | `PM_DATE` (paired PM time triple)         |
+
+Other register reads leave `SHADOW` unchanged. The shadow's bit
+layout therefore matches whichever secondary's pack helper just ran;
+software interprets it knowing which primary it just read.
+
+Recommended host pattern (driver helpers do this for you):
+
+```c
+/* Atomic AM+PM LLR pair */
+uint32_t soft_pm = read(SOFT_PM);   /* HW latches SHADOW = SOFT_AM */
+uint32_t soft_am = read(SHADOW);    /* paired with the SOFT_PM read */
+
+/* Atomic AM time triple */
+uint32_t time_hms = read(TIME_HMS); /* HW latches SHADOW = DATE */
+uint32_t date     = read(SHADOW);   /* paired with the TIME_HMS read */
+/* date carries flags in bits 29..27; no separate FLAGS read needed */
+```
+
+Note: the standalone `FLAGS` (0x10) and `PM_FLAGS` (0x44) registers
+were removed; the DST / leap-announce flags are packed into the same
+`DATE` / `PM_DATE` word at bits 29..27. This is what makes the time
+triple a true pair rather than a triple.
+
+HW cost: 32 flops (one shadow word) + ~5 LUTs of decode.
 
 ---
 

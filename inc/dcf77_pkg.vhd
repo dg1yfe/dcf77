@@ -296,8 +296,13 @@ package dcf77_pkg is
     constant REG_CTRL        : natural := 0;   -- 0x00 RW
     constant REG_STATUS      : natural := 1;   -- 0x04 R
     constant REG_TIME_HMS    : natural := 2;   -- 0x08 R
+    -- DATE register now carries the DST / leap-announce flags too --
+    -- they live in the previously-reserved bits 29..27 (see the
+    -- REG_DATE_*_BIT constants below).  The dedicated FLAGS register
+    -- at 0x10 was removed.
     constant REG_DATE        : natural := 3;   -- 0x0C R
-    constant REG_FLAGS       : natural := 4;   -- 0x10 R
+    -- 0x10: previously REG_FLAGS; freed by packing flags into REG_DATE.
+    -- Reads return DECERR; reserved for future use.
     constant REG_RSSI        : natural := 5;   -- 0x14 R   env_max top 16 b
     constant REG_LAST_FRAME0 : natural := 6;   -- 0x18 R
     constant REG_LAST_FRAME1 : natural := 7;   -- 0x1C R
@@ -313,8 +318,11 @@ package dcf77_pkg is
     constant REG_IRQ_FLAG       : natural := 13;  -- 0x34 R/W1C interrupt sources
     constant REG_PM_STATUS      : natural := 14;  -- 0x38 R   PM sync/lock diagnostics
     constant REG_PM_TIME_HMS    : natural := 15;  -- 0x3C R   PM-decoded HH:MM
-    constant REG_PM_DATE        : natural := 16;  -- 0x40 R   PM-decoded date
-    constant REG_PM_FLAGS       : natural := 17;  -- 0x44 R   PM-decoded flags
+    -- PM_DATE carries the PM-decoded flags in bits 29..27 (same layout
+    -- as REG_DATE).  The dedicated PM_FLAGS register at 0x44 was
+    -- removed.
+    constant REG_PM_DATE        : natural := 16;  -- 0x40 R   PM-decoded date + flags
+    -- 0x44: previously REG_PM_FLAGS; freed by packing flags into REG_PM_DATE.
     constant REG_PM_LAST_FRAME0 : natural := 18;  -- 0x48 R   PM frame bits 0..31
     constant REG_PM_LAST_FRAME1 : natural := 19;  -- 0x4C R   PM frame bits 32..58
     -- Carrier-PLL telemetry & overrides (read snapshot, write = jam).
@@ -341,6 +349,19 @@ package dcf77_pkg is
     -- IRQ_MASK: per-bit enable for the irq output line.  Bit positions
     -- match REG_IRQ_FLAG one-for-one.  Reset value is 0 → host opts in.
     constant REG_IRQ_MASK       : natural := 23;  -- 0x5C RW
+    -- SHADOW: a single shared shadow register that captures the
+    -- "secondary" of a multi-register field group at the same readmux
+    -- comb cycle as its "primary" register read.  This gives the host
+    -- an atomic pair-read of related fields without having to worry
+    -- about a status update straddling the two AXI cycles.  Triggers:
+    --   * read REG_SOFT_PM     → shadow ← soft_am_to_slv(status)
+    --   * read REG_TIME_HMS    → shadow ← date_to_slv(status)
+    --   * read REG_PM_TIME_HMS → shadow ← pm_date_to_slv(status)
+    -- Other reads leave the shadow unchanged.  The shadow's bit
+    -- layout therefore matches whichever secondary's pack helper
+    -- just ran; software interprets it knowing which primary was
+    -- read.  Reset value 0.
+    constant REG_SHADOW         : natural := 24;  -- 0x60 R
 
     ---------------------------------------------------------------------------
     -- Interrupt source bit positions for REG_IRQ_FLAG and REG_IRQ_MASK.
@@ -408,11 +429,21 @@ package dcf77_pkg is
     -- TIME_HMS register: bits 5..0 minute, 12..8 hour.
     function time_hms_to_slv (s : dcf77_status_type) return std_logic_vector;
 
-    -- DATE register: 7..0 year, 11..8 month, 20..16 day, 26..24 weekday.
+    -- DATE register: combines the BCD-decoded date fields with the
+    -- DST / leap flags so the entire AM-decoded date+flags state
+    -- fits in a single 32-b word.  Layout:
+    --   [7:0]    year
+    --   [11:8]   month
+    --   [20:16]  day
+    --   [26:24]  weekday
+    --   [27]     dst_active
+    --   [28]     dst_announce
+    --   [29]     leap_announce
+    --   reserved bits read as 0.
+    constant REG_DATE_DST_ACTIVE_BIT    : natural := 27;
+    constant REG_DATE_DST_ANNOUNCE_BIT  : natural := 28;
+    constant REG_DATE_LEAP_ANNOUNCE_BIT : natural := 29;
     function date_to_slv (s : dcf77_status_type) return std_logic_vector;
-
-    -- FLAGS register: bit 0 dst_active, bit 1 dst_announce, bit 2 leap_announce.
-    function flags_to_slv (s : dcf77_status_type) return std_logic_vector;
 
     -- LAST_FRAME 0 / 1: frame bits 0..31 / 32..58.
     function last_frame0_to_slv (s : dcf77_status_type) return std_logic_vector;
@@ -448,11 +479,12 @@ package dcf77_pkg is
     --   [31:16]  pm_lock_qual   (slow IIR of |pm_soft|)
     function pm_status_to_slv (s : dcf77_status_type) return std_logic_vector;
 
-    -- PM_TIME_HMS / PM_DATE / PM_FLAGS: same layouts as TIME_HMS / DATE /
-    -- FLAGS but populated from the PM-side decoded time.
+    -- PM_TIME_HMS / PM_DATE: same layouts as TIME_HMS / DATE (the
+    -- packed date+flags word) but populated from the PM-side decoded
+    -- time.  The dedicated PM_FLAGS register was removed; PM flags
+    -- live in PM_DATE bits 29..27 just like the AM side.
     function pm_time_hms_to_slv (s : dcf77_status_type) return std_logic_vector;
     function pm_date_to_slv     (s : dcf77_status_type) return std_logic_vector;
-    function pm_flags_to_slv    (s : dcf77_status_type) return std_logic_vector;
 
     -- PM_LAST_FRAME0 / 1: PM frame bits 0..31 / 32..58.
     function pm_last_frame0_to_slv (s : dcf77_status_type) return std_logic_vector;
@@ -589,19 +621,13 @@ package body dcf77_pkg is
     function date_to_slv (s : dcf77_status_type) return std_logic_vector is
         variable r : std_logic_vector(31 downto 0) := (others => '0');
     begin
-        r(7 downto 0)   := std_logic_vector(s.time.year);
-        r(11 downto 8)  := std_logic_vector(s.time.month);
-        r(20 downto 16) := std_logic_vector(s.time.day);
-        r(26 downto 24) := std_logic_vector(s.time.weekday);
-        return r;
-    end function;
-
-    function flags_to_slv (s : dcf77_status_type) return std_logic_vector is
-        variable r : std_logic_vector(31 downto 0) := (others => '0');
-    begin
-        r(0) := s.time.dst_active;
-        r(1) := s.time.dst_announce;
-        r(2) := s.time.leap_announce;
+        r(7 downto 0)                       := std_logic_vector(s.time.year);
+        r(11 downto 8)                      := std_logic_vector(s.time.month);
+        r(20 downto 16)                     := std_logic_vector(s.time.day);
+        r(26 downto 24)                     := std_logic_vector(s.time.weekday);
+        r(REG_DATE_DST_ACTIVE_BIT)          := s.time.dst_active;
+        r(REG_DATE_DST_ANNOUNCE_BIT)        := s.time.dst_announce;
+        r(REG_DATE_LEAP_ANNOUNCE_BIT)       := s.time.leap_announce;
         return r;
     end function;
 
@@ -675,19 +701,13 @@ package body dcf77_pkg is
     function pm_date_to_slv (s : dcf77_status_type) return std_logic_vector is
         variable r : std_logic_vector(31 downto 0) := (others => '0');
     begin
-        r( 7 downto  0) := std_logic_vector(s.pm_time.year);
-        r(11 downto  8) := std_logic_vector(s.pm_time.month);
-        r(20 downto 16) := std_logic_vector(s.pm_time.day);
-        r(26 downto 24) := std_logic_vector(s.pm_time.weekday);
-        return r;
-    end function;
-
-    function pm_flags_to_slv (s : dcf77_status_type) return std_logic_vector is
-        variable r : std_logic_vector(31 downto 0) := (others => '0');
-    begin
-        r(0) := s.pm_time.dst_active;
-        r(1) := s.pm_time.dst_announce;
-        r(2) := s.pm_time.leap_announce;
+        r( 7 downto  0)                     := std_logic_vector(s.pm_time.year);
+        r(11 downto  8)                     := std_logic_vector(s.pm_time.month);
+        r(20 downto 16)                     := std_logic_vector(s.pm_time.day);
+        r(26 downto 24)                     := std_logic_vector(s.pm_time.weekday);
+        r(REG_DATE_DST_ACTIVE_BIT)          := s.pm_time.dst_active;
+        r(REG_DATE_DST_ANNOUNCE_BIT)        := s.pm_time.dst_announce;
+        r(REG_DATE_LEAP_ANNOUNCE_BIT)       := s.pm_time.leap_announce;
         return r;
     end function;
 

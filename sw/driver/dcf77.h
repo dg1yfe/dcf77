@@ -23,9 +23,9 @@ extern "C" {
 /* ---------------------------------------------------------------- */
 #define DCF77_REG_CTRL              0x00u
 #define DCF77_REG_STATUS            0x04u
-#define DCF77_REG_TIME_HMS          0x08u
-#define DCF77_REG_DATE              0x0Cu
-#define DCF77_REG_FLAGS             0x10u
+#define DCF77_REG_TIME_HMS          0x08u   /* read latches SHADOW = DATE */
+#define DCF77_REG_DATE              0x0Cu   /* year/month/day/weekday + flags bits 29..27 */
+/* 0x10 reserved (formerly FLAGS; flags are now packed into DATE).         */
 #define DCF77_REG_RSSI              0x14u
 #define DCF77_REG_LAST_FRAME0       0x18u
 #define DCF77_REG_LAST_FRAME1       0x1Cu
@@ -33,18 +33,25 @@ extern "C" {
 #define DCF77_REG_NOISE             0x24u
 #define DCF77_REG_SYNC_DIAG         0x28u
 #define DCF77_REG_SOFT_AM           0x2Cu
-#define DCF77_REG_SOFT_PM           0x30u   /* WITH_PM gate */
+#define DCF77_REG_SOFT_PM           0x30u   /* WITH_PM; read latches SHADOW = SOFT_AM */
 #define DCF77_REG_IRQ_FLAG          0x34u   /* W1C sticky interrupt sources */
 #define DCF77_REG_PM_STATUS         0x38u   /* WITH_PM */
-#define DCF77_REG_PM_TIME_HMS       0x3Cu   /* WITH_PM */
-#define DCF77_REG_PM_DATE           0x40u   /* WITH_PM */
-#define DCF77_REG_PM_FLAGS          0x44u   /* WITH_PM */
+#define DCF77_REG_PM_TIME_HMS       0x3Cu   /* WITH_PM; read latches SHADOW = PM_DATE */
+#define DCF77_REG_PM_DATE           0x40u   /* WITH_PM; PM_DATE + flags bits 29..27 */
+/* 0x44 reserved (formerly PM_FLAGS; flags packed into PM_DATE).           */
 #define DCF77_REG_PM_LAST_FRAME0    0x48u   /* WITH_PM */
 #define DCF77_REG_PM_LAST_FRAME1    0x4Cu   /* WITH_PM */
 #define DCF77_REG_PLL_PHASE_FILT    0x50u   /* WITH_PM_DEBUG */
 #define DCF77_REG_PLL_I_STATE       0x54u   /* WITH_PM_DEBUG, R/W */
 #define DCF77_REG_PLL_OFFSET        0x58u   /* WITH_PM_DEBUG, R/W */
 #define DCF77_REG_IRQ_MASK          0x5Cu   /* R/W per-source enables */
+#define DCF77_REG_SHADOW            0x60u   /* shared atomic-pair shadow */
+
+/* DATE / PM_DATE bit positions for the packed flags (replaces the
+ * standalone FLAGS register). */
+#define DCF77_DATE_DST_ACTIVE_BIT    (1u << 27)
+#define DCF77_DATE_DST_ANNOUNCE_BIT  (1u << 28)
+#define DCF77_DATE_LEAP_ANNOUNCE_BIT (1u << 29)
 
 /* CTRL bits */
 #define DCF77_CTRL_ENABLE_BIT       (1u << 0)
@@ -240,6 +247,38 @@ uint32_t dcf77_irq_get_mask(const dcf77_handle_t *h);
 void     dcf77_irq_set_mask(const dcf77_handle_t *h, uint32_t mask);
 
 /* ---------------------------------------------------------------- */
+/* Atomic-pair reads via the shared SHADOW register (0x60).          */
+/* ---------------------------------------------------------------- */
+
+/*
+ * Read SOFT_PM and SOFT_AM atomically.  The SOFT_PM read latches the
+ * shared shadow with SOFT_AM from the same readmux comb cycle; this
+ * function then reads the shadow.  Returns false if WITH_PM is not
+ * synthesised (no shadow latch fires for the PM path).
+ *
+ * Use this when consuming per-second AM+PM LLR pairs in the MLD; the
+ * non-atomic alternative (two separate reads) can straddle a status
+ * update and emit a pair from different broadcast seconds.
+ */
+bool dcf77_read_soft_atomic(const dcf77_handle_t *h,
+                            dcf77_soft_metrics_t *s);
+
+/*
+ * Read TIME_HMS + DATE atomically (DATE comes from the shadow latched
+ * by the TIME_HMS read).  Equivalent to dcf77_read_am_time() but with
+ * the AM time triple captured in a single readmux comb cycle.  Returns
+ * false if STATUS.time_valid is clear.
+ */
+bool dcf77_read_am_time_atomic(const dcf77_handle_t *h, dcf77_time_t *t);
+
+/*
+ * PM equivalent: read PM_TIME_HMS + PM_DATE atomically via the
+ * shadow latch.  Returns false if PM is absent or pm_time_valid is
+ * clear.
+ */
+bool dcf77_read_pm_time_atomic(const dcf77_handle_t *h, dcf77_time_t *t);
+
+/* ---------------------------------------------------------------- */
 /* Raw frame access (debug).                                         */
 /* ---------------------------------------------------------------- */
 
@@ -290,11 +329,15 @@ void dcf77_unpack_soft_pm(uint32_t soft_pm, dcf77_soft_metrics_t *s);
 /* Unpack the SOFT_AM word into a metrics struct (AM fields only). */
 void dcf77_unpack_soft_am(uint32_t soft_am, dcf77_soft_metrics_t *s);
 
-/* Decode register triplet (TIME_HMS, DATE, FLAGS) into a time struct.
- * Sets t->source to the caller-supplied tag (AM or PM). */
+/* Decode the TIME_HMS + DATE register pair into a time struct.  The
+ * DST / leap-announce flags are unpacked from DATE bits 29..27 (since
+ * the dedicated FLAGS register was removed in favour of packing them
+ * into DATE).  Sets t->source to the caller-supplied tag.
+ *
+ * For atomic reads, pair this with dcf77_read_time_atomic() (or
+ * compose your own from TIME_HMS + SHADOW). */
 void dcf77_unpack_time(uint32_t time_hms,
                        uint32_t date,
-                       uint32_t flags,
                        dcf77_source_t src,
                        dcf77_time_t *t);
 

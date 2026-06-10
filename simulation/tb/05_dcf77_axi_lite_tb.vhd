@@ -247,9 +247,9 @@ begin
 
             -----------------------------------------------------------------
             elsif run("read_unmapped_decerr") then
-                -- 0x60 is past the last mapped register (REG_IRQ_MASK at
-                -- 0x5C) -> DECERR.
-                axi_read(x"60", rd, AXI_RESPONSE_DECERR);
+                -- 0x64 is past the last mapped register (REG_SOFT_AM_SHADOW
+                -- at 0x60) -> DECERR.
+                axi_read(x"64", rd, AXI_RESPONSE_DECERR);
 
             -----------------------------------------------------------------
             elsif run("pm_registers_reset") then
@@ -273,9 +273,7 @@ begin
                 axi_read(x"40", rd, AXI_RESPONSE_OKAY);
                 check_equal(rd, std_logic_vector'(x"00000000"),
                             "PM_DATE reads 0 at reset");
-                axi_read(x"44", rd, AXI_RESPONSE_OKAY);
-                check_equal(rd, std_logic_vector'(x"00000000"),
-                            "PM_FLAGS reads 0 at reset");
+                axi_read(x"44", rd, AXI_RESPONSE_DECERR);
                 axi_read(x"48", rd, AXI_RESPONSE_OKAY);
                 check_equal(rd, std_logic_vector'(x"00000000"),
                             "PM_LAST_FRAME0 reads 0 at reset");
@@ -375,6 +373,43 @@ begin
                 axi_read(x"5C", rd, AXI_RESPONSE_OKAY);
                 check_equal(rd, std_logic_vector'(x"00000000"),
                             "IRQ_MASK cleared back to 0");
+
+            -----------------------------------------------------------------
+            elsif run("shadow_reset_and_triggers") then
+                -- SHADOW at reset reads 0 (never latched).
+                axi_read(x"60", rd, AXI_RESPONSE_OKAY);
+                check_equal(rd, std_logic_vector'(x"00000000"),
+                            "SHADOW reads 0 at reset");
+                -- All triggers below produce a 0 shadow because the
+                -- status record is at its reset value (everything zero).
+                -- That's fine -- the test is about the latch firing,
+                -- not the latched value.  Full-stimulus content checks
+                -- live in the 10_core / 07_replay TBs.
+                axi_read(x"30", rd, AXI_RESPONSE_OKAY);    -- SOFT_PM read
+                axi_read(x"60", rd, AXI_RESPONSE_OKAY);
+                check_equal(rd, std_logic_vector'(x"00000000"),
+                            "SHADOW reflects SOFT_AM at PM-read time");
+                axi_read(x"08", rd, AXI_RESPONSE_OKAY);    -- TIME_HMS read
+                axi_read(x"60", rd, AXI_RESPONSE_OKAY);
+                check_equal(rd, std_logic_vector'(x"00000000"),
+                            "SHADOW reflects DATE at TIME-read time");
+                axi_read(x"3C", rd, AXI_RESPONSE_OKAY);    -- PM_TIME_HMS read
+                axi_read(x"60", rd, AXI_RESPONSE_OKAY);
+                check_equal(rd, std_logic_vector'(x"00000000"),
+                            "SHADOW reflects PM_DATE at PM_TIME-read time");
+                -- Non-trigger reads leave the shadow unchanged.  Sanity:
+                -- read STATUS (not a trigger), then SHADOW, expect 0.
+                axi_read(x"04", rd, AXI_RESPONSE_OKAY);
+                axi_read(x"60", rd, AXI_RESPONSE_OKAY);
+                check_equal(rd, std_logic_vector'(x"00000000"),
+                            "SHADOW unchanged by non-trigger read");
+
+            -----------------------------------------------------------------
+            elsif run("flags_register_decerr") then
+                -- The former REG_FLAGS at 0x10 and REG_PM_FLAGS at 0x44
+                -- are now unmapped (flags packed into DATE / PM_DATE).
+                axi_read(x"10", rd, AXI_RESPONSE_DECERR);
+                axi_read(x"44", rd, AXI_RESPONSE_DECERR);
 
             -----------------------------------------------------------------
             elsif run("irq_flag_w1c_no_effect_at_reset") then
