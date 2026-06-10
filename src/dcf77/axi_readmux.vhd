@@ -18,9 +18,12 @@ use work.dcf77_pkg.all;
 
 entity axi_readmux is
     generic (
-        -- See dcf77_axi_lite for full description.  When false, the
-        -- PLL telemetry registers (0x50 / 0x54 / 0x58) return DECERR
-        -- instead of being served from the snapshot fields.
+        -- See dcf77_axi_lite for full descriptions.  When false:
+        --   WITH_PM        : the PM register block (0x30, 0x38-0x4C)
+        --                    returns DECERR; REG_STATUS bit 3 reads 0.
+        --   WITH_PM_DEBUG  : the PLL telemetry block (0x50/0x54/0x58)
+        --                    returns DECERR; REG_STATUS bit 4 reads 0.
+        WITH_PM       : boolean := true;
         WITH_PM_DEBUG : boolean := false
     );
     port (
@@ -121,7 +124,11 @@ begin
 
             case word_ix is
                 when REG_CTRL        => v.ro.data := ctrl_to_slv(r.ct);
-                when REG_STATUS      => v.ro.data := status_to_slv(r.st);
+                when REG_STATUS =>
+                    v.ro.data := status_to_slv(r.st);
+                    -- Synthesis-time capability bits (constant per build).
+                    if WITH_PM       then v.ro.data(REG_STATUS_PM_PRESENT_BIT)       := '1'; end if;
+                    if WITH_PM_DEBUG then v.ro.data(REG_STATUS_PM_DEBUG_PRESENT_BIT) := '1'; end if;
                 when REG_TIME_HMS    => v.ro.data := time_hms_to_slv(r.st);
                 when REG_DATE        => v.ro.data := date_to_slv(r.st);
                 when REG_FLAGS       => v.ro.data := flags_to_slv(r.st);
@@ -140,13 +147,27 @@ begin
                     v.ro.data(15 downto 0) := std_logic_vector(r.st.noise);
                 when REG_SYNC_DIAG   => v.ro.data := sync_diag_to_slv(r.st);
                 when REG_SOFT_AM     => v.ro.data := soft_am_to_slv(r.st);
-                when REG_SOFT_PM     => v.ro.data := soft_pm_to_slv(r.st);
-                when REG_PM_STATUS      => v.ro.data := pm_status_to_slv(r.st);
-                when REG_PM_TIME_HMS    => v.ro.data := pm_time_hms_to_slv(r.st);
-                when REG_PM_DATE        => v.ro.data := pm_date_to_slv(r.st);
-                when REG_PM_FLAGS       => v.ro.data := pm_flags_to_slv(r.st);
-                when REG_PM_LAST_FRAME0 => v.ro.data := pm_last_frame0_to_slv(r.st);
-                when REG_PM_LAST_FRAME1 => v.ro.data := pm_last_frame1_to_slv(r.st);
+                when REG_SOFT_PM =>
+                    if WITH_PM then v.ro.data := soft_pm_to_slv(r.st);
+                    else v.ro.data := (others => '0'); v.ro.resp := AXI_RESPONSE_DECERR; end if;
+                when REG_PM_STATUS =>
+                    if WITH_PM then v.ro.data := pm_status_to_slv(r.st);
+                    else v.ro.data := (others => '0'); v.ro.resp := AXI_RESPONSE_DECERR; end if;
+                when REG_PM_TIME_HMS =>
+                    if WITH_PM then v.ro.data := pm_time_hms_to_slv(r.st);
+                    else v.ro.data := (others => '0'); v.ro.resp := AXI_RESPONSE_DECERR; end if;
+                when REG_PM_DATE =>
+                    if WITH_PM then v.ro.data := pm_date_to_slv(r.st);
+                    else v.ro.data := (others => '0'); v.ro.resp := AXI_RESPONSE_DECERR; end if;
+                when REG_PM_FLAGS =>
+                    if WITH_PM then v.ro.data := pm_flags_to_slv(r.st);
+                    else v.ro.data := (others => '0'); v.ro.resp := AXI_RESPONSE_DECERR; end if;
+                when REG_PM_LAST_FRAME0 =>
+                    if WITH_PM then v.ro.data := pm_last_frame0_to_slv(r.st);
+                    else v.ro.data := (others => '0'); v.ro.resp := AXI_RESPONSE_DECERR; end if;
+                when REG_PM_LAST_FRAME1 =>
+                    if WITH_PM then v.ro.data := pm_last_frame1_to_slv(r.st);
+                    else v.ro.data := (others => '0'); v.ro.resp := AXI_RESPONSE_DECERR; end if;
                 when REG_PLL_PHASE_FILT =>
                     if WITH_PM_DEBUG then
                         v.ro.data := pll_phase_filt_to_slv(r.st);

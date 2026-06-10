@@ -27,6 +27,9 @@
 --   0x44 R    PM_FLAGS        PM-decoded DST/leap flags (layout = FLAGS)
 --   0x48 R    PM_LAST_FRAME0  PM frame bits 0..31
 --   0x4C R    PM_LAST_FRAME1  PM frame bits 32..58
+-- The 0x30, 0x38-0x4C block is gated by WITH_PM (reads return DECERR
+-- when false).  REG_STATUS bit 3 (PM_PRESENT) signals availability
+-- to software at runtime.
 --   0x50 R    PLL_PHASE_FILT  carrier-PLL LPF state, snapshot, signed 29 b
 --   0x54 R/W  PLL_I_STATE     PI integrator >> I_FRAC, signed 28 b
 --                             R = snapshot (sampled on pm_valid)
@@ -60,14 +63,27 @@ entity dcf77_axi_lite is
         T_SEARCH_SEC  : positive := 300;
         NCO_PHASE_INCR: natural  := 10_399_018;
 
-        -- Synthesis switch: include carrier-PLL telemetry / override
-        -- registers and the supporting datapath (snapshots, jam mux).
-        -- When false (default = production):
-        --   * Reads to 0x50/0x54/0x58 return DECERR.
-        --   * Writes to 0x54/0x58 return SLVERR.
-        --   * pll_override held at reset → no jam path.
-        --   * snap_tick tied low → carrier_pll's snapshot registers
-        --     stay at reset and synthesis prunes them.
+        -- Synthesis switches.
+        --
+        -- WITH_PM = false drops the entire PM decoder stack:
+        --   * dcf77_pm_correlator is not instantiated (saves 1 BRAM
+        --     tile + ~900 flops + ~600 LUTs).
+        --   * Second dcf77_frame_dec (PM_MODE=true) is not
+        --     instantiated.
+        --   * AXI registers 0x30, 0x38-0x4C return DECERR.
+        --   * REG_STATUS bit 3 (PM_PRESENT) reads 0.
+        --   * Receiver still does full AM decode (time/date/parity
+        --     via the bit_det path).
+        --
+        -- WITH_PM_DEBUG = false drops the carrier-PLL telemetry only
+        -- (already documented above).  Has no effect when WITH_PM is
+        -- already false -- the PLL registers (0x50-0x58) DECERR
+        -- either way, but the debug bit reads 0 so software can
+        -- distinguish "no telemetry" from "no PM stack".
+        --
+        -- Defaults: WITH_PM=true (project's primary purpose),
+        -- WITH_PM_DEBUG=false (production-area defaults).
+        WITH_PM       : boolean  := true;
         WITH_PM_DEBUG : boolean  := false
     );
     port (
@@ -174,6 +190,7 @@ begin
     ------------------------------------------------------------------ --
     u_readmux : entity work.axi_readmux
         generic map (
+            WITH_PM       => WITH_PM,
             WITH_PM_DEBUG => WITH_PM_DEBUG
         )
         port map (
@@ -253,6 +270,7 @@ begin
             T_HOLD_SEC     => T_HOLD_SEC,
             T_SEARCH_SEC   => T_SEARCH_SEC,
             NCO_PHASE_INCR => NCO_PHASE_INCR,
+            WITH_PM        => WITH_PM,
             WITH_PM_DEBUG  => WITH_PM_DEBUG
         )
         port map (

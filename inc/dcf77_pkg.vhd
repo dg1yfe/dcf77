@@ -347,8 +347,15 @@ package dcf77_pkg is
     -- STATUS register:
     --   bits  1..0  : sync_state
     --   bit   2     : time_valid
+    --   bit   3     : pm_present       (1 = WITH_PM       was enabled at synth)
+    --   bit   4     : pm_debug_present (1 = WITH_PM_DEBUG was enabled at synth)
     --   bits 13..8  : bit_index
     --   bits 31..16 : rssi
+    -- Bits 3 and 4 are not part of dcf77_status_type (they're synthesis
+    -- constants); the axi_readmux ORs them in directly from its own
+    -- generic.
+    constant REG_STATUS_PM_PRESENT_BIT       : natural := 3;
+    constant REG_STATUS_PM_DEBUG_PRESENT_BIT : natural := 4;
     function status_to_slv (s : dcf77_status_type) return std_logic_vector;
 
     -- TIME_HMS register: bits 5..0 minute, 12..8 hour.

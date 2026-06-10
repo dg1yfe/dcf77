@@ -60,10 +60,13 @@ entity dcf77_core is
         -- 2^25 * 77500 / 250000 = 10_399_018.6...
         NCO_PHASE_INCR : natural := 10_399_018;
 
-        -- See dcf77_axi_lite for full description.  When false, the
-        -- snap_tick and pll_override wiring into carrier_pll is tied
-        -- off (constants); synthesis prunes the snapshot registers
-        -- and the jam mux.
+        -- See dcf77_axi_lite for full descriptions.
+        --   WITH_PM       false → drop pm_correlator + pm frame_dec.
+        --   WITH_PM_DEBUG false → drop carrier-PLL snap/jam datapath.
+        -- WITH_PM_DEBUG=true with WITH_PM=false is a no-op (the
+        -- telemetry path runs but nothing reads its outputs at the
+        -- AXI level, since the PM register block is DECERR'd anyway).
+        WITH_PM        : boolean := true;
         WITH_PM_DEBUG  : boolean := false
     );
     port (
@@ -707,64 +710,81 @@ begin
         );
 
     -- ------------------------------------------------------------------ --
-    -- PM (PSK/SIK) correlator: time-multiplexed matched filter over the --
-    -- CORDIC phase stream.  Emits one pm_soft (SIK bit LLR) per locked  --
-    -- second; sync state machine handles ACQUIRE → LOCK → re-acquire.   --
+    -- PM (PSK/SIK) decoder stack.  Synthesised only when WITH_PM=true.    --
+    -- Drops a BRAM tile + ~900 flops + ~600 LUTs from the build when      --
+    -- disabled.  All pm_* signals fall back to constant '0' / reset       --
+    -- values so status_out.pm_* stays well-defined.                       --
     -- ------------------------------------------------------------------ --
-    u_pm_corr : entity work.dcf77_pm_correlator
-        port map (
-            clk              => clk,
-            rst              => rst,
-            -- Drop the 3 LSBs of the 12-b CORDIC phase to feed the
-            -- 9-b PM correlator input (= 1 LSB ≈ 0.7°, plenty given
-            -- the matched filter's 32 dB processing gain).
-            phase_err        => cordic_phase(CORDIC_PHASE_W - 1
-                                              downto CORDIC_PHASE_W - 9),
-            phase_err_v      => cordic_v,
-            pll_locked       => pll_lock,
-            pm_soft          => pm_soft_s,
-            pm_valid         => pm_valid_s,
-            pm_minute_mark_o => pm_corr_mm_s,
-            pm_sync_state    => pm_sync_state_s,
-            pm_locked_phase  => pm_locked_phase_s,
-            pm_lock_qual     => pm_lock_qual_s,
-            pm_debug         => open
-        );
+    gen_pm : if WITH_PM generate
+        u_pm_corr : entity work.dcf77_pm_correlator
+            port map (
+                clk              => clk,
+                rst              => rst,
+                -- Drop the 3 LSBs of the 12-b CORDIC phase to feed the
+                -- 9-b PM correlator input (= 1 LSB ≈ 0.7°, plenty given
+                -- the matched filter's 32 dB processing gain).
+                phase_err        => cordic_phase(CORDIC_PHASE_W - 1
+                                                  downto CORDIC_PHASE_W - 9),
+                phase_err_v      => cordic_v,
+                pll_locked       => pll_lock,
+                pm_soft          => pm_soft_s,
+                pm_valid         => pm_valid_s,
+                pm_minute_mark_o => pm_corr_mm_s,
+                pm_sync_state    => pm_sync_state_s,
+                pm_locked_phase  => pm_locked_phase_s,
+                pm_lock_qual     => pm_lock_qual_s,
+                pm_debug         => open
+            );
 
-    -- PM frame decoder.  PM_MODE=true → START_INDEX=15 + internal SIK
-    -- signature detector; ignores the external minute_mark port.
-    -- The bit_value fed in is the sign of pm_soft (12-b signed; sign
-    -- bit '1' = negative = SIK '1' bit; sign bit '0' = positive = SIK '0').
-    u_pm_frame : entity work.dcf77_frame_dec
-        generic map (
-            PM_MODE => true
-        )
-        port map (
-            clk             => clk,
-            rst             => rst,
-            bit_value       => pm_soft_s(11),       -- sign bit of pm_soft
-            bit_valid       => pm_valid_s,
-            minute_mark     => '0',                 -- ignored for PM mode
-            time_out        => pm_time_d,
-            time_valid      => pm_time_v_d,
-            last_frame      => pm_last_frm,
-            bit_index       => pm_bit_ix,
-            minute_mark_out => pm_frame_mm_s
-        );
+        -- PM frame decoder.  PM_MODE=true → START_INDEX=15 + internal SIK
+        -- signature detector; ignores the external minute_mark port.
+        u_pm_frame : entity work.dcf77_frame_dec
+            generic map (
+                PM_MODE => true
+            )
+            port map (
+                clk             => clk,
+                rst             => rst,
+                bit_value       => pm_soft_s(11),       -- sign bit
+                bit_valid       => pm_valid_s,
+                minute_mark     => '0',                 -- ignored for PM
+                time_out        => pm_time_d,
+                time_valid      => pm_time_v_d,
+                last_frame      => pm_last_frm,
+                bit_index       => pm_bit_ix,
+                minute_mark_out => pm_frame_mm_s
+            );
 
-    -- Latch pm_bit_ix into pm_sec_index on each pm_valid pulse so the
-    -- AXI SOFT_PM register's [5:0] field reports the second-of-minute
-    -- that the pm_soft value belongs to, atomically with the LLR.
-    pm_sec_index_proc : process(clk)
-    begin
-        if rising_edge(clk) then
-            if rst = '1' then
-                pm_sec_index_s <= 0;
-            elsif pm_valid_s = '1' then
-                pm_sec_index_s <= pm_bit_ix;
+        -- Latch pm_bit_ix into pm_sec_index on each pm_valid pulse so
+        -- the AXI SOFT_PM register's [5:0] field reports the second-
+        -- of-minute that the pm_soft value belongs to, atomically with
+        -- the LLR.
+        pm_sec_index_proc : process(clk)
+        begin
+            if rising_edge(clk) then
+                if rst = '1' then
+                    pm_sec_index_s <= 0;
+                elsif pm_valid_s = '1' then
+                    pm_sec_index_s <= pm_bit_ix;
+                end if;
             end if;
-        end if;
-    end process;
+        end process;
+    end generate gen_pm;
+
+    no_pm : if not WITH_PM generate
+        pm_soft_s         <= (others => '0');
+        pm_valid_s        <= '0';
+        pm_corr_mm_s      <= '0';
+        pm_sync_state_s   <= (others => '0');
+        pm_locked_phase_s <= (others => '0');
+        pm_lock_qual_s    <= (others => '0');
+        pm_time_d         <= DCF77_TIME_RESET;
+        pm_time_v_d       <= '0';
+        pm_last_frm       <= (others => '0');
+        pm_bit_ix         <= 0;
+        pm_frame_mm_s     <= '0';
+        pm_sec_index_s    <= 0;
+    end generate no_pm;
 
     -- ------------------------------------------------------------------ --
     -- Aggregate the comprehensive status record from the sub-blocks.      --
