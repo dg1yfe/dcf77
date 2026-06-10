@@ -102,17 +102,17 @@ begin
             end if;
         end if;
 
+        if rst = '1' then
+            v := R_RESET;
+        end if;
+
         rin <= v;
     end process;
 
     seq : process (clk)
     begin
         if rising_edge(clk) then
-            if rst = '1' then
-                r <= R_RESET;
-            else
-                r <= rin;
-            end if;
+            r <= rin;
         end if;
     end process;
 

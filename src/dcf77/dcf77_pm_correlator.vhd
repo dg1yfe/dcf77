@@ -6,16 +6,16 @@
 -- per second (SIK bit LLR, sign convention: positive = SIK '0' =
 -- broadcast bit '0' favoured).
 --
--- Single-LFSR + single-ALU design: a 2048×18 BRAM ring buffer holds the
--- last ≈1 s of phase_err; a 9-bit LFSR (taps 5 & 9, init "000000001"
--- post-Hetzel-force-1) drives the chip sign sequence through a 7-bit
--- Bresenham mod-96 chip clock (exact 31/96 of fs); a single 29-b signed
--- accumulator is time-shared across all hypotheses.
+-- Single-LFSR + single-ALU design: a 4096×9 BRAM ring buffer holds the
+-- last ≈2 s of phase_err; a 9-bit LFSR (taps 5 & 9, init "000010001")
+-- drives the chip sign sequence through a 7-bit Bresenham mod-96 chip
+-- clock (exact 31/96 of fs); a single 20-b signed accumulator is
+-- time-shared across all hypotheses.
 --
 -- Two-phase synchronization:
---   ACQUIRE: 4 evaluation bursts per second (every 500 sample ticks),
---     K=463 hypotheses per burst, running-max for the best.  Once any
---     second's best score exceeds LOCK_IN_THR the broadcast's chip-0
+--   ACQUIRE: one evaluation burst per buffer cycle (2.048 s), K=2000
+--     hypotheses per burst, running-max for the best.  Once a burst's
+--     best score exceeds LOCK_IN_THR the broadcast's chip-0
 --     phase is locked in as `locked_phase`.
 --   LOCK:    3 hypotheses per second (locked_phase −1 / center / +1)
 --     for early-late DLL tracking.  pm_soft is latched from the center
@@ -132,7 +132,7 @@ architecture rtl of dcf77_pm_correlator is
     constant SYNC_STATE_LOCK    : std_logic_vector(1 downto 0) := "10";
 
     ----------------------------------------------------------------------
-    -- BRAM: 2048 × 18-bit, separate sync read / sync write
+    -- BRAM: 4096 × 9-bit, separate sync read / sync write
     ----------------------------------------------------------------------
     type ram_t is array (0 to BUF_SIZE - 1) of std_logic_vector(BUF_DATA_W - 1 downto 0);
     signal buf      : ram_t := (others => (others => '0'));
@@ -166,7 +166,7 @@ architecture rtl of dcf77_pm_correlator is
         ---- ACQUIRE bookkeeping ----
         ac_burst_armed   : std_logic;                 -- '1' = burst pending
         ac_burst_count   : unsigned(0 downto 0);      -- 0..1 (one burst per cycle)
-        ac_hyp_idx       : unsigned(11 downto 0);     -- 0..2509
+        ac_hyp_idx       : unsigned(11 downto 0);     -- 0..K_HYPOTHESES-1 (= 1999)
         ac_best_score    : unsigned(18 downto 0);     -- |acc| running max (19-b)
         ac_best_phase    : unsigned(11 downto 0);     -- sec_phase at chip-0
         ac_w_ptr_snap    : unsigned(11 downto 0);     -- w_ptr at start of burst
@@ -408,8 +408,8 @@ begin
         -- Engine (single ALU, shared across ACQUIRE and TRACK)
         --
         -- Per hypothesis, walks 1586 samples reading from
-        -- buf[(eng_base_ptr + sample_idx) mod 2048], driving chip_sign
-        -- from the LFSR's stage 1, Bresenham-advancing the chip clock.
+        -- buf[(eng_base_ptr + sample_idx) mod 4096], driving chip_sign
+        -- from the LFSR's MSB, Bresenham-advancing the chip clock.
         ----------------------------------------------------------------
         case r.eng_state is
             when E_IDLE =>
@@ -508,12 +508,11 @@ begin
             when M_ACQUIRE =>
                 v.sync_state_o := SYNC_STATE_ACQUIRE;
 
-                -- Trigger a burst every SAMPLES_PER_BURST_SLOT samples
-                -- (0, 500, 1000, 1500 within the second).
-                -- Single burst per natural-wrap cycle, triggered when
-                -- sec_phase = 0.  K = 2510 hypotheses cover every chip-0
-                -- candidate whose 1586-sample integration window fits
-                -- non-wrapped inside the 4096-sample buffer.
+                -- Single burst per natural-wrap cycle (every
+                -- SAMPLES_PER_BURST_SLOT = 4096 samples), triggered when
+                -- sec_phase = 0.  K = 2000 hypotheses cover exactly one
+                -- inter-chip-0 spacing, so chip-0 is guaranteed to fall
+                -- inside the searched window.
                 if phase_err_v = '1'
                    and r.eng_state = E_IDLE
                    and r.ac_burst_armed = '0'
@@ -571,7 +570,7 @@ begin
                     end if;
 
                     -- Burst complete: evaluate LOCK_IN_THR against the
-                    -- true running max across all K=2510 hypotheses.
+                    -- true running max across all K=2000 hypotheses.
                     -- Previously this fired at the next sec_phase=0
                     -- wrap, but in accelerated TBs the wrap occurs
                     -- before the burst finishes -- the check then
@@ -800,17 +799,17 @@ begin
             ram_raddr <= resize(r.eng_base_ptr + r.sample_idx, 12);
         end if;
 
+        if rst = '1' then
+            v := R_RESET;
+        end if;
+
         rin <= v;
     end process;
 
     seq : process (clk)
     begin
         if rising_edge(clk) then
-            if rst = '1' then
-                r <= R_RESET;
-            else
-                r <= rin;
-            end if;
+            r <= rin;
         end if;
     end process;
 

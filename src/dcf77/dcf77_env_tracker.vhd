@@ -240,6 +240,12 @@ begin
     -- so the comb process upstream re-fires when r changes = once per
     -- env tick instead of every clock cycle.  Same hardware (FF CE
     -- input on Xilinx/Intel is free); just lets GHDL skip dead cycles.
+    --
+    -- Reset deliberately stays in this seq process (deviating from the
+    -- project's reset-in-comb convention): with the clock-enable form,
+    -- a comb-side `v := R_RESET` would only reach r on clock_en='1'
+    -- edges, leaving the registers un-reset during rst when the env
+    -- tick is idle.
     seq : process (clk)
     begin
         if rising_edge(clk) then

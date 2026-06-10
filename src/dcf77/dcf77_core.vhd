@@ -178,6 +178,9 @@ architecture rtl of dcf77_core is
     constant ENV_DEC_RATE : positive := 10;
     signal mag_dec_sum  : signed(CORDIC_IQ_W + 1 + 4 downto 0);  -- 24-b
     signal mag_dec_v    : std_logic;
+    -- sfixed view of mag_filt for the dcf77_boxcar instance (bit-
+    -- identical reinterpretation; boxcar ports are sfixed).
+    signal mag_filt_sf  : sfixed(CORDIC_IQ_W + 1 downto 0);
 
     -- Carrier-PLL phase input.  The CORDIC phase is amplitude-
     -- independent in 12-b at 2π=2^12 scale; the carrier_pll's PI gains
@@ -188,8 +191,6 @@ architecture rtl of dcf77_core is
     -- = midway between old A_medium and A_strong cases).  Net result:
     -- amplitude-independent phase detector + unchanged PLL loop bandwidth.
     constant PLL_PHASE_ADAPTER_SHIFT : natural := 11;
-    signal phase_for_pll   : signed(POST_W - 1 downto 0);
-    signal phase_for_pll_v : std_logic;
 
     -- Synchronously-detected envelope at 2 kS/s.  abs(i_iir) post-
     -- boxcar can reach ~ 2^28; we right-shift by 4 before resizing into
@@ -257,33 +258,55 @@ architecture rtl of dcf77_core is
     signal pm_bit_ix         : bit_index_t;
     signal pm_frame_mm_s     : std_logic;             -- frame_dec's SIK-signature edge
 
-    -- pm_sec_index = bit_ix snapshot at the moment pm_valid pulses.
-    -- pm_bit_index = the live frame_dec counter (= pm_bit_ix above).
-    signal pm_sec_index_s    : bit_index_t;
-
-    -- AM-side soft-metric shadow latched on each pm_valid edge.
-    -- Captures the AM bit_det's most recent output at the moment the
-    -- PM correlator emits its second-N LLR, so a host that reads
-    -- SOFT_PM + SHADOW gets an AM+PM pair from the same broadcast
-    -- second (which the live am_soft alone cannot guarantee -- AM
-    -- updates ~200 ms after second-boundary, PM ~1.0 s).
-    signal am_soft_paired_s        : signed(11 downto 0) := (others => '0');
-    signal mm_soft_paired_s        : signed(11 downto 0) := (others => '0');
-    signal am_bit_idx_paired_s     : bit_index_t := 0;
-    signal am_soft_paired_valid_s  : std_logic := '0';
-    signal am_mm_paired_s          : std_logic := '0';
-    -- Tracks whether AM has produced a fresh event since the last
-    -- pm_valid, so the paired_valid bit reflects "real new data" and
-    -- not just "we've ever latched something".
-    signal am_seen_since_pm_s      : std_logic := '0';
-    signal am_mm_since_pm_s        : std_logic := '0';
-
     -- Visible bit_index exported via status_out -- PM-slaved when
     -- the correlator is in LOCK so the host's atomic pair has a
     -- coherent second_index across both paths.  bit_det's own
     -- internal counter is unaffected (the AM frame_dec still uses
     -- its own bit_index for slot routing in last_frame).
     signal bit_ix_exported    : bit_index_t;
+
+    -- ------------------------------------------------------------------ --
+    -- Glue registers.  One two-process pair (comb/seq near the end of    --
+    -- the architecture body) collects the small registered helpers that  --
+    -- previously lived in scattered single-process blocks:               --
+    --   * carrier-PLL phase adapter (registered -cordic_phase << 11)     --
+    --   * pm_sec_index latch (bit_ix snapshot at each pm_valid pulse;    --
+    --     pm_bit_index stays the live frame_dec counter pm_bit_ix)       --
+    --   * AM-side paired shadow, latched on each pm_valid edge so a      --
+    --     host reading SOFT_PM + SHADOW gets an AM+PM pair from the      --
+    --     same broadcast second (live am_soft alone cannot guarantee     --
+    --     that -- AM updates ~200 ms into a second, PM ~1.0 s)           --
+    -- ------------------------------------------------------------------ --
+    type reg_type is record
+        phase_for_pll   : signed(POST_W - 1 downto 0);
+        phase_for_pll_v : std_logic;
+        pm_sec_index    : bit_index_t;
+        am_soft_paired       : signed(11 downto 0);
+        mm_soft_paired       : signed(11 downto 0);
+        am_bit_idx_paired    : bit_index_t;
+        am_soft_paired_valid : std_logic;
+        am_mm_paired         : std_logic;
+        -- Track whether AM produced a fresh event since the last
+        -- pm_valid, so paired_valid reflects "real new data" and not
+        -- just "we've ever latched something".
+        am_seen_since_pm     : std_logic;
+        am_mm_since_pm       : std_logic;
+    end record;
+
+    constant R_RESET : reg_type := (
+        phase_for_pll        => (others => '0'),
+        phase_for_pll_v      => '0',
+        pm_sec_index         => 0,
+        am_soft_paired       => (others => '0'),
+        mm_soft_paired       => (others => '0'),
+        am_bit_idx_paired    => 0,
+        am_soft_paired_valid => '0',
+        am_mm_paired         => '0',
+        am_seen_since_pm     => '0',
+        am_mm_since_pm       => '0'
+    );
+
+    signal r, rin : reg_type;
 
     -- Cast top 16 b of an env_word_t (sfixed, but always >= 0 in this
     -- design) to rssi_word_t.  Skips the sign bit and takes the 16 next
@@ -475,32 +498,23 @@ begin
     -- /10 decimating boxcar.  Accumulates ENV_DEC_RATE mag_filt samples
     -- then emits the running sum.  Free 13-dB anti-alias notches at
     -- 200/400/... Hz; group delay ~ 4.5 input samples = 2.25 ms.
-    env_dec_proc : process(clk)
-        variable cnt : natural range 0 to ENV_DEC_RATE - 1 := 0;
-        variable acc : signed(CORDIC_IQ_W + 1 + 4 downto 0);
-    begin
-        if rising_edge(clk) then
-            if rst = '1' then
-                mag_dec_sum <= (others => '0');
-                mag_dec_v   <= '0';
-                cnt := 0;
-                acc := (others => '0');
-            else
-                mag_dec_v <= '0';
-                if mag_filt_v = '1' then
-                    if cnt = ENV_DEC_RATE - 1 then
-                        mag_dec_sum <= acc + resize(mag_filt, mag_dec_sum'length);
-                        mag_dec_v   <= '1';
-                        cnt := 0;
-                        acc := (others => '0');
-                    else
-                        acc := acc + resize(mag_filt, acc'length);
-                        cnt := cnt + 1;
-                    end if;
-                end if;
-            end if;
-        end if;
-    end process;
+    mag_filt_sf <= to_sfixed(std_logic_vector(mag_filt),
+                             CORDIC_IQ_W + 1, 0);
+
+    u_env_dec : entity work.dcf77_boxcar
+        generic map (
+            IN_WIDTH  => CORDIC_IQ_W + 2,    -- 20 b
+            RATE      => ENV_DEC_RATE,       -- 10
+            OUT_WIDTH => CORDIC_IQ_W + 6     -- 24 b = 20 + ceil(log2(10))
+        )
+        port map (
+            clk        => clk,
+            rst        => rst,
+            in_sample  => mag_filt_sf,
+            in_valid   => mag_filt_v,
+            out_sample => mag_dec_sum,
+            out_valid  => mag_dec_v
+        );
 
     -- env_pwr scale: legacy env_pwr = 128 x mag_filt (= shift_left by 7).
     -- After /10 decimation: mag_dec_sum = 10 x mag_filt on average.
@@ -530,19 +544,9 @@ begin
     -- negation the loop runs positive-feedback and limit-cycles
     -- around its IIR pole (locked-σ stuck near uniform [-π, +π]).
     -- With negation, KP=10/KI=23 converges as designed.
-    pll_adapter_proc : process(clk)
-    begin
-        if rising_edge(clk) then
-            if rst = '1' then
-                phase_for_pll     <= (others => '0');
-                phase_for_pll_v   <= '0';
-            else
-                phase_for_pll <= shift_left(resize(-cordic_phase, POST_W),
-                                            PLL_PHASE_ADAPTER_SHIFT);
-                phase_for_pll_v <= cordic_v;
-            end if;
-        end if;
-    end process;
+    --
+    -- The registered adapter itself lives in the glue comb/seq pair
+    -- near the end of this architecture (r.phase_for_pll).
 
     -- External tap: the amplitude-independent CORDIC phase directly
     -- (no adapter shift; consumers like the PM correlator want phase
@@ -573,8 +577,8 @@ begin
             rst              => rst,
             -- Amplitude-independent CORDIC phase, scaled into the
             -- magnitude range the PI gains were calibrated for.
-            phase_err        => phase_for_pll,
-            phase_err_valid  => phase_for_pll_v,
+            phase_err        => r.phase_for_pll,
+            phase_err_valid  => r.phase_for_pll_v,
             phase_inc_offset => nco_phase_inc_offset,
             phase_filt_out   => pll_phase_filt,
             -- Snap + override wiring only active when WITH_PM_DEBUG.
@@ -703,15 +707,7 @@ begin
     -- ------------------------------------------------------------------ --
     bit_v_gated     <= bit_v     and pll_lock;
     minute_mk_gated <= minute_mk and pll_lock;
-
-    process (pll_lock, sync_st)
-    begin
-        if pll_lock = '0' then
-            sync_st_gated <= sync_search;
-        else
-            sync_st_gated <= sync_st;
-        end if;
-    end process;
+    sync_st_gated   <= sync_search when pll_lock = '0' else sync_st;
 
     -- ------------------------------------------------------------------ --
     -- Frame decoder                                                        --
@@ -778,21 +774,6 @@ begin
                 bit_index       => pm_bit_ix,
                 minute_mark_out => pm_frame_mm_s
             );
-
-        -- Latch pm_bit_ix into pm_sec_index on each pm_valid pulse so
-        -- the AXI SOFT_PM register's [5:0] field reports the second-
-        -- of-minute that the pm_soft value belongs to, atomically with
-        -- the LLR.
-        pm_sec_index_proc : process(clk)
-        begin
-            if rising_edge(clk) then
-                if rst = '1' then
-                    pm_sec_index_s <= 0;
-                elsif pm_valid_s = '1' then
-                    pm_sec_index_s <= pm_bit_ix;
-                end if;
-            end if;
-        end process;
     end generate gen_pm;
 
     no_pm : if not WITH_PM generate
@@ -807,46 +788,64 @@ begin
         pm_last_frm       <= (others => '0');
         pm_bit_ix         <= 0;
         pm_frame_mm_s     <= '0';
-        pm_sec_index_s    <= 0;
+        -- r.pm_sec_index stays at its reset value 0 because pm_valid_s
+        -- is tied '0' here; no separate tie-off needed.
     end generate no_pm;
 
     -- ------------------------------------------------------------------ --
-    -- AM-side paired-shadow latch.  Sets at every pm_valid edge so the   --
-    -- host's SHADOW read returns AM values from the same broadcast       --
-    -- second as the PM read that latched it.                              --
+    -- Glue registers (see reg_type comment in the declarative part):     --
+    -- carrier-PLL phase adapter, pm_sec_index latch and the AM-side      --
+    -- paired shadow that backs the SHADOW atomic pair-read.               --
     -- ------------------------------------------------------------------ --
-    paired_proc : process(clk)
+    comb : process (all)
+        variable v : reg_type;
+    begin
+        v := r;
+
+        -- Carrier-PLL phase adapter: register the negated, scaled
+        -- CORDIC phase (see the sign-inversion note at the carrier-PLL
+        -- adapter comment above).
+        v.phase_for_pll   := shift_left(resize(-cordic_phase, POST_W),
+                                        PLL_PHASE_ADAPTER_SHIFT);
+        v.phase_for_pll_v := cordic_v;
+
+        -- Accumulate AM events between PM ticks.
+        if am_soft_v_s = '1' then
+            v.am_seen_since_pm := '1';
+        end if;
+        if minute_mk_gated = '1' then
+            v.am_mm_since_pm := '1';
+        end if;
+
+        -- On the PM tick: latch pm_bit_ix (so SOFT_PM's [5:0] field is
+        -- atomic with the LLR), snapshot the latest live AM metrics for
+        -- the SHADOW pair-read, and clear the event accumulators.  The
+        -- paired_valid flag reads the REGISTERED accumulator; an AM
+        -- event in the same cycle as the pm tick is not counted (it
+        -- can't occur -- AM fires ~200 ms into a second, PM ~1.0 s --
+        -- and the pre-refactor process had the same precedence).
+        if pm_valid_s = '1' then
+            v.pm_sec_index         := pm_bit_ix;
+            v.am_soft_paired       := am_soft_s;
+            v.mm_soft_paired       := mm_soft_s;
+            v.am_bit_idx_paired    := bit_ix;
+            v.am_soft_paired_valid := r.am_seen_since_pm;
+            v.am_mm_paired         := r.am_mm_since_pm;
+            v.am_seen_since_pm     := '0';
+            v.am_mm_since_pm       := '0';
+        end if;
+
+        if rst = '1' then
+            v := R_RESET;
+        end if;
+
+        rin <= v;
+    end process;
+
+    seq : process (clk)
     begin
         if rising_edge(clk) then
-            if rst = '1' then
-                am_seen_since_pm_s     <= '0';
-                am_mm_since_pm_s       <= '0';
-                am_soft_paired_s       <= (others => '0');
-                mm_soft_paired_s       <= (others => '0');
-                am_bit_idx_paired_s    <= 0;
-                am_soft_paired_valid_s <= '0';
-                am_mm_paired_s         <= '0';
-            else
-                -- Accumulate AM events between PM ticks.
-                if am_soft_v_s = '1' then
-                    am_seen_since_pm_s <= '1';
-                end if;
-                if minute_mk_gated = '1' then
-                    am_mm_since_pm_s <= '1';
-                end if;
-
-                -- On the PM tick: snapshot the latest live AM signals
-                -- and reset the between-tick event accumulators.
-                if pm_valid_s = '1' then
-                    am_soft_paired_s       <= am_soft_s;
-                    mm_soft_paired_s       <= mm_soft_s;
-                    am_bit_idx_paired_s    <= bit_ix;
-                    am_soft_paired_valid_s <= am_seen_since_pm_s;
-                    am_mm_paired_s         <= am_mm_since_pm_s;
-                    am_seen_since_pm_s     <= '0';
-                    am_mm_since_pm_s       <= '0';
-                end if;
-            end if;
+            r <= rin;
         end if;
     end process;
 
@@ -857,7 +856,7 @@ begin
     -- internal bit_index for last_frame slot routing; only the
     -- status_out value (= what the host reads via SOFT_AM / STATUS)
     -- is overridden.
-    bit_ix_exported <= pm_sec_index_s when pm_sync_state_s = "10"
+    bit_ix_exported <= r.pm_sec_index when pm_sync_state_s = "10"
                        else bit_ix;
 
     -- ------------------------------------------------------------------ --
@@ -889,18 +888,18 @@ begin
     status_out.pll_lock      <= pll_lock;
     status_out.anchor_held   <= anchor_held_s;
 
-    -- AM-paired snapshot (latched on pm_valid).  See paired_proc.
-    status_out.am_soft_paired       <= am_soft_paired_s;
-    status_out.mm_soft_paired       <= mm_soft_paired_s;
-    status_out.am_bit_index_paired  <= am_bit_idx_paired_s;
-    status_out.am_soft_paired_valid <= am_soft_paired_valid_s;
-    status_out.am_mm_paired         <= am_mm_paired_s;
+    -- AM-paired snapshot (latched on pm_valid in the glue comb/seq).
+    status_out.am_soft_paired       <= r.am_soft_paired;
+    status_out.mm_soft_paired       <= r.mm_soft_paired;
+    status_out.am_bit_index_paired  <= r.am_bit_idx_paired;
+    status_out.am_soft_paired_valid <= r.am_soft_paired_valid;
+    status_out.am_mm_paired         <= r.am_mm_paired;
 
     -- PM-side status fields.
     status_out.pm_soft        <= pm_soft_s;
     status_out.pm_valid       <= pm_valid_s;
     status_out.pm_minute_mark <= pm_frame_mm_s;
-    status_out.pm_sec_index   <= pm_sec_index_s;
+    status_out.pm_sec_index   <= r.pm_sec_index;
     status_out.pm_bit_index   <= pm_bit_ix;
     status_out.pm_sync_state  <= pm_sync_state_s;
     status_out.pm_lock_qual   <= pm_lock_qual_s;

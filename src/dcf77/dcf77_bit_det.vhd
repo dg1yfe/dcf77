@@ -251,16 +251,9 @@ begin
                             env_word_t'high, env_word_t'low,
                             fixed_saturate, fixed_truncate);
 
-    process (r.have_anchor, r.mm_counter)
-    begin
-        if r.have_anchor = '0' then
-            sync_state <= sync_search;
-        elsif r.mm_counter > 0 then
-            sync_state <= sync_lock;
-        else
-            sync_state <= sync_hold;
-        end if;
-    end process;
+    sync_state <= sync_search when r.have_anchor = '0' else
+                  sync_lock   when r.mm_counter > 0   else
+                  sync_hold;
 
     comb : process (all)
         variable v          : reg_type;
@@ -573,6 +566,10 @@ begin
 
         end if;
 
+        if rst = '1' then
+            v := R_RESET;
+        end if;
+
         rin <= v;
     end process;
 
@@ -585,11 +582,7 @@ begin
     seq : process (clk)
     begin
         if rising_edge(clk) then
-            if rst = '1' then
-                r <= R_RESET;
-            else
-                r <= rin;
-            end if;
+            r <= rin;
         end if;
     end process;
 
