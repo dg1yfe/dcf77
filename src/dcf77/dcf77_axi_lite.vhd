@@ -20,7 +20,7 @@
 --   0x28 R    SYNC_DIAG    sync_q / mm_q / cycle_in_min
 --   0x2C R    SOFT_AM         am_soft + mm_soft + sec_index + valid + mm
 --   0x30 R    SOFT_PM         pm_soft + sec_index + valid + minute_mark
---   0x34 R/W1C SOFT_IRQ       [0] second_tick (W1C), [1] pll_lock, [2] anchor_held
+--   0x34 R/W1C IRQ_FLAG       per-source sticky flags (see IRQ_*_BIT in dcf77_pkg)
 --   0x38 R    PM_STATUS       pm_bit_index + sync_state + time_valid + lock_qual
 --   0x3C R    PM_TIME_HMS     PM-decoded HH:MM (layout = TIME_HMS)
 --   0x40 R    PM_DATE         PM-decoded year/month/day/weekday (layout = DATE)
@@ -37,6 +37,14 @@
 --   0x58 R/W  PLL_OFFSET      NCO phase_inc_offset, signed 24 b
 --                             R = live offset
 --                             W = jam offset with bits[23:0]
+--   0x5C R/W  IRQ_MASK        per-source enable for the `irq` output
+--                             (bit positions match IRQ_FLAG one-for-one)
+--
+-- Interrupt: a level-sensitive `irq` output goes high while any
+-- unmasked IRQ_FLAG bit is set (OR(IRQ_FLAG & IRQ_MASK)).  Hardware
+-- edge-detects nine source signals and latches the rising edges into
+-- IRQ_FLAG until the host W1Cs them.  Reset value of IRQ_MASK is 0,
+-- so the host opts in by writing each desired source.
 -- =========================================================================
 
 library ieee;
@@ -118,7 +126,13 @@ entity dcf77_axi_lite is
         -- ADC stream (separate from the AXI clock domain by convention; the
         -- core assumes they're synchronous to s_axi_aclk).
         adc_sample    : in  adc_sample_t;
-        adc_valid     : in  std_logic
+        adc_valid     : in  std_logic;
+
+        -- Level-sensitive interrupt output.  High while any unmasked
+        -- IRQ_FLAG bit is set; cleared when the host W1Cs the flag(s).
+        -- Wire to your CPU's interrupt controller; if not used, leave
+        -- open and synthesis will prune the unused logic.
+        irq           : out std_logic
     );
 end entity dcf77_axi_lite;
 
@@ -142,10 +156,24 @@ architecture rtl of dcf77_axi_lite is
     signal pll_override : dcf77_pll_override_type;
     signal status       : dcf77_status_type;
 
-    -- Sticky second_tick (set on every bit_valid pulse from the core's
-    -- bit_det, cleared when the host writes '1' to SOFT_IRQ[0]).
-    signal soft_irq_q    : std_logic := '0';
-    signal soft_irq_clr  : std_logic;     -- pulse from writemux
+    -- IRQ aggregator state.  irq_flag_q holds the 32-bit sticky flag
+    -- register that the host reads via REG_IRQ_FLAG.  Bits are set on
+    -- the rising edge of each source signal and cleared by the W1C
+    -- pulse from the writemux.  Reset to all-zero.
+    signal irq_flag_q   : std_logic_vector(31 downto 0) := (others => '0');
+    signal irq_flag_clr : std_logic_vector(31 downto 0); -- per-bit pulse from writemux
+
+    -- Edge-detect: previous-cycle samples of each source signal.  The
+    -- comb logic compares (source AND NOT prev) to obtain a one-clock
+    -- pulse per rising edge.
+    signal prev_am_soft_valid : std_logic := '0';
+    signal prev_minute_mark   : std_logic := '0';
+    signal prev_pm_minute_mark: std_logic := '0';
+    signal prev_time_valid    : std_logic := '0';
+    signal prev_pm_time_valid : std_logic := '0';
+    signal prev_sync_state    : sync_state_t := sync_search;
+    signal prev_pm_sync_lock  : std_logic := '0';    -- 1 while pm_sync_state = "10"
+    signal prev_pll_lock      : std_logic := '0';
 
     -- Combined active-high reset for the core: external !aresetn OR the
     -- host-controllable soft_reset bit.
@@ -204,7 +232,7 @@ begin
 
             FromStatus  => status,
             FromControl => control,
-            FromSoftIrq => soft_irq_q
+            FromIrqFlag => irq_flag_q
         );
 
     ------------------------------------------------------------------ --
@@ -227,7 +255,7 @@ begin
 
             ToControl     => control,
             ToPllOverride => pll_override,
-            SoftIrqClear  => soft_irq_clr
+            IrqFlagClear  => irq_flag_clr
         );
 
     ------------------------------------------------------------------ --
@@ -238,22 +266,99 @@ begin
     core_valid <= adc_valid and control.enable;
 
     ------------------------------------------------------------------ --
-    -- Second-tick sticky bit.  Set on every am_soft_valid pulse from   --
-    -- the core (i.e. on each end_of_bit).  Cleared by a host W1C       --
-    -- write to SOFT_IRQ[0].  Read by the AXI readmux.                  --
+    -- Interrupt-flag aggregator.                                       --
+    --                                                                  --
+    -- Edge-detects nine source signals from the core's status record   --
+    -- and sets the matching sticky bit on each rising edge.  Bits stay --
+    -- set until the host W1Cs them via REG_IRQ_FLAG.  The `irq` output --
+    -- is level-sensitive: high while any unmasked flag is set.         --
+    --                                                                  --
+    -- Reset behaviour: all sources sampled as '0' / sync_search, so    --
+    -- the first non-reset cycle does not generate spurious edges.      --
     ------------------------------------------------------------------ --
-    soft_irq_proc : process(s_axi_aclk)
+    irq_proc : process(s_axi_aclk)
+        variable v_irq_flag        : std_logic_vector(31 downto 0);
+        variable e_second          : std_logic;
+        variable e_am_mm           : std_logic;
+        variable e_pm_mm           : std_logic;
+        variable e_am_time_valid   : std_logic;
+        variable e_pm_time_valid   : std_logic;
+        variable e_am_sync_lost    : std_logic;
+        variable cur_pm_sync_lock  : std_logic;
+        variable e_pm_sync_lost    : std_logic;
+        variable e_pll_lock_rise   : std_logic;
+        variable e_pll_lock_fall   : std_logic;
     begin
         if rising_edge(s_axi_aclk) then
             if s_axi_aresetn = '0' then
-                soft_irq_q <= '0';
-            elsif soft_irq_clr = '1' then
-                soft_irq_q <= '0';
-            elsif status.am_soft_valid = '1' then
-                soft_irq_q <= '1';
+                irq_flag_q          <= (others => '0');
+                prev_am_soft_valid  <= '0';
+                prev_minute_mark    <= '0';
+                prev_pm_minute_mark <= '0';
+                prev_time_valid     <= '0';
+                prev_pm_time_valid  <= '0';
+                prev_sync_state     <= sync_search;
+                prev_pm_sync_lock   <= '0';
+                prev_pll_lock       <= '0';
+            else
+                -- Rising-edge detect on each source.
+                e_second        := status.am_soft_valid and not prev_am_soft_valid;
+                e_am_mm         := status.minute_mark    and not prev_minute_mark;
+                e_pm_mm         := status.pm_minute_mark and not prev_pm_minute_mark;
+                e_am_time_valid := status.time_valid     and not prev_time_valid;
+                e_pm_time_valid := status.pm_time_valid  and not prev_pm_time_valid;
+
+                -- AM "sync lost" = was LOCK last cycle, no longer LOCK.
+                if prev_sync_state = sync_lock and status.sync_state /= sync_lock then
+                    e_am_sync_lost := '1';
+                else
+                    e_am_sync_lost := '0';
+                end if;
+
+                -- PM "sync lost" = was LOCK ("10") last cycle, no longer LOCK.
+                if status.pm_sync_state = "10" then
+                    cur_pm_sync_lock := '1';
+                else
+                    cur_pm_sync_lock := '0';
+                end if;
+                e_pm_sync_lost := prev_pm_sync_lock and not cur_pm_sync_lock;
+
+                e_pll_lock_rise := status.pll_lock and not prev_pll_lock;
+                e_pll_lock_fall := prev_pll_lock   and not status.pll_lock;
+
+                -- Build the per-bit "set" vector for this cycle.
+                v_irq_flag := (others => '0');
+                v_irq_flag(IRQ_SECOND_TICK_BIT)    := e_second;
+                v_irq_flag(IRQ_AM_MINUTE_MARK_BIT) := e_am_mm;
+                v_irq_flag(IRQ_PM_MINUTE_MARK_BIT) := e_pm_mm;
+                v_irq_flag(IRQ_AM_TIME_VALID_BIT)  := e_am_time_valid;
+                v_irq_flag(IRQ_PM_TIME_VALID_BIT)  := e_pm_time_valid;
+                v_irq_flag(IRQ_AM_SYNC_LOST_BIT)   := e_am_sync_lost;
+                v_irq_flag(IRQ_PM_SYNC_LOST_BIT)   := e_pm_sync_lost;
+                v_irq_flag(IRQ_PLL_LOCK_RISE_BIT)  := e_pll_lock_rise;
+                v_irq_flag(IRQ_PLL_LOCK_FALL_BIT)  := e_pll_lock_fall;
+
+                -- Sticky: OR in new sets, AND-mask off the W1C clears.
+                -- If a set and a clear collide on the same bit / same
+                -- cycle, the set wins (don't lose the event).
+                irq_flag_q <= (irq_flag_q and not irq_flag_clr) or v_irq_flag;
+
+                -- Sample previous-cycle source values.
+                prev_am_soft_valid  <= status.am_soft_valid;
+                prev_minute_mark    <= status.minute_mark;
+                prev_pm_minute_mark <= status.pm_minute_mark;
+                prev_time_valid     <= status.time_valid;
+                prev_pm_time_valid  <= status.pm_time_valid;
+                prev_sync_state     <= status.sync_state;
+                prev_pm_sync_lock   <= cur_pm_sync_lock;
+                prev_pll_lock       <= status.pll_lock;
             end if;
         end if;
     end process;
+
+    -- Level-sensitive irq output: OR-reduce(flag AND mask).
+    irq <= '1' when (irq_flag_q and control.irq_mask) /= (irq_flag_q'range => '0')
+           else '0';
 
     ------------------------------------------------------------------ --
     -- DCF77 receiver core                                                --

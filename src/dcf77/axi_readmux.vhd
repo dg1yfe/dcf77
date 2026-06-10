@@ -42,9 +42,9 @@ entity axi_readmux is
         FromStatus  : in dcf77_status_type;
         FromControl : in dcf77_control_type;
 
-        -- Sticky second_tick bit (set on bit_valid, cleared by host
-        -- write to SOFT_IRQ).  Driven by the axi_lite wrapper.
-        FromSoftIrq : in std_logic
+        -- Live sticky-flag register (32-bit) from the axi_lite shell's
+        -- edge-detect aggregator.  Read by REG_IRQ_FLAG.
+        FromIrqFlag : in std_logic_vector(31 downto 0)
     );
 end entity axi_readmux;
 
@@ -189,14 +189,13 @@ begin
                         v.ro.data := (others => '0');
                         v.ro.resp := AXI_RESPONSE_DECERR;
                     end if;
-                when REG_SOFT_IRQ    =>
-                    -- Mixed register: bit 0 is the sticky second_tick
-                    -- (W1C from the writemux); bits 2..1 mirror per-bit
-                    -- status flags from the latched status record.
-                    v.ro.data := (others => '0');
-                    v.ro.data(0) := FromSoftIrq;
-                    v.ro.data(1) := r.st.pll_lock;
-                    v.ro.data(2) := r.st.anchor_held;
+                when REG_IRQ_FLAG =>
+                    -- 32-bit sticky-flag register, live from the
+                    -- axi_lite shell's edge-detect aggregator.
+                    v.ro.data := FromIrqFlag;
+                when REG_IRQ_MASK =>
+                    -- Echo the host-written mask back from control.
+                    v.ro.data := r.ct.irq_mask;
                 when others =>
                     v.ro.data := (others => '0');
                     v.ro.resp := AXI_RESPONSE_DECERR;

@@ -337,6 +337,47 @@ static void test_read_am_frame(void)
     EXPECT_EQ_INT((f >> 59) & 0x1Full, 0);
 }
 
+static void test_irq_access(void)
+{
+    printf("test_irq_access\n");
+    clear_regs();
+    dcf77_handle_t h = { .base = FAKE_BASE };
+
+    /* Reset state: flag = 0, mask = 0, second_tick = false. */
+    EXPECT_EQ_INT(dcf77_irq_read_flags(&h), 0);
+    EXPECT_EQ_INT(dcf77_irq_get_mask(&h), 0);
+    EXPECT(!dcf77_second_tick(&h));
+
+    /* Plant a few sticky flag bits + a mask. The fake register file
+     * is direct-mapped, so reads/writes hit the same backing word. */
+    fake_regs[DCF77_REG_IRQ_FLAG / 4] =
+        DCF77_IRQ_SECOND_TICK_BIT | DCF77_IRQ_PLL_LOCK_RISE_BIT;
+    fake_regs[DCF77_REG_IRQ_MASK / 4] = DCF77_IRQ_SECOND_TICK_BIT;
+
+    uint32_t flags = dcf77_irq_read_flags(&h);
+    EXPECT(flags & DCF77_IRQ_SECOND_TICK_BIT);
+    EXPECT(flags & DCF77_IRQ_PLL_LOCK_RISE_BIT);
+    EXPECT(dcf77_second_tick(&h));
+
+    /* dcf77_irq_clear performs a W1C write at the AXI level. The
+     * fake register file just stores the write (it doesn't model the
+     * sticky / W1C HW behaviour), so we can only verify that the
+     * write went through. */
+    dcf77_irq_clear(&h, DCF77_IRQ_SECOND_TICK_BIT);
+    EXPECT_EQ_INT(fake_regs[DCF77_REG_IRQ_FLAG / 4],
+                  DCF77_IRQ_SECOND_TICK_BIT);  /* last write */
+
+    dcf77_irq_set_mask(&h, 0xDEADBEEFu);
+    EXPECT_EQ_INT(fake_regs[DCF77_REG_IRQ_MASK / 4], 0xDEADBEEFu);
+    EXPECT_EQ_INT(dcf77_irq_get_mask(&h), 0xDEADBEEFu);
+
+    /* clear_second_tick is the bit-0 helper. */
+    fake_regs[DCF77_REG_IRQ_FLAG / 4] = 0u;
+    dcf77_clear_second_tick(&h);
+    EXPECT_EQ_INT(fake_regs[DCF77_REG_IRQ_FLAG / 4],
+                  DCF77_IRQ_SECOND_TICK_BIT);
+}
+
 /* ---------------------------------------------------------------- */
 
 int main(void)
@@ -352,6 +393,7 @@ int main(void)
     test_am_only_fallback();
     test_pll_gating();
     test_read_am_frame();
+    test_irq_access();
 
     if (fails == 0) {
         printf("\nAll driver unit tests passed.\n");

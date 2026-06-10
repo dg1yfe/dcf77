@@ -1,17 +1,21 @@
 /*
  * dcf77_demo.c — bare-metal Microblaze example.
  *
- * Polls the dcf77_axi_lite slave once per second and prints decoded
- * time over UART. Uses the MLD to combine AM + PM soft metrics for
- * earlier lock on marginal signals.
+ * Polls the dcf77_axi_lite slave's IRQ_FLAG register and prints
+ * decoded time over UART. Uses the MLD to combine AM + PM soft
+ * metrics for earlier lock on marginal signals.
+ *
+ * The hardware exposes a single level-sensitive `irq` line that is
+ * high while any unmasked IRQ_FLAG bit is set. This demo enables a
+ * useful subset of sources and dispatches per-source handlers from
+ * the main loop. A production design would wire `irq` to the
+ * Microblaze interrupt controller and replace the polling loop
+ * with an ISR — the source-dispatch logic stays identical.
  *
  * Wiring assumptions:
  *   - The slave's base address is exposed via xparameters.h as
  *     XPAR_DCF77_AXI_LITE_0_BASEADDR.
  *   - Standard Xilinx UARTLite mapped through xil_printf().
- *
- * Polls run in a busy loop. For a real product, drive the poll from
- * a 1 ms timer interrupt and call this loop body from the ISR.
  */
 #include <xil_io.h>
 #include <xil_printf.h>
@@ -47,6 +51,41 @@ static void print_time(const dcf77_time_t *t, dcf77_source_t mark)
                (unsigned)t->leap_announce);
 }
 
+/* Sources to wake up on. SECOND_TICK drives the per-second MLD feed;
+ * the *_RISE / *_LOST events surface state changes the user cares
+ * about even when soft metrics are quiet. Add more bits to taste. */
+#define DEMO_IRQ_MASK   (DCF77_IRQ_SECOND_TICK_BIT      \
+                       | DCF77_IRQ_AM_MINUTE_MARK_BIT   \
+                       | DCF77_IRQ_PM_MINUTE_MARK_BIT   \
+                       | DCF77_IRQ_AM_TIME_VALID_BIT    \
+                       | DCF77_IRQ_PM_TIME_VALID_BIT    \
+                       | DCF77_IRQ_PLL_LOCK_RISE_BIT    \
+                       | DCF77_IRQ_PLL_LOCK_FALL_BIT    \
+                       | DCF77_IRQ_AM_SYNC_LOST_BIT     \
+                       | DCF77_IRQ_PM_SYNC_LOST_BIT)
+
+static void handle_second_tick(dcf77_handle_t *dcf, dcf77_mld_t *mld,
+                               uint8_t *last_sec)
+{
+    dcf77_soft_metrics_t s;
+    if (!dcf77_read_soft(dcf, &s)) {
+        return;
+    }
+
+    /* Re-scale PM weight at the minute boundary (sec_index wrap). */
+    if (*last_sec != 0xFFu && s.sec_index < *last_sec) {
+        dcf77_quality_t q;
+        dcf77_read_quality(dcf, &q);
+        dcf77_mld_set_beta(mld, q.pm_lock_qual);
+    }
+    *last_sec = s.sec_index;
+
+    dcf77_time_t t;
+    if (dcf77_mld_feed(mld, &s, &t)) {
+        print_time(&t, DCF77_SOURCE_MLD);
+    }
+}
+
 int main(void)
 {
     dcf77_handle_t dcf;
@@ -61,68 +100,56 @@ int main(void)
                (unsigned)dcf.pm_present,
                (unsigned)dcf.pm_debug_present);
 
-    /* Make sure the receiver is enabled (sticky bit, default '1' after
-     * aresetn — but explicit is fine). */
+    /* Enable the receiver and unmask the IRQ sources we care about. */
     dcf77_enable(&dcf, true);
+    dcf77_irq_set_mask(&dcf, DEMO_IRQ_MASK);
 
-    /* Track which seconds we've already logged so we don't repeat. */
-    uint8_t last_logged_sec = 0xFF;
-
-    /* Re-pull pm_lock_qual every minute boundary to scale β. */
     uint8_t last_sec = 0xFF;
 
     for (;;) {
-        if (!dcf77_second_tick(&dcf)) {
+        /* Poll the IRQ_FLAG register. A production design would
+         * block in an ISR triggered by the `irq` line; the dispatch
+         * below is identical in both forms. */
+        uint32_t flags = dcf77_irq_read_flags(&dcf);
+        if ((flags & DEMO_IRQ_MASK) == 0u) {
             continue;
         }
 
-        dcf77_soft_metrics_t s;
-        bool any = dcf77_read_soft(&dcf, &s);
-        dcf77_clear_second_tick(&dcf);
+        /* W1C the flags we're about to service. Clearing first means
+         * any source that re-fires during our handlers will set a
+         * fresh flag and we'll see it next loop iteration. */
+        dcf77_irq_clear(&dcf, flags & DEMO_IRQ_MASK);
 
-        if (!any) {
-            continue;
+        if (flags & DCF77_IRQ_PLL_LOCK_RISE_BIT) {
+            xil_printf("[pll ] carrier-PLL locked\r\n");
+        }
+        if (flags & DCF77_IRQ_PLL_LOCK_FALL_BIT) {
+            xil_printf("[pll ] carrier-PLL lost lock\r\n");
+        }
+        if (flags & DCF77_IRQ_AM_SYNC_LOST_BIT) {
+            xil_printf("[am  ] sync lost\r\n");
+        }
+        if (flags & DCF77_IRQ_PM_SYNC_LOST_BIT) {
+            xil_printf("[pm  ] sync lost\r\n");
         }
 
-        /* Re-scale PM weight at the minute boundary. */
-        if (last_sec != 0xFFu && s.sec_index < last_sec) {
-            dcf77_quality_t q;
-            dcf77_read_quality(&dcf, &q);
-            dcf77_mld_set_beta(&mld, q.pm_lock_qual);
-        }
-        last_sec = s.sec_index;
-
-        /* Feed the MLD; on success, print the decoded time. */
-        dcf77_time_t t;
-        if (dcf77_mld_feed(&mld, &s, &t)) {
-            print_time(&t, DCF77_SOURCE_MLD);
-            continue;
+        if (flags & DCF77_IRQ_SECOND_TICK_BIT) {
+            handle_second_tick(&dcf, &mld, &last_sec);
         }
 
-        /* Periodically also surface AM/PM HW-decoded times so the
-         * user can see whether either path has locked yet. Avoid
-         * spamming — once per minute (at sec_index == 0) is enough. */
-        if (s.sec_index == 0u && last_logged_sec != 0u) {
+        /* Surface HW-decoded times when they pass parity. */
+        if (flags & DCF77_IRQ_PM_TIME_VALID_BIT) {
             dcf77_time_t ht;
             if (dcf77_read_pm_time(&dcf, &ht)) {
                 print_time(&ht, DCF77_SOURCE_PM);
-            } else if (dcf77_read_am_time(&dcf, &ht)) {
-                print_time(&ht, DCF77_SOURCE_AM);
-            } else {
-                dcf77_quality_t q;
-                dcf77_read_quality(&dcf, &q);
-                xil_printf("[wait] minute boundary  "
-                           "am_sync=%u pm_sync=%u pm_qual=%u "
-                           "rssi=%u env_min=%u noise=%u\r\n",
-                           (unsigned)q.am_sync_state,
-                           (unsigned)q.pm_sync_state,
-                           (unsigned)q.pm_lock_qual,
-                           (unsigned)q.rssi,
-                           (unsigned)q.env_min,
-                           (unsigned)q.noise);
             }
         }
-        last_logged_sec = s.sec_index;
+        if (flags & DCF77_IRQ_AM_TIME_VALID_BIT) {
+            dcf77_time_t ht;
+            if (dcf77_read_am_time(&dcf, &ht)) {
+                print_time(&ht, DCF77_SOURCE_AM);
+            }
+        }
     }
 
     /* unreachable */

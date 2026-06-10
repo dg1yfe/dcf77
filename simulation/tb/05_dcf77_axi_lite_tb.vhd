@@ -54,6 +54,8 @@ architecture tb of dcf77_axi_lite_tb is
     signal adc_sample : adc_sample_t := (others => '0');
     signal adc_valid  : std_logic := '0';
 
+    signal irq        : std_logic;
+
 begin
 
     aclk <= not aclk after CLK_PERIOD / 2;
@@ -85,7 +87,8 @@ begin
             s_axi_rvalid  => rvalid,
             s_axi_rready  => rready,
             adc_sample    => adc_sample,
-            adc_valid     => adc_valid
+            adc_valid     => adc_valid,
+            irq           => irq
         );
 
     test_runner : process
@@ -244,9 +247,9 @@ begin
 
             -----------------------------------------------------------------
             elsif run("read_unmapped_decerr") then
-                -- 0x5C is past the last mapped register (REG_PLL_OFFSET at
-                -- 0x58) -> DECERR.
-                axi_read(x"5C", rd, AXI_RESPONSE_DECERR);
+                -- 0x60 is past the last mapped register (REG_IRQ_MASK at
+                -- 0x5C) -> DECERR.
+                axi_read(x"60", rd, AXI_RESPONSE_DECERR);
 
             -----------------------------------------------------------------
             elsif run("pm_registers_reset") then
@@ -340,6 +343,57 @@ begin
                       "RSSI rises once CTRL.enable goes high");
 
                 adc_valid <= '0';
+
+            -----------------------------------------------------------------
+            elsif run("irq_registers_reset") then
+                -- IRQ_FLAG and IRQ_MASK both read 0 at reset; the irq
+                -- output is correspondingly low.
+                axi_read(x"34", rd, AXI_RESPONSE_OKAY);
+                check_equal(rd, std_logic_vector'(x"00000000"),
+                            "IRQ_FLAG reads 0 at reset");
+                axi_read(x"5C", rd, AXI_RESPONSE_OKAY);
+                check_equal(rd, std_logic_vector'(x"00000000"),
+                            "IRQ_MASK reads 0 at reset");
+                check_equal(irq, '0',
+                            "irq output stays low at reset (all masked)");
+
+            -----------------------------------------------------------------
+            elsif run("irq_mask_roundtrip") then
+                -- IRQ_MASK is plain R/W; the irq output should not move
+                -- while no flags are set (regardless of mask value).
+                axi_write(x"5C", x"DEADBEEF", AXI_RESPONSE_OKAY);
+                axi_read(x"5C", rd, AXI_RESPONSE_OKAY);
+                check_equal(rd, std_logic_vector'(x"DEADBEEF"),
+                            "IRQ_MASK round-trips DEADBEEF");
+                check_equal(irq, '0',
+                            "irq stays low while flag = 0 (mask irrelevant)");
+                axi_write(x"5C", x"FFFFFFFF", AXI_RESPONSE_OKAY);
+                axi_read(x"5C", rd, AXI_RESPONSE_OKAY);
+                check_equal(rd, std_logic_vector'(x"FFFFFFFF"),
+                            "IRQ_MASK accepts FFFFFFFF");
+                axi_write(x"5C", x"00000000", AXI_RESPONSE_OKAY);
+                axi_read(x"5C", rd, AXI_RESPONSE_OKAY);
+                check_equal(rd, std_logic_vector'(x"00000000"),
+                            "IRQ_MASK cleared back to 0");
+
+            -----------------------------------------------------------------
+            elsif run("irq_flag_w1c_no_effect_at_reset") then
+                -- Writing W1C bits when no flag is set must leave both
+                -- IRQ_FLAG and irq unchanged.  Verifies the readmux
+                -- accepts writes to 0x34 (no SLVERR) and the clear path
+                -- doesn't accidentally promote any bits.
+                axi_write(x"34", x"FFFFFFFF", AXI_RESPONSE_OKAY);
+                axi_read(x"34", rd, AXI_RESPONSE_OKAY);
+                check_equal(rd, std_logic_vector'(x"00000000"),
+                            "IRQ_FLAG stays 0 after spurious W1C");
+                check_equal(irq, '0', "irq stays low");
+
+            -----------------------------------------------------------------
+            -- End-to-end edge-detect → sticky-flag → irq behaviour is
+            -- exercised by the higher-level 10_/07_/14_/15_ TBs where a
+            -- real signal chain produces real source edges.  Adding it
+            -- here would require multi-second drive_tone() calls, which
+            -- would balloon the 05_tb runtime.
 
             end if;
         end loop;

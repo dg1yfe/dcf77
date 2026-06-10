@@ -47,10 +47,11 @@ entity axi_writemux is
         -- on each '1' write to REG_PLL_I_STATE_JAM[31].
         ToPllOverride : out dcf77_pll_override_type;
 
-        -- One-cycle pulse: AXI host wrote '1' to SOFT_IRQ[0].  The
-        -- containing axi_lite block uses this to clear its sticky
-        -- second_tick flop.
-        SoftIrqClear : out std_logic
+        -- One-cycle per-bit clear pulse for REG_IRQ_FLAG.  Bit i is
+        -- high for one cycle iff the host wrote '1' to that bit
+        -- position (W1C); the containing axi_lite shell uses this
+        -- vector to clear its sticky-flag register.
+        IrqFlagClear : out std_logic_vector(31 downto 0)
     );
 end entity axi_writemux;
 
@@ -65,7 +66,7 @@ architecture rtl of axi_writemux is
         bo  : axi4lite_write_response_channel_output_type;
         ctrl: dcf77_control_type;
         pll : dcf77_pll_override_type;
-        soft_irq_clear : std_logic;       -- one-cycle pulse
+        irq_flag_clear : std_logic_vector(31 downto 0); -- one-cycle pulse per bit
     end record;
 
     constant AWI_RESET : axi4lite_address_channel_input_type := (
@@ -95,7 +96,7 @@ architecture rtl of axi_writemux is
         bo   => BO_RESET,
         ctrl => DCF77_CONTROL_RESET,
         pll  => DCF77_PLL_OVERRIDE_RESET,
-        soft_irq_clear => '0'
+        irq_flag_clear => (others => '0')
     );
 
     signal r, rin : wmux_reg_type;
@@ -107,7 +108,7 @@ begin
     BOutput   <= r.bo;
     ToControl <= r.ctrl;
     ToPllOverride <= r.pll;
-    SoftIrqClear <= r.soft_irq_clear;
+    IrqFlagClear <= r.irq_flag_clear;
 
     comb : process (all)
         variable v       : wmux_reg_type;
@@ -125,7 +126,7 @@ begin
         v.ctrl.soft_reset    := '0';
         v.pll.offset_wr      := '0';   -- one-cycle pulses on register write
         v.pll.i_state_wr     := '0';
-        v.soft_irq_clear     := '0';
+        v.irq_flag_clear     := (others => '0');
 
         -- Register incoming AXI signals.
         v.awi := AWInput;
@@ -175,12 +176,15 @@ begin
                     v.ctrl.soft_reset := r.wi.data(1);
                     v.ctrl.env_mode   := r.wi.data(2);
                     v.bo.resp := AXI_RESPONSE_OKAY;
-                when REG_SOFT_IRQ =>
-                    -- W1C: a write of '1' to bit 0 clears the sticky
-                    -- second_tick in the containing axi_lite block.
-                    if r.wi.data(0) = '1' then
-                        v.soft_irq_clear := '1';
-                    end if;
+                when REG_IRQ_FLAG =>
+                    -- W1C: per-bit clear pulse to the containing
+                    -- axi_lite shell's sticky-flag register.
+                    v.irq_flag_clear := r.wi.data;
+                    v.bo.resp := AXI_RESPONSE_OKAY;
+                when REG_IRQ_MASK =>
+                    -- Plain R/W: store all 32 bits.  Reset all-zero, so
+                    -- the host opts in explicitly to each source.
+                    v.ctrl.irq_mask := r.wi.data;
                     v.bo.resp := AXI_RESPONSE_OKAY;
                 when REG_PLL_OFFSET =>
                     -- Write = jam phase_inc_offset with bits[23:0].

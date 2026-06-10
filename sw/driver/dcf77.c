@@ -162,13 +162,33 @@ float dcf77_snr_db(const dcf77_handle_t *h)
 
 bool dcf77_second_tick(const dcf77_handle_t *h)
 {
-    return (reg_read(h, DCF77_REG_SOFT_IRQ) & DCF77_SOFT_IRQ_SECOND_TICK_BIT) != 0u;
+    return (reg_read(h, DCF77_REG_IRQ_FLAG) & DCF77_IRQ_SECOND_TICK_BIT) != 0u;
 }
 
 void dcf77_clear_second_tick(const dcf77_handle_t *h)
 {
-    /* SOFT_IRQ bit 0 is write-1-to-clear. */
-    reg_write(h, DCF77_REG_SOFT_IRQ, DCF77_SOFT_IRQ_SECOND_TICK_BIT);
+    /* IRQ_FLAG is per-bit W1C; clear just the second_tick. */
+    reg_write(h, DCF77_REG_IRQ_FLAG, DCF77_IRQ_SECOND_TICK_BIT);
+}
+
+uint32_t dcf77_irq_read_flags(const dcf77_handle_t *h)
+{
+    return reg_read(h, DCF77_REG_IRQ_FLAG);
+}
+
+void dcf77_irq_clear(const dcf77_handle_t *h, uint32_t mask)
+{
+    reg_write(h, DCF77_REG_IRQ_FLAG, mask);
+}
+
+uint32_t dcf77_irq_get_mask(const dcf77_handle_t *h)
+{
+    return reg_read(h, DCF77_REG_IRQ_MASK);
+}
+
+void dcf77_irq_set_mask(const dcf77_handle_t *h, uint32_t mask)
+{
+    reg_write(h, DCF77_REG_IRQ_MASK, mask);
 }
 
 void dcf77_unpack_soft_pm(uint32_t soft_pm, dcf77_soft_metrics_t *s)

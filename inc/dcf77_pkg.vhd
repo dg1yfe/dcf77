@@ -255,14 +255,17 @@ package dcf77_pkg is
         enable     : std_logic;     -- master enable
         soft_reset : std_logic;     -- pulse this high to reset the core
         env_mode   : std_logic;     -- 0 = abs(I) only, 1 = |I| + 3/8*|Q|
+        irq_mask   : std_logic_vector(31 downto 0); -- per-bit irq enables
     end record;
 
     constant DCF77_CONTROL_RESET : dcf77_control_type := (
         enable     => '1',          -- default-on
         soft_reset => '0',
-        env_mode   => '0'           -- abs(I) by default; host can set to
+        env_mode   => '0',          -- abs(I) by default; host can set to
                                     -- '1' for |I|+3/8|Q| (interferer-robust
                                     -- at ~0.5 dB sensitivity cost).
+        irq_mask   => (others => '0') -- all sources masked off at reset
+                                    -- (host opts in by writing IRQ_MASK).
     );
 
     ---------------------------------------------------------------------------
@@ -303,7 +306,11 @@ package dcf77_pkg is
     constant REG_SYNC_DIAG   : natural := 10;  -- 0x28 R   sync_q / mm_q / cycle_in_min
     constant REG_SOFT_AM        : natural := 11;  -- 0x2C R   AM soft metric + flags
     constant REG_SOFT_PM        : natural := 12;  -- 0x30 R   PM soft metric + flags
-    constant REG_SOFT_IRQ       : natural := 13;  -- 0x34 mixed: bit 0 R/W1C, bits 2:1 R
+    -- 0x34: per-source sticky interrupt flags (W1C).  See the
+    -- IRQ_*_BIT constants below for the bit layout.  Reading returns
+    -- the live sticky state; writing '1' to a bit clears that flag.
+    -- The `irq` output of dcf77_axi_lite is OR(IRQ_FLAG & IRQ_MASK).
+    constant REG_IRQ_FLAG       : natural := 13;  -- 0x34 R/W1C interrupt sources
     constant REG_PM_STATUS      : natural := 14;  -- 0x38 R   PM sync/lock diagnostics
     constant REG_PM_TIME_HMS    : natural := 15;  -- 0x3C R   PM-decoded HH:MM
     constant REG_PM_DATE        : natural := 16;  -- 0x40 R   PM-decoded date
@@ -331,6 +338,40 @@ package dcf77_pkg is
     constant REG_PLL_PHASE_FILT : natural := 20;  -- 0x50 R
     constant REG_PLL_I_STATE    : natural := 21;  -- 0x54 RW
     constant REG_PLL_OFFSET     : natural := 22;  -- 0x58 RW
+    -- IRQ_MASK: per-bit enable for the irq output line.  Bit positions
+    -- match REG_IRQ_FLAG one-for-one.  Reset value is 0 → host opts in.
+    constant REG_IRQ_MASK       : natural := 23;  -- 0x5C RW
+
+    ---------------------------------------------------------------------------
+    -- Interrupt source bit positions for REG_IRQ_FLAG and REG_IRQ_MASK.
+    -- The dcf77_axi_lite shell edge-detects each source signal from the
+    -- core's dcf77_status_type, sets the corresponding sticky bit on
+    -- the rising edge, and asserts the `irq` output while any
+    -- unmasked sticky bit is set.  Bits not listed here are reserved
+    -- (read 0; writes ignored on the flag register, ignored on the mask
+    -- register since they don't drive anything).
+    constant IRQ_SECOND_TICK_BIT    : natural := 0;
+        -- 1 Hz rising edge on status.am_soft_valid (= bit_valid pulse
+        -- from the AM bit_det).  The canonical "fresh soft metrics are
+        -- ready" interrupt.
+    constant IRQ_AM_MINUTE_MARK_BIT : natural := 1;
+        -- Rising edge on status.minute_mark (AM frame just completed).
+    constant IRQ_PM_MINUTE_MARK_BIT : natural := 2;
+        -- Rising edge on status.pm_minute_mark (PM SIK signature edge).
+        -- Tied off when WITH_PM = false.
+    constant IRQ_AM_TIME_VALID_BIT  : natural := 3;
+        -- Rising edge on status.time_valid (fresh AM decode passed parity).
+    constant IRQ_PM_TIME_VALID_BIT  : natural := 4;
+        -- Rising edge on status.pm_time_valid.  Tied off when WITH_PM = false.
+    constant IRQ_AM_SYNC_LOST_BIT   : natural := 5;
+        -- AM sync_state transitioned out of sync_lock.
+    constant IRQ_PM_SYNC_LOST_BIT   : natural := 6;
+        -- PM sync_state transitioned out of LOCK (value "10").
+        -- Tied off when WITH_PM = false.
+    constant IRQ_PLL_LOCK_RISE_BIT  : natural := 7;
+        -- Carrier-PLL lock_state 0 -> 1.
+    constant IRQ_PLL_LOCK_FALL_BIT  : natural := 8;
+        -- Carrier-PLL lock_state 1 -> 0.
 
     ---------------------------------------------------------------------------
     -- 32-b register pack / unpack helpers.  The bit layouts below match the
@@ -349,13 +390,19 @@ package dcf77_pkg is
     --   bit   2     : time_valid
     --   bit   3     : pm_present       (1 = WITH_PM       was enabled at synth)
     --   bit   4     : pm_debug_present (1 = WITH_PM_DEBUG was enabled at synth)
+    --   bit   5     : pll_lock         (live)
+    --   bit   6     : anchor_held      (bit_det's AM anchor state, live)
     --   bits 13..8  : bit_index
     --   bits 31..16 : rssi
     -- Bits 3 and 4 are not part of dcf77_status_type (they're synthesis
     -- constants); the axi_readmux ORs them in directly from its own
-    -- generic.
+    -- generic.  Bits 5 and 6 come from the status record's live
+    -- pll_lock / anchor_held fields (host-readable replacements for the
+    -- defunct SOFT_IRQ bits).
     constant REG_STATUS_PM_PRESENT_BIT       : natural := 3;
     constant REG_STATUS_PM_DEBUG_PRESENT_BIT : natural := 4;
+    constant REG_STATUS_PLL_LOCK_BIT         : natural := 5;
+    constant REG_STATUS_ANCHOR_HELD_BIT      : natural := 6;
     function status_to_slv (s : dcf77_status_type) return std_logic_vector;
 
     -- TIME_HMS register: bits 5..0 minute, 12..8 hour.
@@ -522,6 +569,10 @@ package body dcf77_pkg is
     begin
         r(1 downto 0)   := sync_state_to_slv(s.sync_state);
         r(2)            := s.time_valid;
+        -- bits 3 and 4 are ORed in by axi_readmux from its WITH_PM /
+        -- WITH_PM_DEBUG generics (synthesis-time capability bits).
+        r(REG_STATUS_PLL_LOCK_BIT)    := s.pll_lock;
+        r(REG_STATUS_ANCHOR_HELD_BIT) := s.anchor_held;
         r(13 downto 8)  := std_logic_vector(to_unsigned(s.bit_index, 6));
         r(31 downto 16) := std_logic_vector(s.rssi);
         return r;

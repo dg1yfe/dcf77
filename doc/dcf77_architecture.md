@@ -152,35 +152,73 @@ where the matched filter still has its full ~27 dB despreading gain.
 
 23 of the 64 word slots are used. All registers are 32 bits.
 
-| Offset | RW   | Name              | Gate          | Content                                    |
-| ------ | ---- | ----------------- | ------------- | ------------------------------------------ |
-| 0x00   | RW   | CTRL              | —             | enable, soft_reset                          |
-| 0x04   | RO   | STATUS            | —             | sync_state, time_valid, **PM_PRESENT, PM_DEBUG_PRESENT**, bit_index, RSSI |
-| 0x08   | RO   | TIME_HMS          | —             | AM-decoded minute, hour                    |
-| 0x0C   | RO   | DATE              | —             | AM-decoded year, month, day, weekday       |
-| 0x10   | RO   | FLAGS             | —             | AM-decoded DST/leap flags                  |
-| 0x14   | RO   | RSSI              | —             | env_max top 16 b                           |
-| 0x18   | RO   | LAST_FRAME0       | —             | AM raw frame bits 0..31                    |
-| 0x1C   | RO   | LAST_FRAME1       | —             | AM raw frame bits 32..58                   |
-| 0x20   | RO   | ENV_MIN           | —             | env_min trough tracker top 16 b            |
-| 0x24   | RO   | NOISE             | —             | noise-MAD IIR top 16 b                     |
-| 0x28   | RO   | SYNC_DIAG         | —             | sync_q, mm_q, cycle_in_min                 |
-| 0x2C   | RO   | SOFT_AM           | —             | AM bit LLR (12 b signed) + per-bit flags   |
-| 0x30   | RO   | **SOFT_PM**       | WITH_PM       | PM bit LLR (12 b signed) + sec_index + valid + minute_mark |
-| 0x34   | RW   | SOFT_IRQ          | —             | sticky second_tick (W1C) + status mirror   |
-| 0x38   | RO   | **PM_STATUS**     | WITH_PM       | pm_bit_index, pm_sync_state, pm_time_valid, pm_lock_qual |
-| 0x3C   | RO   | **PM_TIME_HMS**   | WITH_PM       | PM-decoded minute, hour                    |
-| 0x40   | RO   | **PM_DATE**       | WITH_PM       | PM-decoded year, month, day, weekday       |
-| 0x44   | RO   | **PM_FLAGS**      | WITH_PM       | PM-decoded DST/leap flags                  |
-| 0x48   | RO   | **PM_LAST_FRAME0**| WITH_PM       | PM raw frame bits 0..31                    |
-| 0x4C   | RO   | **PM_LAST_FRAME1**| WITH_PM       | PM raw frame bits 32..58                   |
-| 0x50   | RO   | **PLL_PHASE_FILT**| WITH_PM_DEBUG | Carrier-PLL LPF state, signed 29 b (snapshot) |
-| 0x54   | RW   | **PLL_I_STATE**   | WITH_PM_DEBUG | Carrier-PLL integrator state (jam-write)   |
-| 0x58   | RW   | **PLL_OFFSET**    | WITH_PM_DEBUG | NCO `phase_inc_offset` (jam-write)         |
+| Offset | RW    | Name              | Gate          | Content                                                                  |
+| ------ | ----- | ----------------- | ------------- | ------------------------------------------------------------------------ |
+| 0x00   | RW    | CTRL              | —             | enable, soft_reset, env_mode                                              |
+| 0x04   | RO    | STATUS            | —             | sync_state, time_valid, PM_PRESENT, PM_DEBUG_PRESENT, pll_lock, anchor_held, bit_index, RSSI |
+| 0x08   | RO    | TIME_HMS          | —             | AM-decoded minute, hour                                                   |
+| 0x0C   | RO    | DATE              | —             | AM-decoded year, month, day, weekday                                      |
+| 0x10   | RO    | FLAGS             | —             | AM-decoded DST/leap flags                                                 |
+| 0x14   | RO    | RSSI              | —             | env_max top 16 b                                                          |
+| 0x18   | RO    | LAST_FRAME0       | —             | AM raw frame bits 0..31                                                   |
+| 0x1C   | RO    | LAST_FRAME1       | —             | AM raw frame bits 32..58                                                  |
+| 0x20   | RO    | ENV_MIN           | —             | env_min trough tracker top 16 b                                           |
+| 0x24   | RO    | NOISE             | —             | noise-MAD IIR top 16 b                                                    |
+| 0x28   | RO    | SYNC_DIAG         | —             | sync_q, mm_q, cycle_in_min                                                |
+| 0x2C   | RO    | SOFT_AM           | —             | AM bit LLR (12 b signed) + per-bit flags                                  |
+| 0x30   | RO    | **SOFT_PM**       | WITH_PM       | PM bit LLR (12 b signed) + sec_index + valid + minute_mark                |
+| 0x34   | R/W1C | **IRQ_FLAG**      | —             | Per-source sticky interrupt flags (see §4.1)                              |
+| 0x38   | RO    | **PM_STATUS**     | WITH_PM       | pm_bit_index, pm_sync_state, pm_time_valid, pm_lock_qual                  |
+| 0x3C   | RO    | **PM_TIME_HMS**   | WITH_PM       | PM-decoded minute, hour                                                   |
+| 0x40   | RO    | **PM_DATE**       | WITH_PM       | PM-decoded year, month, day, weekday                                      |
+| 0x44   | RO    | **PM_FLAGS**      | WITH_PM       | PM-decoded DST/leap flags                                                 |
+| 0x48   | RO    | **PM_LAST_FRAME0**| WITH_PM       | PM raw frame bits 0..31                                                   |
+| 0x4C   | RO    | **PM_LAST_FRAME1**| WITH_PM       | PM raw frame bits 32..58                                                  |
+| 0x50   | RO    | **PLL_PHASE_FILT**| WITH_PM_DEBUG | Carrier-PLL LPF state, signed 29 b (snapshot)                             |
+| 0x54   | RW    | **PLL_I_STATE**   | WITH_PM_DEBUG | Carrier-PLL integrator state (jam-write)                                  |
+| 0x58   | RW    | **PLL_OFFSET**    | WITH_PM_DEBUG | NCO `phase_inc_offset` (jam-write)                                        |
+| 0x5C   | RW    | **IRQ_MASK**      | —             | Per-source enable for the `irq` output line (see §4.1)                    |
 
 Writes to read-only offsets return **SLVERR**. Reads at unmapped or
 gate-disabled offsets return **DECERR**. Reads/writes at offsets ≥
-`0x5C` return DECERR.
+`0x60` return DECERR.
+
+### 4.1 Interrupt registers (IRQ_FLAG / IRQ_MASK)
+
+The shell exposes a level-sensitive `irq` output port wired to
+`OR(IRQ_FLAG & IRQ_MASK)`. Edge-detect logic in `dcf77_axi_lite`
+captures the rising edges of nine source signals from the core's
+`dcf77_status_type` and latches them into IRQ_FLAG's sticky bits.
+The host clears them with W1C writes (write '1' to clear).
+
+| Bit | Source                  | Trigger                                         |
+| --- | ----------------------- | ----------------------------------------------- |
+| 0   | `SECOND_TICK`           | Rising edge of `am_soft_valid` (1 Hz)            |
+| 1   | `AM_MINUTE_MARK`        | Rising edge of AM `minute_mark`                  |
+| 2   | `PM_MINUTE_MARK`        | Rising edge of PM SIK signature edge (WITH_PM)   |
+| 3   | `AM_TIME_VALID_RISE`    | Rising edge of `time_valid` (fresh AM decode)    |
+| 4   | `PM_TIME_VALID_RISE`    | Rising edge of `pm_time_valid` (WITH_PM)         |
+| 5   | `AM_SYNC_LOST`          | `sync_state` transitioned out of LOCK            |
+| 6   | `PM_SYNC_LOST`          | `pm_sync_state` transitioned out of LOCK (WITH_PM) |
+| 7   | `PLL_LOCK_RISE`         | Carrier-PLL `lock_state` 0 → 1                   |
+| 8   | `PLL_LOCK_FALL`         | Carrier-PLL `lock_state` 1 → 0                   |
+| 31..9 | reserved              | reads 0; writes ignored                          |
+
+- **IRQ_MASK reset value = 0** — the host must opt in to each source.
+- **PM-only sources** (bits 2, 4, 6) never fire when `WITH_PM=false`
+  (the underlying status fields stay at reset). The corresponding
+  mask bits still round-trip in IRQ_MASK; they just never assert
+  `irq`.
+- **Edge-detect collisions**: if a source edge fires the same clock
+  the host W1Cs the matching bit, the set wins (the edge is not
+  lost).
+- **Level vs edge `irq`**: the output is level-sensitive — it stays
+  high until *all* unmasked flags are cleared. Wire this to the
+  CPU's level-sensitive IRQ input.
+
+When `WITH_PM=false`, software can still detect the absent PM stack
+via `STATUS[3]` (PM_PRESENT) and skip the PM-source mask bits
+entirely.
 
 ### Status capability bits
 
@@ -508,12 +546,48 @@ Writes use simple jam semantics — there is no commit register and no
 ordering between them; each AXI write fires a one-clock jam pulse the
 moment the slave accepts the W beat.
 
+Connecting `irq` to an interrupt controller and using the
+`IRQ_MASK` / `IRQ_FLAG` registers:
+
+```c
+#define IRQ_FLAG          (DCF77_BASE + 0x34)
+#define IRQ_MASK          (DCF77_BASE + 0x5C)
+#define IRQ_SECOND_TICK   (1u << 0)
+#define IRQ_AM_TIME_VALID (1u << 3)
+#define IRQ_PM_TIME_VALID (1u << 4)
+#define IRQ_PLL_LOCK_RISE (1u << 7)
+
+void dcf77_isr_init(void)
+{
+    /* Unmask the events we want to handle. */
+    write(IRQ_MASK, IRQ_SECOND_TICK | IRQ_AM_TIME_VALID
+                  | IRQ_PM_TIME_VALID | IRQ_PLL_LOCK_RISE);
+}
+
+void dcf77_isr(void)
+{
+    uint32_t flags = read(IRQ_FLAG);
+    /* W1C all serviced bits up front so a new edge during the ISR
+     * sets a fresh flag (handled on the next ISR invocation). */
+    write(IRQ_FLAG, flags);
+
+    if (flags & IRQ_SECOND_TICK)   handle_second_tick();
+    if (flags & IRQ_AM_TIME_VALID) print_am_time();
+    if (flags & IRQ_PM_TIME_VALID) print_pm_time();
+    if (flags & IRQ_PLL_LOCK_RISE) log_pll_locked();
+}
+```
+
+The `irq` line is level-sensitive, so the CPU's interrupt controller
+should be configured for level (not edge) triggering. W1C-clearing
+all serviced flags is what drops `irq` low.
+
 ### 9.4 Software-side PM minute-mark scoring
 
 The hardware PM minute-mark fires on the *first* clean SIK signature
 match. Software that wants softer per-minute confidence (e.g. for
 combining with the AM path or for sub-T=1 statistics on weak signals)
-can poll `SOFT_PM` once per `SOFT_IRQ.second_tick`, accumulate 60 LLR
+can poll `SOFT_PM` once per `IRQ_FLAG.SECOND_TICK`, accumulate 60 LLR
 samples per minute, and compute its own correlation with the expected
 SIK polarity pattern. The `pm_sec_index` field in `SOFT_PM` makes the
 LLR atomically tagged with its source second.
@@ -635,9 +709,10 @@ PM `pm_sync_state` (`PM_STATUS[7:6]`):
 - **Synthesis not yet validated.** Resource numbers are pre-PnR
   estimates from the WITH_PM gating analysis. First Vivado build will
   refine them.
-- **No interrupt line.** The host polls `SOFT_IRQ.second_tick` (W1C)
-  for the per-second pulse. A future revision could expose `pm_valid`
-  on a dedicated interrupt port.
+- **Level-sensitive interrupt only.** The `irq` output stays high
+  while any unmasked `IRQ_FLAG` bit is set. Hosts that need edge-
+  triggered semantics should configure their interrupt controller
+  accordingly or use the W1C clear as the de-assertion gesture.
 - **PM minute-mark hardware is T=1.** Soft-metric T=0..k MLD lives in
   the host software; the hardware delivers raw `pm_soft` per second
   and the host accumulates over arbitrary windows.

@@ -44,9 +44,24 @@ if (dcf77_read_time(&h, &t)) {
 }
 ```
 
-The driver is fully poll-based — the underlying hardware has no
-interrupt line. Call `dcf77_second_tick` periodically (typically once
-per ms) and consume soft metrics when it returns true.
+The hardware exposes a level-sensitive `irq` line driven by
+`OR(IRQ_FLAG & IRQ_MASK)`. Set up the mask once and either wire
+`irq` to the CPU's interrupt controller or poll
+`dcf77_irq_read_flags`:
+
+```c
+/* Unmask the per-second tick + a few state-change events. */
+dcf77_irq_set_mask(&h, DCF77_IRQ_SECOND_TICK_BIT
+                     | DCF77_IRQ_PLL_LOCK_RISE_BIT
+                     | DCF77_IRQ_AM_TIME_VALID_BIT);
+
+for (;;) {
+    uint32_t flags = dcf77_irq_read_flags(&h);
+    if (!flags) continue;
+    dcf77_irq_clear(&h, flags);
+    /* dispatch on flag bits ... */
+}
+```
 
 ## Capability detection
 

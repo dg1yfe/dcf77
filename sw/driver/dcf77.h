@@ -34,7 +34,7 @@ extern "C" {
 #define DCF77_REG_SYNC_DIAG         0x28u
 #define DCF77_REG_SOFT_AM           0x2Cu
 #define DCF77_REG_SOFT_PM           0x30u   /* WITH_PM gate */
-#define DCF77_REG_SOFT_IRQ          0x34u
+#define DCF77_REG_IRQ_FLAG          0x34u   /* W1C sticky interrupt sources */
 #define DCF77_REG_PM_STATUS         0x38u   /* WITH_PM */
 #define DCF77_REG_PM_TIME_HMS       0x3Cu   /* WITH_PM */
 #define DCF77_REG_PM_DATE           0x40u   /* WITH_PM */
@@ -44,6 +44,7 @@ extern "C" {
 #define DCF77_REG_PLL_PHASE_FILT    0x50u   /* WITH_PM_DEBUG */
 #define DCF77_REG_PLL_I_STATE       0x54u   /* WITH_PM_DEBUG, R/W */
 #define DCF77_REG_PLL_OFFSET        0x58u   /* WITH_PM_DEBUG, R/W */
+#define DCF77_REG_IRQ_MASK          0x5Cu   /* R/W per-source enables */
 
 /* CTRL bits */
 #define DCF77_CTRL_ENABLE_BIT       (1u << 0)
@@ -51,15 +52,23 @@ extern "C" {
 #define DCF77_CTRL_ENV_MODE_BIT     (1u << 2)
 
 /* STATUS bits */
-#define DCF77_STATUS_SYNC_MASK      0x3u
-#define DCF77_STATUS_TIME_VALID_BIT (1u << 2)
+#define DCF77_STATUS_SYNC_MASK            0x3u
+#define DCF77_STATUS_TIME_VALID_BIT       (1u << 2)
 #define DCF77_STATUS_PM_PRESENT_BIT       (1u << 3)
 #define DCF77_STATUS_PM_DEBUG_PRESENT_BIT (1u << 4)
+#define DCF77_STATUS_PLL_LOCK_BIT         (1u << 5)
+#define DCF77_STATUS_ANCHOR_HELD_BIT      (1u << 6)
 
-/* SOFT_IRQ bits */
-#define DCF77_SOFT_IRQ_SECOND_TICK_BIT (1u << 0)  /* W1C */
-#define DCF77_SOFT_IRQ_PLL_LOCK_BIT    (1u << 1)
-#define DCF77_SOFT_IRQ_ANCHOR_HELD_BIT (1u << 2)
+/* Interrupt source bit positions (apply to both IRQ_FLAG and IRQ_MASK). */
+#define DCF77_IRQ_SECOND_TICK_BIT     (1u << 0)
+#define DCF77_IRQ_AM_MINUTE_MARK_BIT  (1u << 1)
+#define DCF77_IRQ_PM_MINUTE_MARK_BIT  (1u << 2)
+#define DCF77_IRQ_AM_TIME_VALID_BIT   (1u << 3)
+#define DCF77_IRQ_PM_TIME_VALID_BIT   (1u << 4)
+#define DCF77_IRQ_AM_SYNC_LOST_BIT    (1u << 5)
+#define DCF77_IRQ_PM_SYNC_LOST_BIT    (1u << 6)
+#define DCF77_IRQ_PLL_LOCK_RISE_BIT   (1u << 7)
+#define DCF77_IRQ_PLL_LOCK_FALL_BIT   (1u << 8)
 
 /* ---------------------------------------------------------------- */
 /* Public types.                                                     */
@@ -174,8 +183,11 @@ float dcf77_snr_db(const dcf77_handle_t *h);
 /* ---------------------------------------------------------------- */
 
 /*
- * Check whether the second-tick sticky bit (SOFT_IRQ[0]) is set.
+ * Check whether the second-tick sticky bit (IRQ_FLAG[0]) is set.
  * Returns true if there's fresh per-second data to consume.
+ *
+ * Equivalent to (dcf77_irq_read_flags() & DCF77_IRQ_SECOND_TICK_BIT)
+ * but doesn't surface the rest of the flag word.
  */
 bool dcf77_second_tick(const dcf77_handle_t *h);
 
@@ -187,7 +199,8 @@ bool dcf77_second_tick(const dcf77_handle_t *h);
  */
 bool dcf77_read_soft(const dcf77_handle_t *h, dcf77_soft_metrics_t *s);
 
-/* W1C the second-tick bit. Caller pattern:
+/* W1C just the second-tick bit. Equivalent to
+ * `dcf77_irq_clear(h, DCF77_IRQ_SECOND_TICK_BIT)`. Caller pattern:
  *    if (dcf77_second_tick(&h)) {
  *        dcf77_read_soft(&h, &s);
  *        dcf77_clear_second_tick(&h);
@@ -195,6 +208,36 @@ bool dcf77_read_soft(const dcf77_handle_t *h, dcf77_soft_metrics_t *s);
  *    }
  */
 void dcf77_clear_second_tick(const dcf77_handle_t *h);
+
+/* ---------------------------------------------------------------- */
+/* Interrupts (IRQ_FLAG / IRQ_MASK at 0x34 / 0x5C).                  */
+/* ---------------------------------------------------------------- */
+
+/*
+ * Read the live sticky-flag word. Each set bit corresponds to a
+ * source event the hardware has captured since the last W1C clear.
+ * Bit positions are the DCF77_IRQ_*_BIT macros.
+ */
+uint32_t dcf77_irq_read_flags(const dcf77_handle_t *h);
+
+/*
+ * W1C the specified flag bits. Pass a bitmask of DCF77_IRQ_*_BIT
+ * values; for each set bit in `mask`, the corresponding sticky
+ * flag is cleared. Bits already 0 are unaffected.
+ */
+void dcf77_irq_clear(const dcf77_handle_t *h, uint32_t mask);
+
+/*
+ * Read / write the per-source interrupt mask. The `irq` output of
+ * the dcf77_axi_lite entity is high while any unmasked flag bit
+ * is set; bits cleared in IRQ_MASK are still latched into
+ * IRQ_FLAG but don't drive the output line.
+ *
+ * Reset value of IRQ_MASK is 0 — the host opts in by writing each
+ * desired source.
+ */
+uint32_t dcf77_irq_get_mask(const dcf77_handle_t *h);
+void     dcf77_irq_set_mask(const dcf77_handle_t *h, uint32_t mask);
 
 /* ---------------------------------------------------------------- */
 /* Raw frame access (debug).                                         */
