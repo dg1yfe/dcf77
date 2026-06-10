@@ -11,3 +11,10 @@ __pycache__/
 *.swp
 *~
 .DS_Store
+
+## sw/ build artefacts
+sw/**/*.o
+sw/**/*.a
+sw/**/*.elf
+sw/driver/test_dcf77
+sw/mld/dcf77_mld_test
