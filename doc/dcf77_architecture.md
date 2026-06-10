@@ -282,6 +282,46 @@ triple a true pair rather than a triple.
 
 HW cost: 32 flops (one shadow word) + ~5 LUTs of decode.
 
+#### Intra-second phase divergence
+
+AM and PM don't emit their per-second LLRs at the same instant: AM's
+`bit_valid` fires ~200 ms into each broadcast second (after the W2
+discriminator window completes), PM's `pm_valid` fires ~1.0 s into
+the same second (after the PRBS 0..511 integration). So inside the
+status record at any given clock edge:
+
+| Window (within second N)  | live `am_soft` | live `pm_soft` |
+| -------------------------- | --------------- | --------------- |
+| t = N+0.2 … N+1.0           | AM(N)            | PM(N−1)           |
+| t = N+1.0 … N+1.2           | AM(N)            | PM(N)             |
+| t = N+1.2 … N+2.0           | AM(N+1)          | PM(N)             |
+
+A naïve "read SOFT_PM then live SOFT_AM" pair gets a coherent
+broadcast-second only in the narrow window 2. To fix this `dcf77_core`
+latches the AM-side metrics (`am_soft`, `mm_soft`, `bit_index`,
+`am_soft_valid`, `minute_mark`) into a paired-shadow flop on every
+`pm_valid` rising edge. The readmux's `SHADOW`-on-`SOFT_PM` trigger
+sources its payload from this *paired* AM shadow, not the live one —
+so the host's pair-read is broadcast-second-coherent across the
+whole interval N+1.0 … N+2.0.
+
+#### Inter-second counter divergence
+
+The AM bit_det and PM correlator each run their own second-counters
+(AM's mod-100 sample counter, PM's chip-0 PRBS counter). Over many
+seconds a single missed AM dip or a PM re-acquire can shift the two
+counters by ±1. When the PM correlator is in **LOCK**, `dcf77_core`
+overrides the host-visible `status.bit_index` with `pm_sec_index` so
+both metadata indices agree on which broadcast second is current.
+The AM `frame_dec`'s internal counter is unaffected (last_frame slot
+routing continues unchanged); only the AXI-visible value is slaved.
+
+The C driver further treats `am_sec_index` and `pm_sec_index` as
+independent fields in `dcf77_soft_metrics_t`. The MLD writes each
+LLR to its own buffer using its own index, so when slaving isn't
+engaged (PM unlocked) the decoder still routes data correctly per
+side rather than relying on a single shared index.
+
 ---
 
 ## 5. Synthesis generics

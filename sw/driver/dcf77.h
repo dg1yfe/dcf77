@@ -127,7 +127,8 @@ typedef struct {
 typedef struct {
     int16_t  am_soft;           /* signed 12 b → sign-extended to int16 */
     int16_t  pm_soft;           /* signed 12 b → sign-extended to int16 */
-    uint8_t  sec_index;         /* 0..59, atomic with pm_soft */
+    uint8_t  am_sec_index;      /* SOFT_AM[29:24] (PM-slaved when PM in LOCK) */
+    uint8_t  pm_sec_index;      /* SOFT_PM[5:0]   (atomic with pm_soft)        */
     bool     pm_valid;          /* SOFT_PM[30] */
     bool     pm_minute_mark;    /* SOFT_PM[31], HW SIK signature edge */
     bool     am_valid;          /* SOFT_AM[30] */

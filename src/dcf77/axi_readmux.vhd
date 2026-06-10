@@ -165,10 +165,14 @@ begin
                 when REG_SOFT_PM =>
                     if WITH_PM then
                         v.ro.data := soft_pm_to_slv(r.st);
-                        -- Atomic-pair side effect: snapshot SOFT_AM from
-                        -- the same status record so a follow-up SHADOW
-                        -- read returns a value paired to this PM read.
-                        v.shadow := soft_am_to_slv(r.st);
+                        -- Atomic-pair side effect: use the AM-paired
+                        -- shadow latched by dcf77_core at the pm_valid
+                        -- edge, not the live am_soft.  The paired
+                        -- shadow is from the AM update that aligns
+                        -- with *this* PM second (~800 ms older than
+                        -- live), so the host's pair is broadcast-
+                        -- second-coherent.
+                        v.shadow := soft_am_paired_to_slv(r.st);
                     else
                         v.ro.data := (others => '0');
                         v.ro.resp := AXI_RESPONSE_DECERR;

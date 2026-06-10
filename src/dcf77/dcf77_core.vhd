@@ -261,6 +261,30 @@ architecture rtl of dcf77_core is
     -- pm_bit_index = the live frame_dec counter (= pm_bit_ix above).
     signal pm_sec_index_s    : bit_index_t;
 
+    -- AM-side soft-metric shadow latched on each pm_valid edge.
+    -- Captures the AM bit_det's most recent output at the moment the
+    -- PM correlator emits its second-N LLR, so a host that reads
+    -- SOFT_PM + SHADOW gets an AM+PM pair from the same broadcast
+    -- second (which the live am_soft alone cannot guarantee -- AM
+    -- updates ~200 ms after second-boundary, PM ~1.0 s).
+    signal am_soft_paired_s        : signed(11 downto 0) := (others => '0');
+    signal mm_soft_paired_s        : signed(11 downto 0) := (others => '0');
+    signal am_bit_idx_paired_s     : bit_index_t := 0;
+    signal am_soft_paired_valid_s  : std_logic := '0';
+    signal am_mm_paired_s          : std_logic := '0';
+    -- Tracks whether AM has produced a fresh event since the last
+    -- pm_valid, so the paired_valid bit reflects "real new data" and
+    -- not just "we've ever latched something".
+    signal am_seen_since_pm_s      : std_logic := '0';
+    signal am_mm_since_pm_s        : std_logic := '0';
+
+    -- Visible bit_index exported via status_out -- PM-slaved when
+    -- the correlator is in LOCK so the host's atomic pair has a
+    -- coherent second_index across both paths.  bit_det's own
+    -- internal counter is unaffected (the AM frame_dec still uses
+    -- its own bit_index for slot routing in last_frame).
+    signal bit_ix_exported    : bit_index_t;
+
     -- Cast top 16 b of an env_word_t (sfixed, but always >= 0 in this
     -- design) to rssi_word_t.  Skips the sign bit and takes the 16 next
     -- bits.
@@ -787,6 +811,56 @@ begin
     end generate no_pm;
 
     -- ------------------------------------------------------------------ --
+    -- AM-side paired-shadow latch.  Sets at every pm_valid edge so the   --
+    -- host's SHADOW read returns AM values from the same broadcast       --
+    -- second as the PM read that latched it.                              --
+    -- ------------------------------------------------------------------ --
+    paired_proc : process(clk)
+    begin
+        if rising_edge(clk) then
+            if rst = '1' then
+                am_seen_since_pm_s     <= '0';
+                am_mm_since_pm_s       <= '0';
+                am_soft_paired_s       <= (others => '0');
+                mm_soft_paired_s       <= (others => '0');
+                am_bit_idx_paired_s    <= 0;
+                am_soft_paired_valid_s <= '0';
+                am_mm_paired_s         <= '0';
+            else
+                -- Accumulate AM events between PM ticks.
+                if am_soft_v_s = '1' then
+                    am_seen_since_pm_s <= '1';
+                end if;
+                if minute_mk_gated = '1' then
+                    am_mm_since_pm_s <= '1';
+                end if;
+
+                -- On the PM tick: snapshot the latest live AM signals
+                -- and reset the between-tick event accumulators.
+                if pm_valid_s = '1' then
+                    am_soft_paired_s       <= am_soft_s;
+                    mm_soft_paired_s       <= mm_soft_s;
+                    am_bit_idx_paired_s    <= bit_ix;
+                    am_soft_paired_valid_s <= am_seen_since_pm_s;
+                    am_mm_paired_s         <= am_mm_since_pm_s;
+                    am_seen_since_pm_s     <= '0';
+                    am_mm_since_pm_s       <= '0';
+                end if;
+            end if;
+        end if;
+    end process;
+
+    -- Inter-second slaving: when the PM correlator is in LOCK
+    -- ("10"), expose pm_sec_index as the host-visible bit_index so
+    -- both AM-side and PM-side metadata agree on which broadcast
+    -- second is current.  The AM frame_dec keeps using its own
+    -- internal bit_index for last_frame slot routing; only the
+    -- status_out value (= what the host reads via SOFT_AM / STATUS)
+    -- is overridden.
+    bit_ix_exported <= pm_sec_index_s when pm_sync_state_s = "10"
+                       else bit_ix;
+
+    -- ------------------------------------------------------------------ --
     -- Aggregate the comprehensive status record from the sub-blocks.      --
     -- ------------------------------------------------------------------ --
     status_out.time         <= time_d;
@@ -796,7 +870,7 @@ begin
     status_out.mm_quality   <= mm_q_s;
     status_out.cycle_in_min <= cycle_s;
     status_out.last_frame   <= last_frm;
-    status_out.bit_index    <= bit_ix;
+    status_out.bit_index    <= bit_ix_exported;
 
     -- RSSI, ENV_MIN, NOISE: top 16 bits of the respective sfixed values.
     -- Each is non-negative by construction (env_max and env_min track
@@ -814,6 +888,13 @@ begin
     status_out.minute_mark   <= minute_mk_gated;
     status_out.pll_lock      <= pll_lock;
     status_out.anchor_held   <= anchor_held_s;
+
+    -- AM-paired snapshot (latched on pm_valid).  See paired_proc.
+    status_out.am_soft_paired       <= am_soft_paired_s;
+    status_out.mm_soft_paired       <= mm_soft_paired_s;
+    status_out.am_bit_index_paired  <= am_bit_idx_paired_s;
+    status_out.am_soft_paired_valid <= am_soft_paired_valid_s;
+    status_out.am_mm_paired         <= am_mm_paired_s;
 
     -- PM-side status fields.
     status_out.pm_soft        <= pm_soft_s;

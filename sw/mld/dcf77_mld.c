@@ -323,13 +323,27 @@ bool dcf77_mld_feed(dcf77_mld_t *mld,
                     const dcf77_soft_metrics_t *s,
                     dcf77_time_t *t)
 {
+    /*
+     * Per-side routing: am_soft goes into mld->am_soft[am_sec_index],
+     * pm_soft goes into mld->pm_soft[pm_sec_index].  When HW inter-
+     * second slaving is engaged (PM in LOCK) the two indices match
+     * and the MLD's combine step naturally pairs them.  When AM and
+     * PM disagree (e.g. PM unlocked, AM running on its own anchor)
+     * the LLRs simply land in their own slots and the MLD still
+     * decodes correctly from whichever side has fresh data.
+     *
+     * The wrap detector uses pm_sec_index as the canonical clock
+     * because PM is the slower-updating side; when PM is locked it's
+     * also the master second-counter (status.bit_index is slaved to
+     * it).  When PM is absent / unlocked, am_sec_index drives the
+     * wrap detection.
+     */
+    uint8_t canonical_sec = s->pm_valid ? s->pm_sec_index
+                                        : s->am_sec_index;
     bool minute_boundary = false;
 
     if (mld->have_any) {
-        /* Wrap detector: sec_index strictly less than last_sec means
-         * we crossed a minute boundary. (Equal sec_index means a
-         * second was double-fed; treat as no boundary, overwrite.) */
-        if (s->sec_index < mld->last_sec) {
+        if (canonical_sec < mld->last_sec) {
             minute_boundary = true;
         }
     } else {
@@ -343,17 +357,17 @@ bool dcf77_mld_feed(dcf77_mld_t *mld,
         mld->have_any = true;
     }
 
-    /* Store the new second's LLRs. */
-    if (s->sec_index < 60u) {
-        if (s->am_valid) {
-            mld->am_soft[s->sec_index]  = s->am_soft;
-            mld->am_valid[s->sec_index] = 1u;
-        }
-        if (s->pm_valid) {
-            mld->pm_soft[s->sec_index]  = s->pm_soft;
-            mld->pm_valid[s->sec_index] = 1u;
-        }
-        mld->last_sec = s->sec_index;
+    /* Store the new second's LLRs into their own slots. */
+    if (s->am_valid && s->am_sec_index < 60u) {
+        mld->am_soft[s->am_sec_index]  = s->am_soft;
+        mld->am_valid[s->am_sec_index] = 1u;
+    }
+    if (s->pm_valid && s->pm_sec_index < 60u) {
+        mld->pm_soft[s->pm_sec_index]  = s->pm_soft;
+        mld->pm_valid[s->pm_sec_index] = 1u;
+    }
+    if (canonical_sec < 60u) {
+        mld->last_sec = canonical_sec;
     }
 
     return decoded_ok;

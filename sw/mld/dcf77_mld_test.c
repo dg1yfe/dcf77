@@ -120,20 +120,22 @@ static void feed_frame_to_mld(dcf77_mld_t *mld,
 {
     for (uint8_t sec = 0; sec < 59; sec++) {
         dcf77_soft_metrics_t s = {0};
-        s.sec_index = sec;
-        s.am_valid  = true;
-        s.pm_valid  = true;
+        s.am_sec_index = sec;
+        s.pm_sec_index = sec;        /* HW slaving keeps these aligned */
+        s.am_valid     = true;
+        s.pm_valid     = true;
         /* sign convention: positive ⇒ '0', negative ⇒ '1' */
-        s.am_soft   = (int16_t)(bits[sec] ? -mag : mag);
-        s.pm_soft   = (int16_t)(bits[sec] ? -mag : mag);
+        s.am_soft      = (int16_t)(bits[sec] ? -mag : mag);
+        s.pm_soft      = (int16_t)(bits[sec] ? -mag : mag);
         dcf77_mld_feed(mld, &s, NULL);
     }
     /* Sec 59: SIK '0' (pm_soft positive), no AM bit. */
     dcf77_soft_metrics_t s = {0};
-    s.sec_index = 59;
-    s.am_valid  = false;
-    s.pm_valid  = true;
-    s.pm_soft   = mag;
+    s.am_sec_index = 59;
+    s.pm_sec_index = 59;
+    s.am_valid     = false;
+    s.pm_valid     = true;
+    s.pm_soft      = mag;
     dcf77_mld_feed(mld, &s, NULL);
 }
 
@@ -141,9 +143,10 @@ static void feed_frame_to_mld(dcf77_mld_t *mld,
 static bool trigger_minute_boundary(dcf77_mld_t *mld, dcf77_time_t *t)
 {
     dcf77_soft_metrics_t s = {0};
-    s.sec_index = 0;
-    s.am_valid  = false;
-    s.pm_valid  = false;
+    s.am_sec_index = 0;
+    s.pm_sec_index = 0;
+    s.am_valid     = false;
+    s.pm_valid     = false;
     return dcf77_mld_feed(mld, &s, t);
 }
 
@@ -388,11 +391,14 @@ static int corpus_mode(void)
             continue;
         }
         dcf77_soft_metrics_t s = {0};
-        s.sec_index = (uint8_t)sec;
-        s.am_soft   = (int16_t)am;
-        s.am_valid  = av != 0;
-        s.pm_soft   = (int16_t)pm;
-        s.pm_valid  = pv != 0;
+        /* CSV format predates the split; treat sec as both AM and PM
+         * sec_index.  The Python mirror does the same. */
+        s.am_sec_index = (uint8_t)sec;
+        s.pm_sec_index = (uint8_t)sec;
+        s.am_soft      = (int16_t)am;
+        s.am_valid     = av != 0;
+        s.pm_soft      = (int16_t)pm;
+        s.pm_valid     = pv != 0;
 
         dcf77_time_t t = {0};
         if (dcf77_mld_feed(&mld, &s, &t)) {

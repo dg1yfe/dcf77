@@ -124,6 +124,22 @@ package dcf77_pkg is
         pll_lock     : std_logic;                     -- carrier_pll lock_state
         anchor_held  : std_logic;                     -- bit_det has anchor
 
+        -- AM soft metrics snapshotted at the moment of each pm_valid
+        -- pulse.  Solves the intra-second phase divergence between
+        -- the AM bit_det (which emits ~200 ms into each broadcast
+        -- second) and the PM correlator (which emits ~1.0 s into
+        -- each broadcast second): a host that reads SOFT_PM and
+        -- then the SHADOW register gets an AM LLR paired to the
+        -- same broadcast second as the PM LLR, not "whichever AM
+        -- value happens to be live now".  The *_paired_valid bit
+        -- indicates whether at least one fresh am_soft_valid was
+        -- observed between the previous and current pm_valid.
+        am_soft_paired       : signed(11 downto 0);
+        mm_soft_paired       : signed(11 downto 0);
+        am_bit_index_paired  : bit_index_t;
+        am_soft_paired_valid : std_logic;
+        am_mm_paired         : std_logic;
+
         -- PM (PSK/SIK) path fields.  Sourced by dcf77_pm_correlator +
         -- a second instance of dcf77_frame_dec configured with
         -- PM_MODE=true.  All values default to zero before the first
@@ -172,6 +188,11 @@ package dcf77_pkg is
         minute_mark  => '0',
         pll_lock     => '0',
         anchor_held  => '0',
+        am_soft_paired       => (others => '0'),
+        mm_soft_paired       => (others => '0'),
+        am_bit_index_paired  => 0,
+        am_soft_paired_valid => '0',
+        am_mm_paired         => '0',
         pm_soft         => (others => '0'),
         pm_valid        => '0',
         pm_minute_mark  => '0',
@@ -464,6 +485,12 @@ package dcf77_pkg is
     --   [31]    minute_mark (last end_of_bit produced an mm)
     function soft_am_to_slv  (s : dcf77_status_type) return std_logic_vector;
 
+    -- soft_am_paired_to_slv: same layout as soft_am_to_slv but
+    -- packed from the *_paired fields (the AM snapshot taken at
+    -- the last pm_valid edge).  This is what the readmux latches
+    -- into SHADOW when SOFT_PM is read.
+    function soft_am_paired_to_slv (s : dcf77_status_type) return std_logic_vector;
+
     -- SOFT_PM register:
     --   [5:0]    pm_sec_index   (snapshot — second pm_soft was latched for)
     --   [17:6]   pm_soft        (signed 12 b, SIK bit LLR)
@@ -666,6 +693,17 @@ package body dcf77_pkg is
         r(29 downto 24) := std_logic_vector(to_unsigned(s.bit_index, 6));
         r(30)           := s.am_soft_valid;
         r(31)           := s.minute_mark;
+        return r;
+    end function;
+
+    function soft_am_paired_to_slv (s : dcf77_status_type) return std_logic_vector is
+        variable r : std_logic_vector(31 downto 0) := (others => '0');
+    begin
+        r(11 downto  0) := std_logic_vector(s.am_soft_paired);
+        r(23 downto 12) := std_logic_vector(s.mm_soft_paired);
+        r(29 downto 24) := std_logic_vector(to_unsigned(s.am_bit_index_paired, 6));
+        r(30)           := s.am_soft_paired_valid;
+        r(31)           := s.am_mm_paired;
         return r;
     end function;
 

@@ -205,7 +205,7 @@ static void test_atomic_reads(void)
 
     dcf77_soft_metrics_t s = {0};
     EXPECT(dcf77_read_soft_atomic(&h, &s));
-    EXPECT_EQ_INT(s.sec_index, 42);
+    EXPECT_EQ_INT(s.pm_sec_index, 42);
     EXPECT_EQ_INT(s.pm_soft,   256);
     EXPECT_EQ_INT(s.am_soft,   255);
     EXPECT(s.pm_valid);
@@ -224,7 +224,7 @@ static void test_unpack_soft_pm(void)
     w |= 1u << 31;                          /* minute_mark           */
     dcf77_soft_metrics_t s = {0};
     dcf77_unpack_soft_pm(w, &s);
-    EXPECT_EQ_INT(s.sec_index, 17);
+    EXPECT_EQ_INT(s.pm_sec_index, 17);
     EXPECT_EQ_INT(s.pm_soft, -1);
     EXPECT(s.pm_valid);
     EXPECT(s.pm_minute_mark);
@@ -233,7 +233,7 @@ static void test_unpack_soft_pm(void)
     w = (uint32_t)0x7FFu << 6;
     w |= 1u << 30;
     dcf77_unpack_soft_pm(w, &s);
-    EXPECT_EQ_INT(s.sec_index, 0);
+    EXPECT_EQ_INT(s.pm_sec_index, 0);
     EXPECT_EQ_INT(s.pm_soft, 2047);
     EXPECT(s.pm_valid);
     EXPECT(!s.pm_minute_mark);
@@ -306,7 +306,7 @@ static void test_read_soft_pair(void)
     dcf77_soft_metrics_t s = {0};
     bool ok = dcf77_read_soft(&h, &s);
     EXPECT(ok);
-    EXPECT_EQ_INT(s.sec_index, 20);
+    EXPECT_EQ_INT(s.pm_sec_index, 20);
     EXPECT_EQ_INT(s.pm_soft, 100);
     EXPECT_EQ_INT(s.am_soft, -50);
     EXPECT(s.pm_valid);
@@ -329,7 +329,7 @@ static void test_am_only_fallback(void)
     dcf77_soft_metrics_t s = {0};
     bool ok = dcf77_read_soft(&h, &s);
     EXPECT(ok);
-    EXPECT_EQ_INT(s.sec_index, 33);
+    EXPECT_EQ_INT(s.am_sec_index, 33);
     EXPECT_EQ_INT(s.am_soft, 0x12);
     EXPECT(!s.pm_valid);
 }

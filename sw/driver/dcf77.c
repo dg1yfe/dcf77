@@ -239,7 +239,7 @@ bool dcf77_read_soft_atomic(const dcf77_handle_t *h,
 
 void dcf77_unpack_soft_pm(uint32_t soft_pm, dcf77_soft_metrics_t *s)
 {
-    s->sec_index      = (uint8_t)(soft_pm & 0x3Fu);
+    s->pm_sec_index   = (uint8_t)(soft_pm & 0x3Fu);
     s->pm_soft        = (int16_t)dcf77_sext((soft_pm >> 6) & 0xFFFu, 12);
     s->pm_valid       = ((soft_pm >> 30) & 1u) != 0u;
     s->pm_minute_mark = ((soft_pm >> 31) & 1u) != 0u;
@@ -247,39 +247,28 @@ void dcf77_unpack_soft_pm(uint32_t soft_pm, dcf77_soft_metrics_t *s)
 
 void dcf77_unpack_soft_am(uint32_t soft_am, dcf77_soft_metrics_t *s)
 {
-    s->am_soft        = (int16_t)dcf77_sext(soft_am & 0xFFFu, 12);
-    /* sec_index is taken from SOFT_PM when PM is present; SOFT_AM's
-     * own bit_index field (bits 29..24) is filled below only as a
-     * fallback for AM-only builds. */
+    s->am_soft         = (int16_t)dcf77_sext(soft_am & 0xFFFu, 12);
+    s->am_sec_index    = (uint8_t)((soft_am >> 24) & 0x3Fu);
     s->am_valid        = ((soft_am >> 30) & 1u) != 0u;
     s->am_minute_mark  = ((soft_am >> 31) & 1u) != 0u;
 }
 
 bool dcf77_read_soft(const dcf77_handle_t *h, dcf77_soft_metrics_t *s)
 {
-    /* Read PM first (atomic with sec_index), then AM. The combined
-     * sample is "valid for this second" if either side has a fresh
-     * datum. */
-    uint32_t soft_pm = 0u;
+    /* Non-atomic reads.  am_sec_index and pm_sec_index are each
+     * sourced from their own register (independent of each other),
+     * so callers see whichever counter applies per side; they will
+     * agree when the HW slave path is engaged (PM in LOCK) and
+     * may differ otherwise. */
     if (h->pm_present) {
-        soft_pm = reg_read(h, DCF77_REG_SOFT_PM);
-        dcf77_unpack_soft_pm(soft_pm, s);
+        dcf77_unpack_soft_pm(reg_read(h, DCF77_REG_SOFT_PM), s);
     } else {
-        s->sec_index      = 0u;
+        s->pm_sec_index   = 0u;
         s->pm_soft        = 0;
         s->pm_valid       = false;
         s->pm_minute_mark = false;
     }
-
-    uint32_t soft_am = reg_read(h, DCF77_REG_SOFT_AM);
-    dcf77_unpack_soft_am(soft_am, s);
-
-    /* When PM is absent, fall back to the AM bit_index field
-     * (SOFT_AM bits 29..24) for sec_index. */
-    if (!h->pm_present) {
-        s->sec_index = (uint8_t)((soft_am >> 24) & 0x3Fu);
-    }
-
+    dcf77_unpack_soft_am(reg_read(h, DCF77_REG_SOFT_AM), s);
     return s->pm_valid || s->am_valid;
 }
 
