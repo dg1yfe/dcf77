@@ -460,6 +460,10 @@ begin
 
     -- Generous watchdog: a LIVE-rate run of 60 broadcast-sec at
     -- PHASE_ERR_V_CLOCKS=62500 is 60 sec sim; allow margin for slow GHDL.
-    test_runner_watchdog(runner, 5 min);
+    -- Long enough for ~30-min "long" corpus captures at LIVE rate.
+    -- Short captures finish in ~1 min sim; the watchdog only matters
+    -- for the multi-minute long recordings used to demonstrate
+    -- edge-protected T=1 SIK detection on marginal signals.
+    test_runner_watchdog(runner, 35 min);
 
 end architecture;
