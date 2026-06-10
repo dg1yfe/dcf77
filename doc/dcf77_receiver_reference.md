@@ -5,6 +5,14 @@ integrator's point of view: what it does, what data flows through it,
 what every AXI4-Lite register contains, and what the host should do to
 read the decoded time and signal-quality information.
 
+> **Note** — this reference covers the original AM-only receiver
+> (registers 0x00..0x24) for historical continuity. For the current
+> design including the PM (PSK/SIK) decoder stack, the PM AXI register
+> block (0x30, 0x38–0x4C), the carrier-PLL telemetry block
+> (0x50–0x58), the `WITH_PM` / `WITH_PM_DEBUG` synthesis generics, and
+> corpus performance numbers, see
+> [`dcf77_architecture.md`](dcf77_architecture.md).
+
 For protocol details refer to `doc/dcf77_format_spec.md`.  For project
 layout, test infrastructure, and developer notes see `README.md` at the
 repo root.

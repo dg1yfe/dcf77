@@ -127,11 +127,14 @@ artefacts land in `vunit_out/` (gitignored).  Total runtime ≈ 35 s.
 
 ## Documentation
 
-The README is developer-facing.  For integrator-oriented documentation
-(top-level interface, generics, register address map with per-bit
-field tables, operational notes, SNR computation, sync-state machine,
-resource footprint, software pseudo-code) see
-[**`doc/dcf77_receiver_reference.md`**](doc/dcf77_receiver_reference.md).
+The README is developer-facing.  For the end-to-end architecture (AM +
+PM signal chains, edge-protected T=1 SIK detection, AXI register map,
+synthesis generics, corpus performance numbers, host driver examples)
+see [**`doc/dcf77_architecture.md`**](doc/dcf77_architecture.md).
+
+For the integrator-oriented per-bit register tables and software
+pseudo-code see
+[`doc/dcf77_receiver_reference.md`](doc/dcf77_receiver_reference.md).
 
 The DCF77 protocol itself (AM frame layout, BCD encoding, parity rules,
 PM hints) is documented in [`doc/dcf77_format_spec.md`](doc/dcf77_format_spec.md).
