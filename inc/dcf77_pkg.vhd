@@ -276,17 +276,14 @@ package dcf77_pkg is
         enable     : std_logic;     -- master enable
         soft_reset : std_logic;     -- pulse this high to reset the core
         env_mode   : std_logic;     -- 0 = abs(I) only, 1 = |I| + 3/8*|Q|
-        irq_mask   : std_logic_vector(31 downto 0); -- per-bit irq enables
     end record;
 
     constant DCF77_CONTROL_RESET : dcf77_control_type := (
         enable     => '1',          -- default-on
         soft_reset => '0',
-        env_mode   => '0',          -- abs(I) by default; host can set to
+        env_mode   => '0'           -- abs(I) by default; host can set to
                                     -- '1' for |I|+3/8|Q| (interferer-robust
                                     -- at ~0.5 dB sensitivity cost).
-        irq_mask   => (others => '0') -- all sources masked off at reset
-                                    -- (host opts in by writing IRQ_MASK).
     );
 
     ---------------------------------------------------------------------------
@@ -414,6 +411,52 @@ package dcf77_pkg is
         -- Carrier-PLL lock_state 0 -> 1.
     constant IRQ_PLL_LOCK_FALL_BIT  : natural := 8;
         -- Carrier-PLL lock_state 1 -> 0.
+
+    ---------------------------------------------------------------------------
+    -- IRQ-generator interface records (dcf77_irq_gen).
+    --
+    -- One named bit per interrupt source.  irq_to_slv / slv_to_irq pin
+    -- the AXI bit positions (= the IRQ_*_BIT constants above) in this
+    -- one place; the irq_gen's flag/mask algebra runs on the vector
+    -- form and converts back, so adding a source means: add a record
+    -- field, add a bit constant, extend the two conversion functions.
+    ---------------------------------------------------------------------------
+    type dcf77_irq_source_type is record
+        second_tick    : std_logic;
+        am_minute_mark : std_logic;
+        pm_minute_mark : std_logic;
+        am_time_valid  : std_logic;
+        pm_time_valid  : std_logic;
+        am_sync_lost   : std_logic;
+        pm_sync_lost   : std_logic;
+        pll_lock_rise  : std_logic;
+        pll_lock_fall  : std_logic;
+    end record;
+
+    constant DCF77_IRQ_SOURCE_RESET : dcf77_irq_source_type :=
+        (others => '0');
+
+    function irq_to_slv (s : dcf77_irq_source_type)
+        return std_logic_vector;
+    function slv_to_irq (v : std_logic_vector(31 downto 0))
+        return dcf77_irq_source_type;
+
+    -- Host-facing register pair carried between the AXI muxes and the
+    -- irq_gen:
+    --   * writemux -> irq_gen: flag = one-cycle W1C clear pulses (a bit
+    --     is '1' for exactly one clk after the host wrote '1' to it),
+    --     mask = sticky level (the host-written enable word).
+    --   * irq_gen -> readmux: flag = live sticky flags, mask = mask
+    --     read-back.
+    type dcf77_irq_register_type is record
+        flag : dcf77_irq_source_type;
+        mask : dcf77_irq_source_type;
+    end record;
+
+    constant DCF77_IRQ_REGISTER_RESET : dcf77_irq_register_type := (
+        flag => DCF77_IRQ_SOURCE_RESET,
+        mask => DCF77_IRQ_SOURCE_RESET
+    );
 
     ---------------------------------------------------------------------------
     -- 32-b register pack / unpack helpers.  The bit layouts below match the
@@ -612,6 +655,40 @@ package body dcf77_pkg is
         r(1) := c.soft_reset;
         r(2) := c.env_mode;
         return r;
+    end function;
+
+    function irq_to_slv (s : dcf77_irq_source_type)
+        return std_logic_vector
+    is
+        variable r : std_logic_vector(31 downto 0) := (others => '0');
+    begin
+        r(IRQ_SECOND_TICK_BIT)    := s.second_tick;
+        r(IRQ_AM_MINUTE_MARK_BIT) := s.am_minute_mark;
+        r(IRQ_PM_MINUTE_MARK_BIT) := s.pm_minute_mark;
+        r(IRQ_AM_TIME_VALID_BIT)  := s.am_time_valid;
+        r(IRQ_PM_TIME_VALID_BIT)  := s.pm_time_valid;
+        r(IRQ_AM_SYNC_LOST_BIT)   := s.am_sync_lost;
+        r(IRQ_PM_SYNC_LOST_BIT)   := s.pm_sync_lost;
+        r(IRQ_PLL_LOCK_RISE_BIT)  := s.pll_lock_rise;
+        r(IRQ_PLL_LOCK_FALL_BIT)  := s.pll_lock_fall;
+        return r;
+    end function;
+
+    function slv_to_irq (v : std_logic_vector(31 downto 0))
+        return dcf77_irq_source_type
+    is
+        variable s : dcf77_irq_source_type;
+    begin
+        s.second_tick    := v(IRQ_SECOND_TICK_BIT);
+        s.am_minute_mark := v(IRQ_AM_MINUTE_MARK_BIT);
+        s.pm_minute_mark := v(IRQ_PM_MINUTE_MARK_BIT);
+        s.am_time_valid  := v(IRQ_AM_TIME_VALID_BIT);
+        s.pm_time_valid  := v(IRQ_PM_TIME_VALID_BIT);
+        s.am_sync_lost   := v(IRQ_AM_SYNC_LOST_BIT);
+        s.pm_sync_lost   := v(IRQ_PM_SYNC_LOST_BIT);
+        s.pll_lock_rise  := v(IRQ_PLL_LOCK_RISE_BIT);
+        s.pll_lock_fall  := v(IRQ_PLL_LOCK_FALL_BIT);
+        return s;
     end function;
 
     function slv_to_ctrl (s : std_logic_vector) return dcf77_control_type is

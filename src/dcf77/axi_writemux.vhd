@@ -47,11 +47,12 @@ entity axi_writemux is
         -- on each '1' write to REG_PLL_I_STATE_JAM[31].
         ToPllOverride : out dcf77_pll_override_type;
 
-        -- One-cycle per-bit clear pulse for REG_IRQ_FLAG.  Bit i is
-        -- high for one cycle iff the host wrote '1' to that bit
-        -- position (W1C); the containing axi_lite shell uses this
-        -- vector to clear its sticky-flag register.
-        IrqFlagClear : out std_logic_vector(31 downto 0)
+        -- Host IRQ writes, delivered to dcf77_irq_gen:
+        --   .flag = one-cycle W1C clear pulses (bit i high for exactly
+        --           one clk after the host wrote '1' to REG_IRQ_FLAG
+        --           bit i)
+        --   .mask = sticky enable word (REG_IRQ_MASK), registered here
+        ToIrqGen : out dcf77_irq_register_type
     );
 end entity axi_writemux;
 
@@ -66,7 +67,7 @@ architecture rtl of axi_writemux is
         bo  : axi4lite_write_response_channel_output_type;
         ctrl: dcf77_control_type;
         pll : dcf77_pll_override_type;
-        irq_flag_clear : std_logic_vector(31 downto 0); -- one-cycle pulse per bit
+        irq : dcf77_irq_register_type;  -- .flag = one-cycle pulses, .mask sticky
     end record;
 
     constant AWI_RESET : axi4lite_address_channel_input_type := (
@@ -96,7 +97,7 @@ architecture rtl of axi_writemux is
         bo   => BO_RESET,
         ctrl => DCF77_CONTROL_RESET,
         pll  => DCF77_PLL_OVERRIDE_RESET,
-        irq_flag_clear => (others => '0')
+        irq  => DCF77_IRQ_REGISTER_RESET
     );
 
     signal r, rin : wmux_reg_type;
@@ -108,7 +109,7 @@ begin
     BOutput   <= r.bo;
     ToControl <= r.ctrl;
     ToPllOverride <= r.pll;
-    IrqFlagClear <= r.irq_flag_clear;
+    ToIrqGen  <= r.irq;
 
     comb : process (all)
         variable v       : wmux_reg_type;
@@ -126,7 +127,7 @@ begin
         v.ctrl.soft_reset    := '0';
         v.pll.offset_wr      := '0';   -- one-cycle pulses on register write
         v.pll.i_state_wr     := '0';
-        v.irq_flag_clear     := (others => '0');
+        v.irq.flag           := DCF77_IRQ_SOURCE_RESET;  -- one-cycle W1C pulses
 
         -- Register incoming AXI signals.
         v.awi := AWInput;
@@ -177,14 +178,14 @@ begin
                     v.ctrl.env_mode   := r.wi.data(2);
                     v.bo.resp := AXI_RESPONSE_OKAY;
                 when REG_IRQ_FLAG =>
-                    -- W1C: per-bit clear pulse to the containing
-                    -- axi_lite shell's sticky-flag register.
-                    v.irq_flag_clear := r.wi.data;
+                    -- W1C: per-bit clear pulse to dcf77_irq_gen's
+                    -- sticky-flag register.
+                    v.irq.flag := slv_to_irq(r.wi.data);
                     v.bo.resp := AXI_RESPONSE_OKAY;
                 when REG_IRQ_MASK =>
-                    -- Plain R/W: store all 32 bits.  Reset all-zero, so
-                    -- the host opts in explicitly to each source.
-                    v.ctrl.irq_mask := r.wi.data;
+                    -- Sticky enable word.  Reset all-zero, so the host
+                    -- opts in explicitly to each source.
+                    v.irq.mask := slv_to_irq(r.wi.data);
                     v.bo.resp := AXI_RESPONSE_OKAY;
                 when REG_PLL_OFFSET =>
                     -- Write = jam phase_inc_offset with bits[23:0].

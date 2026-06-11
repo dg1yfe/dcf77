@@ -357,18 +357,21 @@ begin
 
             -----------------------------------------------------------------
             elsif run("irq_mask_roundtrip") then
-                -- IRQ_MASK is plain R/W; the irq output should not move
-                -- while no flags are set (regardless of mask value).
+                -- IRQ_MASK is R/W for the nine defined source bits;
+                -- reserved bits 31..9 read as 0 (the mask is stored as
+                -- a dcf77_irq_source_type record -- undefined positions
+                -- have no storage).  The irq output must not move while
+                -- no flags are set, regardless of mask value.
                 axi_write(x"5C", x"DEADBEEF", AXI_RESPONSE_OKAY);
                 axi_read(x"5C", rd, AXI_RESPONSE_OKAY);
-                check_equal(rd, std_logic_vector'(x"DEADBEEF"),
-                            "IRQ_MASK round-trips DEADBEEF");
+                check_equal(rd, std_logic_vector'(x"000000EF"),
+                            "IRQ_MASK round-trips DEADBEEF & 0x1FF");
                 check_equal(irq, '0',
                             "irq stays low while flag = 0 (mask irrelevant)");
                 axi_write(x"5C", x"FFFFFFFF", AXI_RESPONSE_OKAY);
                 axi_read(x"5C", rd, AXI_RESPONSE_OKAY);
-                check_equal(rd, std_logic_vector'(x"FFFFFFFF"),
-                            "IRQ_MASK accepts FFFFFFFF");
+                check_equal(rd, std_logic_vector'(x"000001FF"),
+                            "IRQ_MASK all-ones reads back as the 9 defined bits");
                 axi_write(x"5C", x"00000000", AXI_RESPONSE_OKAY);
                 axi_read(x"5C", rd, AXI_RESPONSE_OKAY);
                 check_equal(rd, std_logic_vector'(x"00000000"),

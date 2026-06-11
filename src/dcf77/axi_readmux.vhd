@@ -42,9 +42,9 @@ entity axi_readmux is
         FromStatus  : in dcf77_status_type;
         FromControl : in dcf77_control_type;
 
-        -- Live sticky-flag register (32-bit) from the axi_lite shell's
-        -- edge-detect aggregator.  Read by REG_IRQ_FLAG.
-        FromIrqFlag : in std_logic_vector(31 downto 0)
+        -- Live flag + mask read-back from dcf77_irq_gen.  Served at
+        -- REG_IRQ_FLAG / REG_IRQ_MASK.
+        FromIrqGen : in dcf77_irq_register_type
     );
 end entity axi_readmux;
 
@@ -227,12 +227,11 @@ begin
                         v.ro.resp := AXI_RESPONSE_DECERR;
                     end if;
                 when REG_IRQ_FLAG =>
-                    -- 32-bit sticky-flag register, live from the
-                    -- axi_lite shell's edge-detect aggregator.
-                    v.ro.data := FromIrqFlag;
+                    -- Live sticky flags from dcf77_irq_gen.
+                    v.ro.data := irq_to_slv(FromIrqGen.flag);
                 when REG_IRQ_MASK =>
-                    -- Echo the host-written mask back from control.
-                    v.ro.data := r.ct.irq_mask;
+                    -- Mask echo from dcf77_irq_gen.
+                    v.ro.data := irq_to_slv(FromIrqGen.mask);
                 when others =>
                     v.ro.data := (others => '0');
                     v.ro.resp := AXI_RESPONSE_DECERR;
