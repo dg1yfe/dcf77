@@ -807,10 +807,12 @@ PM `pm_sync_state` (`PM_STATUS[7:6]`):
 - **Synthesis not yet validated.** Resource numbers are pre-PnR
   estimates from the WITH_PM gating analysis. First Vivado build will
   refine them.
-- **Level-sensitive interrupt only.** The `irq` output stays high
-  while any unmasked `IRQ_FLAG` bit is set. Hosts that need edge-
-  triggered semantics should configure their interrupt controller
-  accordingly or use the W1C clear as the de-assertion gesture.
+- **Level-sensitive interrupt only.** The registered `irq` output
+  stays high while any latched (per-event masked-in) interrupt's flag
+  is pending — see §4.1 for the exact mask semantics. Hosts that need
+  edge-triggered behaviour should configure their interrupt controller
+  for level triggering and use the W1C flag clear as the de-assertion
+  gesture.
 - **PM minute-mark hardware is T=1.** Soft-metric T=0..k MLD lives in
   the host software; the hardware delivers raw `pm_soft` per second
   and the host accumulates over arbitrary windows.

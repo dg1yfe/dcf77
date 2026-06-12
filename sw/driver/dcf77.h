@@ -236,13 +236,19 @@ uint32_t dcf77_irq_read_flags(const dcf77_handle_t *h);
 void dcf77_irq_clear(const dcf77_handle_t *h, uint32_t mask);
 
 /*
- * Read / write the per-source interrupt mask. The `irq` output of
- * the dcf77_axi_lite entity is high while any unmasked flag bit
- * is set; bits cleared in IRQ_MASK are still latched into
- * IRQ_FLAG but don't drive the output line.
+ * Read / write the per-source interrupt mask. Mask semantics are
+ * per-event (latched): an interrupt whose flag fires while its mask
+ * bit is set keeps the `irq` line asserted until that FLAG is
+ * W1C-cleared — clearing the mask bit afterwards does NOT deassert
+ * irq. Setting a mask bit while its flag is already pending does
+ * assert irq. Events that fire while masked are still latched into
+ * IRQ_FLAG (visible to polling) but never assert irq.
+ *
+ * Reserved bits (31..9) have no storage and read back 0.
  *
  * Reset value of IRQ_MASK is 0 — the host opts in by writing each
- * desired source.
+ * desired source. The mask (and pending flags) survive
+ * CTRL.soft_reset; only the external reset clears them.
  */
 uint32_t dcf77_irq_get_mask(const dcf77_handle_t *h);
 void     dcf77_irq_set_mask(const dcf77_handle_t *h, uint32_t mask);

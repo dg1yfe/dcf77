@@ -44,10 +44,12 @@ if (dcf77_read_time(&h, &t)) {
 }
 ```
 
-The hardware exposes a level-sensitive `irq` line driven by
-`OR(IRQ_FLAG & IRQ_MASK)`. Set up the mask once and either wire
-`irq` to the CPU's interrupt controller or poll
-`dcf77_irq_read_flags`:
+The hardware exposes a registered, level-sensitive `irq` line with
+per-event mask latching: an interrupt that fired while its mask bit
+was set keeps `irq` asserted until its *flag* is W1C-cleared —
+disabling the mask afterwards does not deassert it. Set up the mask
+once and either wire `irq` to the CPU's (level-triggered) interrupt
+controller or poll `dcf77_irq_read_flags`:
 
 ```c
 /* Unmask the per-second tick + a few state-change events. */
