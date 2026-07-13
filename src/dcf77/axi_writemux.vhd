@@ -1,11 +1,11 @@
 -- =========================================================================
 -- axi_writemux.vhd
 --
--- AXI4-Lite write-channel arbiter and decoder for the DCF77 slave.  Adapted
--- from doc/axi4lite_interface.md; bugs fixed and the memory-
--- controller leftovers stripped.  Decodes writes to REG_CTRL into a
--- dcf77_control_type record that drives the receiver core.  Writes to any
--- other offset return SLVERR (no other registers are writable).
+-- AXI4-Lite write-channel arbiter and decoder for the DCF77 slave.  See
+-- doc/axi4lite_interface.md for the structure and coding style.  Decodes
+-- writes to the writable registers (CTRL, IRQ_FLAG/MASK, and — with
+-- WITH_PM_DEBUG — the carrier-PLL jam registers) into the records that
+-- drive the receiver core; all other offsets return SLVERR.
 --
 -- Byte-strobe support: write data is byte-merged into the registered word
 -- so partial-word writes (e.g. axi_wstrb = "0001") keep the other bytes
@@ -118,12 +118,11 @@ begin
     begin
         v := r;
 
-        -- Pulsed register-bit defaults.  Following the pattern from the
-        -- AXI example ("Reset pulsed signals to zero here"), default a
-        -- self-clearing bit to '0' at the top of the comb process.  The
-        -- write decoder below sets it to '1' only on the matching write
-        -- transaction, so the registered output is high for exactly one
-        -- clock.
+        -- Pulsed register-bit defaults: default each self-clearing bit to
+        -- '0' at the top of the comb process, so the write decoder below can
+        -- set it to '1' only on the matching write transaction and the
+        -- registered output stays high for exactly one clock (see the
+        -- two-process style notes in doc/axi4lite_interface.md).
         v.ctrl.soft_reset    := '0';
         v.pll.offset_wr      := '0';   -- one-cycle pulses on register write
         v.pll.i_state_wr     := '0';

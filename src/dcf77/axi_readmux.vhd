@@ -2,8 +2,8 @@
 -- axi_readmux.vhd
 --
 -- AXI4-Lite read-channel arbiter and address decoder for the DCF77 slave.
--- Adapted from doc/axi4lite_interface.md; bugs fixed and the
--- dcf77 register map (per dcf77_pkg) wired in.
+-- See doc/axi4lite_interface.md for the structure and coding style; the
+-- dcf77 register map (per dcf77_pkg) is wired in here.
 --
 -- Inputs come from the dcf77 core (status, time, last_frame) and from the
 -- writemux (current control value, so the host can read it back).

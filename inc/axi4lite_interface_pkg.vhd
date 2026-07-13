@@ -1,8 +1,8 @@
 -- =========================================================================
 -- axi4lite_interface_pkg.vhd
 --
--- Shared AXI4-Lite channel record types, adapted from the project example
--- in doc/axi4lite_interface.md.  Documentation comments preserved verbatim.
+-- Shared AXI4-Lite channel record types for the DCF77 slave.  See
+-- doc/axi4lite_interface.md for the interface structure and coding style.
 -- =========================================================================
 
 library ieee;
