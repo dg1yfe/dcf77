@@ -103,7 +103,7 @@ def _configure_testbenches(lib) -> None:
             OUT_WIDTH=17,
         ),
     )
-    # CIC1 / CIC3 (R=10), widths per cic_pruning.py with margin=0.
+    # CIC1 (R=10), widths per cic_pruning.py with margin=0.
     cic_tb.add_config(
         name="r10",
         generics=dict(
@@ -115,7 +115,7 @@ def _configure_testbenches(lib) -> None:
             OUT_WIDTH=22,
         ),
     )
-    # CIC2 / CIC4 (R=25), widths per cic_pruning.py with margin=0.
+    # CIC2 (R=25), widths per cic_pruning.py with margin=0.
     cic_tb.add_config(
         name="r25",
         generics=dict(

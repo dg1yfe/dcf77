@@ -30,6 +30,6 @@
 - Samplerate is 125 MHz
 - Samplewidth is 14 Bit
 - Objective is to implement a DCF77 decoder providing all decoded data, RSSI and optionally an SNR estimation via an AXI4-Lite registerset 
-- Use 'DCF77-Prompt.txt' as architectural guide for this project
+- See `doc/dcf77_architecture.md` for the full architecture, and `doc/axi4lite_interface.md` for the AXI4-Lite slave structure.
 
 

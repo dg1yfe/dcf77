@@ -460,7 +460,7 @@ package dcf77_pkg is
 
     ---------------------------------------------------------------------------
     -- 32-b register pack / unpack helpers.  The bit layouts below match the
-    -- plan in /Users/eligs/.claude/plans/this-project-aims-to-toasty-pelican.md.
+    -- register map in the README and doc/axi4lite_interface.md.
     ---------------------------------------------------------------------------
 
     -- CTRL register: bit 0 enable, bit 1 soft_reset, bit 2 env_mode, rest reserved.
