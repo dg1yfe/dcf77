@@ -5,6 +5,9 @@ simulation/derived/
 ## Real RX recordings (kept out-of-tree; large binaries)
 samples/
 
+## Rendered doc exports (the .md is the source of truth)
+doc/dcf77_implementation.pdf
+
 ## Editor / tooling scratch
 .claude/
 __pycache__/
