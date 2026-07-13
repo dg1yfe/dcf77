@@ -1,28 +1,29 @@
 -- =========================================================================
 -- dcf77_core.vhd
 --
--- Top-level wiring of the DCF77 receiver / decoder:
+-- Top-level wiring of the DCF77 receiver / decoder.  Decimate first, mix
+-- later; one 125 MHz clock domain, inner stages gated by valid strobes:
 --
---   adc -> CIC0(R=2) -> CIC1(R=10) -> CIC2(R=25) -+-> mixer @250 kS/s
---                                                  |       |
---                                                  NCO     +-+--> CIC3_I (R=10)
---                                                          |        |    25 kS/s
---                                                          +--> CIC3_Q   ---> iq_tap
---                                                                   |
---                                                                   +--> CIC4_I (R=25)
---                                                                          1 kS/s
---                                                                   +--> CIC4_Q
---                                                                          |
---                                                                env (I²+Q²)
---                                                                          |
---                                                                       bit_det
---                                                                          |
---                                                                       frame_dec --> status_out
+--   adc[14b] --125MS/s--> CIC0(R=2) -> CIC1(R=10) -> CIC2(R=25) --250kS/s--> mixer --+--> I
+--                                                                     NCO ---/         +--> Q
+--                                                                      ^
+--                                                     phase_inc_offset (carrier loop, below)
 --
--- All blocks live in the 125 MHz clock domain; inner CIC stages advance on
--- valid strobes.  XDC multicycle constraints are needed at synthesis:
---   CIC1: factor 2,   CIC2: factor 20,
---   CIC3_*: factor 500, CIC4_*: factor 5000.
+--   I -> i_boxcar(R=125) --+
+--   Q -> q_boxcar(R=125) --+--2kS/s--> CORDIC (I/Q -> polar) --> mag[19b], phase[12b]
+--
+--     mag   --> mag_iir(20Hz) --> env_dec(/10) --200S/s--> env_tracker --> bit_det
+--     phase -+-> carrier_pll(PI, KP=10/KI=23) --> phase_inc_offset --> NCO
+--            +-> phase_quality --> pll_lock
+--            +-> pm_correlator --> pm_frame_dec --------------+   (only when WITH_PM)
+--                                                             |
+--          bit_det --(gated by pll_lock)--> frame_dec (AM) --> status_out <--+ (PM)
+--
+-- All blocks live in the 125 MHz clock domain and advance on valid strobes.
+-- The carrier loop closes CORDIC phase -> carrier_pll -> phase_inc_offset ->
+-- NCO.  The PM stack (pm_correlator + pm_frame_dec) is synthesised only when
+-- WITH_PM.  XDC multicycle factors: CIC1 x2, CIC2 x20, boxcars x500,
+-- mag_iir/env_dec x62500, env_tracker/bit_det x625000.
 -- =========================================================================
 
 library ieee;
