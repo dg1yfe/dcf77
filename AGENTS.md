@@ -14,6 +14,7 @@
 - VHDL-2008, structured two-process style (combinational + sequential) per `doc/structdes.pdf`.
 - Indentation: 4 spaces; avoid tabs. Use descriptive record/enum names (e.g., `state_t`, `r_type`).
 - AXI-Stream ports use `s_axis_*` and `m_axis_*`.
+- AXI4-Lite slave structure & coding style: see `doc/axi4lite_interface.md`.
 
 ## Testing Guidelines
 - Framework: VUnit with GHDL. Testbench names in `simulation/tb` prefixed with two-digit indices (e.g., `00_reset...`, `01_no_error`).
