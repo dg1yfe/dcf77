@@ -1,7 +1,8 @@
 -- =========================================================================
 -- dcf77_bit_det.vhd
 --
--- Single-phase symbol-structural AM bit detector at 100 S/s.  Anchors
+-- Single-phase symbol-structural AM bit detector.  The sample rate is set
+-- by SAMPLE_RATE_HZ (200 S/s as instantiated in dcf77_core).  Anchors
 -- the bit cadence to the first significant falling envelope edge after
 -- reset / loss-of-anchor, then runs a free-running modulo-BIT_PERIOD
 -- sample counter from there.  No internal phase-locked loop -- the
@@ -9,12 +10,13 @@
 -- through the NCO; in replay-mode test flow the system-clock /
 -- clock_en cadence is good enough over the test duration (sample-
 -- rate drift of 10 ppm yields ~6 ms over a minute, well within the
--- 100 ms bit width).
+-- 100 ms bit-0 dip width).
 --
--- Symbol-structural windows (in clock_en ticks, called "bins"):
---   W1 = [0..W1_END)           = dip / minute-mark sense (10 bins)
---   W2 = [W1_END..W2_END)      = bit-value discriminator (10 bins)
---   W3 = [W2_END..BIT_PERIOD)  = carrier reference -> iir_high (80 bins)
+-- Symbol-structural windows (in clock_en ticks, called "bins"; sizes scale
+-- with the generics -- counts below are for dcf77_core's 200 S/s config):
+--   W1 = [0..W1_END)           = dip / minute-mark sense      (20 bins)
+--   W2 = [W1_END..W2_END)      = bit-value discriminator       (20 bins)
+--   W3 = [W2_END..BIT_PERIOD)  = carrier reference -> iir_high (160 bins)
 --
 -- Decision (identical to the previous implementation):
 --   threshold := iir_high * 37/64          ~= 0.578 * iir_high
