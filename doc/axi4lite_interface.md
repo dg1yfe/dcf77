@@ -227,5 +227,5 @@ The full bit-field table lives in the README and `doc/dcf77_architecture.md`;
 | Read arbiter/decoder | `src/dcf77/axi_readmux.vhd` |
 | Write arbiter/decoder | `src/dcf77/axi_writemux.vhd` |
 | Top-level shell (muxes + core + irq_gen) | `src/dcf77/dcf77_axi_lite.vhd` |
-| Flat `s_axi_*` IP wrapper | `src/dcf77/dcf77_top_bd.vhd` |
+| Flat `s_axi_*` IP wrapper | `fpga/dcf77_top_bd.vhd` |
 | AXI slave testbench | `simulation/tb/05_dcf77_axi_lite_tb.vhd` |
