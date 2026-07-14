@@ -71,6 +71,28 @@ package axi4lite_interface_pkg is
         resp  : std_logic_vector(1 downto 0);
     end record;
 
+    -- Lean slave-side bundles WITHOUT the global (clock / reset)
+    -- fields: per the two-process design guide, clocks and resets stay
+    -- scalar entity ports (a clock inside a record port picks up a
+    -- delta delay and confuses clock-tree / timing tools).  These are
+    -- the port types of dcf77_axi_lite; flattening to the s_axi_*
+    -- signals Vivado IP Integrator expects happens in dcf77_top_bd.
+    type axi4lite_si_type is record    -- master -> slave
+        aw : axi4lite_address_channel_input_type;
+        w  : axi4lite_write_data_channel_input_type;
+        b  : axi4lite_write_response_channel_input_type;
+        ar : axi4lite_address_channel_input_type;
+        r  : axi4lite_read_data_channel_input_type;
+    end record;
+
+    type axi4lite_so_type is record    -- slave -> master
+        aw : axi4lite_address_channel_output_type;
+        w  : axi4lite_write_data_channel_output_type;
+        b  : axi4lite_write_response_channel_output_type;
+        ar : axi4lite_address_channel_output_type;
+        r  : axi4lite_read_data_channel_output_type;
+    end record;
+
     type axi4lite_slave_input_type is record
         global : axi4lite_global_input_type;
         aw_in  : axi4lite_address_channel_input_type;

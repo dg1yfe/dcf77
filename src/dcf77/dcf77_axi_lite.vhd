@@ -1,10 +1,13 @@
 -- =========================================================================
 -- dcf77_axi_lite.vhd
 --
--- Top-level wrapper: dcf77_core plus the AXI4-Lite slave (axi_readmux /
--- axi_writemux).  Exposes the conventional flat std_logic AXI4-Lite ports
--- at the entity boundary; internally re-aggregates them into the record
--- types defined by axi4lite_interface_pkg.
+-- Top-level RTL wrapper: dcf77_core plus the AXI4-Lite slave
+-- (axi_readmux / axi_writemux) and the interrupt generator.  Ports are
+-- record-bundled by direction per the two-process guide
+-- (axi4lite_si_type / axi4lite_so_type / dcf77_in_type); the flat
+-- s_axi_* signals required by Vivado IP Integrator live one level up
+-- in dcf77_top_bd, which is also where the sfixed <-> std_logic_vector
+-- conversions happen.
 --
 -- Register map (per dcf77_pkg):
 --   0x00 RW   CTRL         enable, soft_reset, env_mode
@@ -107,44 +110,24 @@ entity dcf77_axi_lite is
         WITH_PM_DEBUG : boolean  := false
     );
     port (
-        -- AXI4-Lite slave (system clock = ACLK; matches dcf77_core's clk).
-        s_axi_aclk    : in  std_logic;
-        s_axi_aresetn : in  std_logic;
+        -- System clock (= AXI ACLK = dcf77_core's clk) and active-low
+        -- reset.  Kept as scalar ports per the two-process guide.
+        clk     : in  std_logic;
+        rst_n   : in  std_logic;
 
-        s_axi_awaddr  : in  std_logic_vector(AXILITE_AXI_ADDR_WIDTH - 1 downto 0);
-        s_axi_awprot  : in  std_logic_vector(2 downto 0);
-        s_axi_awvalid : in  std_logic;
-        s_axi_awready : out std_logic;
+        -- AXI4-Lite slave, record-bundled by direction.  The flat
+        -- s_axi_* signals Vivado IP Integrator needs live one level
+        -- up in dcf77_top_bd.
+        axi_in  : in  axi4lite_si_type;
+        axi_out : out axi4lite_so_type;
 
-        s_axi_wdata   : in  std_logic_vector(AXILITE_AXI_DATA_WIDTH - 1 downto 0);
-        s_axi_wstrb   : in  std_logic_vector((AXILITE_AXI_DATA_WIDTH / 8) - 1 downto 0);
-        s_axi_wvalid  : in  std_logic;
-        s_axi_wready  : out std_logic;
+        -- ADC stream (assumed synchronous to clk).
+        dcf_in  : in  dcf77_in_type;
 
-        s_axi_bresp   : out std_logic_vector(1 downto 0);
-        s_axi_bvalid  : out std_logic;
-        s_axi_bready  : in  std_logic;
-
-        s_axi_araddr  : in  std_logic_vector(AXILITE_AXI_ADDR_WIDTH - 1 downto 0);
-        s_axi_arprot  : in  std_logic_vector(2 downto 0);
-        s_axi_arvalid : in  std_logic;
-        s_axi_arready : out std_logic;
-
-        s_axi_rdata   : out std_logic_vector(AXILITE_AXI_DATA_WIDTH - 1 downto 0);
-        s_axi_rresp   : out std_logic_vector(1 downto 0);
-        s_axi_rvalid  : out std_logic;
-        s_axi_rready  : in  std_logic;
-
-        -- ADC stream (separate from the AXI clock domain by convention; the
-        -- core assumes they're synchronous to s_axi_aclk).
-        adc_sample    : in  adc_sample_t;
-        adc_valid     : in  std_logic;
-
-        -- Level-sensitive interrupt output.  High while any unmasked
-        -- IRQ_FLAG bit is set; cleared when the host W1Cs the flag(s).
-        -- Wire to your CPU's interrupt controller; if not used, leave
-        -- open and synthesis will prune the unused logic.
-        irq           : out std_logic
+        -- Level-sensitive registered interrupt output (see
+        -- dcf77_irq_gen).  Wire to a level-triggered controller input;
+        -- if unused, leave open and synthesis prunes the irq_gen.
+        irq     : out std_logic
     );
 end entity dcf77_axi_lite;
 
@@ -190,31 +173,20 @@ architecture rtl of dcf77_axi_lite is
 begin
 
     ------------------------------------------------------------------ --
-    -- Flatten the AXI ports into the record types.                       --
+    -- Unbundle / rebundle the directional AXI records into the          --
+    -- per-channel wires the readmux / writemux use.                     --
     ------------------------------------------------------------------ --
-    ar_in.valid <= s_axi_arvalid;
-    ar_in.addr  <= s_axi_araddr;
-    ar_in.prot  <= s_axi_arprot;
-    s_axi_arready <= ar_out.ready;
+    ar_in <= axi_in.ar;
+    r_in  <= axi_in.r;
+    aw_in <= axi_in.aw;
+    w_in  <= axi_in.w;
+    b_in  <= axi_in.b;
 
-    r_in.ready    <= s_axi_rready;
-    s_axi_rvalid  <= r_out.valid;
-    s_axi_rdata   <= r_out.data;
-    s_axi_rresp   <= r_out.resp;
-
-    aw_in.valid <= s_axi_awvalid;
-    aw_in.addr  <= s_axi_awaddr;
-    aw_in.prot  <= s_axi_awprot;
-    s_axi_awready <= aw_out.ready;
-
-    w_in.valid <= s_axi_wvalid;
-    w_in.data  <= s_axi_wdata;
-    w_in.strb  <= s_axi_wstrb;
-    s_axi_wready <= w_out.ready;
-
-    b_in.ready  <= s_axi_bready;
-    s_axi_bvalid <= b_out.valid;
-    s_axi_bresp  <= b_out.resp;
+    axi_out.ar <= ar_out;
+    axi_out.r  <= r_out;
+    axi_out.aw <= aw_out;
+    axi_out.w  <= w_out;
+    axi_out.b  <= b_out;
 
     ------------------------------------------------------------------ --
     -- Read-side decoder                                                  --
@@ -225,8 +197,8 @@ begin
             WITH_PM_DEBUG => WITH_PM_DEBUG
         )
         port map (
-            ACLK    => s_axi_aclk,
-            ARESETN => s_axi_aresetn,
+            ACLK    => clk,
+            ARESETN => rst_n,
 
             ARInput  => ar_in,
             AROutput => ar_out,
@@ -246,8 +218,8 @@ begin
             WITH_PM_DEBUG => WITH_PM_DEBUG
         )
         port map (
-            ACLK    => s_axi_aclk,
-            ARESETN => s_axi_aresetn,
+            ACLK    => clk,
+            ARESETN => rst_n,
 
             AWInput  => aw_in,
             AWOutput => aw_out,
@@ -265,8 +237,8 @@ begin
     -- Combined core reset: external !aresetn OR host-issued soft_reset.  --
     -- (Both signals are already in the s_axi_aclk domain.)               --
     ------------------------------------------------------------------ --
-    core_rst   <= (not s_axi_aresetn) or control.soft_reset;
-    core_valid <= adc_valid and control.enable;
+    core_rst   <= (not rst_n) or control.soft_reset;
+    core_valid <= dcf_in.sample_valid and control.enable;
 
     ------------------------------------------------------------------ --
     -- Interrupt generator.  Self-contained two-process block owning   --
@@ -274,11 +246,11 @@ begin
     -- set and the registered irq line.  See dcf77_irq_gen.vhd for the --
     -- flag / mask semantics.                                          --
     ------------------------------------------------------------------ --
-    irq_rst <= not s_axi_aresetn;
+    irq_rst <= not rst_n;
 
     u_irq_gen : entity work.dcf77_irq_gen
         port map (
-            clk          => s_axi_aclk,
+            clk          => clk,
             rst          => irq_rst,
             FromStatus   => status,
             FromWritemux => irq_from_wmux,
@@ -305,9 +277,9 @@ begin
             WITH_PM_DEBUG  => WITH_PM_DEBUG
         )
         port map (
-            clk             => s_axi_aclk,
+            clk             => clk,
             rst             => core_rst,
-            in_sample       => adc_sample,
+            in_sample       => dcf_in.sample,
             in_valid        => core_valid,
             env_mode        => control.env_mode,
             pll_override    => pll_override,
