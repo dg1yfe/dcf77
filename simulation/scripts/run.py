@@ -22,6 +22,9 @@ from vunit import VUnit
 ROOT = Path(__file__).resolve().parent.parent.parent
 INC_DIR = ROOT / "inc"
 SRC_DIR = ROOT / "src" / "dcf77"
+# IP-packaging layer (ippkg only): the dcf77_top_bd boundary adapter lives
+# here, outside the normal src tree.  _add_sources no-ops when absent.
+FPGA_DIR = ROOT / "fpga"
 TB_DIR = ROOT / "simulation" / "tb"
 SAMPLES_DIR = ROOT / "samples"
 DERIVED_DIR = ROOT / "simulation" / "derived"
@@ -61,6 +64,7 @@ def build() -> VUnit:
 
     _add_sources(lib, INC_DIR)
     _add_sources(lib, SRC_DIR)
+    _add_sources(lib, FPGA_DIR)   # ippkg-only IP adapter; no-op on master
     _add_sources(lib, TB_DIR)
 
     # Apply compile/sim flags with allow_empty so this works on partial trees.
