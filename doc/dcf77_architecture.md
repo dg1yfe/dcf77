@@ -45,73 +45,47 @@ Top-level entity: `dcf77_axi_lite`
 
 ```
   ADC (14 b signed, 125 MS/s)
-    │
-    ▼
-  CIC₀ R=2   N=3   17 b   125 MHz single-cycle
-  CIC₁ R=10  N=3   29 b   62.5 MS/s, multicycle ×2
-  CIC₂ R=25  N=3   33 b   6.25 MS/s, multicycle ×20
-    ▼  real, 22 b, 250 kS/s  (carrier still at 77.5 kHz)
-    │
-    ├──────────── sign-LO mixer ◀── NCO (25 b phase + phase_inc_offset)
-    │                                       ▲
-    ▼ I, Q (22 b, 250 kS/s)                  │
-  CIC₃_I / CIC₃_Q   N=3, R=10                │
-    ▼ I, Q (22 b, 25 kS/s) ─── PM hook       │
-    │                                        │
-    │             ┌──────────────────────────┴──────────┐
-    │             │ Q-boxcar R=25  → 27 b @ 1 kS/s     │
-    │             │       │                            │
-    │             │       ▼                            │
-    │             │  CORDIC atan2(Q, I) → 12 b signed φ │
-    │             │       │                            │
-    │             │       ▼                            │
-    │             │  carrier_pll  (KP=10, KI=23)       │
-    │             │   ├── proportional path             │
-    │             │   ├── integral path (jam-mable)     │
-    │             │   ├── lock_state (hysteretic Δf)   │
-    │             │   └── snapshots → AXI telemetry    │
-    │             └────────────────────────────────────┘
-    ▼
-  CIC₄_I R=25                               ▼ phase_err 9 b @ 2 kS/s
-    ▼ I @ 22 b, 1 kS/s                      │
-    │                                       ▼
-    ▼                              ┌─────────────────────────────┐
-  env = |I|+(3/8)|Q|                │ PM correlator (WITH_PM)     │
-  (alpha-max+beta-min, no DSP)      │  4096×9 BRAM ring buffer    │
-    ▼ 26 b unsigned, 1 kS/s         │  Single LFSR / single ALU   │
-  CIC_ENV R=10, N=3                 │  ACQUIRE → LOCK → re-acq    │
-    ▼ env @ 100 S/s                 │  sigma-delta chip DLL        │
-    │                               │  pm_soft (12 b) @ 1 Hz       │
-    ▼                               └──────────────┬──────────────┘
-  bit_det @ 100 S/s                                │
-   - free-running mod-100 sample counter           │ pm_soft sign + valid
-   - anchor on first edge, run-on recovery         │
-   - W1/W2/W3 windows + env_max / env_min IIRs     ▼
-    ▼                              ┌─────────────────────────────┐
-  AM frame_dec (PM_MODE=false)     │ PM frame_dec (PM_MODE=true) │
-   - 59-bit shift register          │  43-bit shift register      │
-   - external minute_mark in        │  edge-protected T=1 SIK     │
-   - START_INDEX=0                  │  signature detection        │
-   - BCD + parity + plausibility    │  START_INDEX=15             │
-    ▼                               └──────────────┬──────────────┘
-  AM time/date/flags                                ▼
-                                    PM time/date/flags + pm_lock_qual
-                  │                          │
-                  └──────────┬───────────────┘
-                             ▼
-              ┌────────────────────────────────┐
-              │ AXI4-Lite slave  (23 registers) │
-              └────────────────────────────────┘
+    |
+    v
+  CIC0 R=2   N=3   17 b   125 MHz single-cycle
+  CIC1 R=10  N=3   29 b   62.5 MS/s, multicycle x2
+  CIC2 R=25  N=3   33 b   6.25 MS/s, multicycle x20
+    |  real, 22 b, 250 kS/s  (carrier still at 77.5 kHz)
+    v
+  sign-LO mixer  <-- NCO (25 b phase + phase_inc_offset)
+    |  I, Q (22 b, 250 kS/s)                      ^
+    v                                             | phase_inc_offset
+  i_boxcar / q_boxcar  (R=125)                    |
+    |  I, Q @ 2 kS/s                              |
+    v                                             |
+  CORDIC (I/Q -> polar)  ->  mag [19 b], phase [12 b]
+    |                                             |
+    +-- mag  -> mag_iir (20 Hz) -> env_dec (/10) -> env @ 200 S/s
+    |            -> env_tracker (env_max / env_min / noise-MAD + edge)
+    |            -> bit_det @ 200 S/s  (mod-200 counter, anchor on first
+    |               edge, W1/W2/W3 windows, run-on recovery)
+    |            -> AM frame_dec (PM_MODE=false): 59-bit, BCD + parity
+    |               [gated by pll_lock]  -> AM time/date/flags
+    |
+    +-- phase -> carrier_pll (KP=10, KI=23) -> phase_inc_offset -> NCO
+              -> phase_quality -> pll_lock
+              -> PM correlator (WITH_PM): 4096x9 BRAM ring, single LFSR/ALU,
+                 ACQUIRE -> LOCK, sigma-delta chip DLL, pm_soft (12 b) @ 1 Hz
+                 -> PM frame_dec (PM_MODE=true): edge-protected T=1 SIK,
+                    START_INDEX=15  -> PM time/date/flags + pm_lock_qual
+
+  AM + PM outputs  ->  AXI4-Lite slave (23 registers)
 ```
 
 Diagram source: [`doc/dcf77-dataflow.drawio.svg`](dcf77-dataflow.drawio.svg).
 The carrier-PLL signal flow is detailed in
 [`doc/dcf77-carrier-pll.drawio`](dcf77-carrier-pll.drawio).
 
-Total decimation from ADC (125 MS/s) to the AM bit detector (100 S/s) is
-**1 250 000** = 500 (pre-mixer) × 250 (post-mixer per channel) × 10
-(envelope CIC). The PM path operates at the upstream 2 kS/s phase tap
-where the matched filter still has its full ~27 dB despreading gain.
+Total decimation from ADC (125 MS/s) to the AM bit detector (200 S/s) is
+**625 000** = 2 × 10 × 25 (pre-mixer → 250 kS/s) × 125 (post-mixer
+boxcar → 2 kS/s) × 10 (envelope decimator → 200 S/s). The PM path taps
+the CORDIC phase at 2 kS/s, where the matched filter still has its full
+~27 dB despreading gain.
 
 ---
 
@@ -121,14 +95,16 @@ where the matched filter still has its full ~27 dB despreading gain.
 
 | Entity                  | Purpose                                                              |
 | ----------------------- | -------------------------------------------------------------------- |
-| `dcf77_cic_dec`         | Generic CIC building block (instantiated 7× — pre-mixer real + post-mixer complex + envelope) |
+| `dcf77_cic_dec`         | Generic CIC building block (CIC₀..CIC₂ pre-mixer, 3×; the TB-only CIC_ENV reuses it) |
 | `dcf77_nco`             | 25-b phase-accumulator DDS with signed `phase_inc_offset`, sign-only I/Q |
 | `dcf77_mixer`           | 22-b conditional-negate I/Q mixer                                    |
-| `dcf77_q_boxcar`        | R=25 CIC on Q → 27 b @ 1 kS/s for the PLL                            |
-| `dcf77_cordic`          | CORDIC atan2(Q, I) → 12-b signed phase (input to PM + PLL)            |
-| `dcf77_carrier_pll`     | 2nd-order PI carrier loop, lock_state + telemetry snapshots          |
-| `dcf77_env`             | Magnitude `\|I\|+(3/8)\|Q\|` (alpha-max+beta-min, no DSP)             |
-| `dcf77_bit_det`         | AM symbol-structural detector @ 100 S/s, anchor on first edge        |
+| `dcf77_boxcar`          | Accumulate-and-dump decimator (R=125 I/Q post-mixer → 2 kS/s; also the /10 envelope decimator) |
+| `dcf77_cordic_atan2`    | Vectoring CORDIC: I/Q → magnitude [19 b] + phase [12 b] (feeds envelope, PLL, PM) |
+| `dcf77_iir_lpf`         | Generic 1st-order IIR (magnitude 20 Hz LPF; PLL loop filter)         |
+| `dcf77_carrier_pll`     | 2nd-order PI carrier loop + telemetry snapshots (lock via `dcf77_phase_quality`) |
+| `dcf77_phase_quality`   | ±1 hysteresis carrier-lock indicator on CORDIC phase → `pll_lock`     |
+| `dcf77_env_tracker`     | Envelope stats: env_max / env_min / noise-MAD + falling-edge detect  |
+| `dcf77_bit_det`         | AM symbol-structural detector @ 200 S/s, anchor on first edge        |
 | `dcf77_pm_correlator`   | PM matched filter, single-LFSR/single-ALU, 4096×9 BRAM ring buffer   |
 | `dcf77_frame_dec`       | Shared decoder body: AM mode (PM_MODE=false) + PM mode (PM_MODE=true) |
 | `dcf77_core`            | Top-level RTL wiring (no AXI here). Contains `gen_pm : if WITH_PM`     |
@@ -389,18 +365,20 @@ v1 design:
    250 kS/s real, 22-b signed. The carrier still sits at 77.5 kHz.
 2. **Sign-LO mixer** multiplies by an NCO at 77.5 kHz to produce
    complex I/Q at 250 kS/s.
-3. **Post-mixer CIC₃_I / CIC₃_Q** decimate both channels to 25 kS/s.
-4. **CIC₄_I** further decimates I to 1 kS/s. The Q channel is fed
-   through `q_boxcar` (R=25) to 1 kS/s for the carrier PLL.
-5. **Envelope** uses alpha-max+beta-min magnitude `|I|+(3/8)|Q|` —
-   linear, monotonic, DSP-free.
-6. **CIC_ENV** decimates the envelope to 100 S/s.
-7. **bit_det** runs a symbol-structural detector at 100 S/s:
-   free-running modulo-100 sample counter anchored on the first
+3. **Post-mixer boxcars** (`i_boxcar` / `q_boxcar`, R=125) decimate
+   both channels to 2 kS/s.
+4. **CORDIC** converts I/Q to magnitude (≈ K·√(I²+Q²), 19 b) and phase
+   (12 b). The phase feeds the carrier PLL and the PM path.
+5. **Envelope** is the CORDIC magnitude, low-pass filtered at ~20 Hz
+   (`mag_iir`) and decimated /10 (`env_dec`) to 200 S/s.
+6. **env_tracker** derives env_max / env_min / noise-MAD and the
+   falling-edge strobe from the 200 S/s envelope.
+7. **bit_det** runs a symbol-structural detector at 200 S/s:
+   free-running modulo-200 sample counter anchored on the first
    falling edge. Three windows per second: W1 (mm candidate),
    W2 (bit discriminator), W3 (carrier reference for the IIR).
    Drops anchor on 3-in-a-row mm candidates to recover from a
-   wrong-phase initial lock.
+   wrong-phase initial lock. Outputs are gated by `pll_lock`.
 8. **frame_dec** in AM mode buffers 59 bits per minute and runs BCD
    + parity + plausibility checks.
 

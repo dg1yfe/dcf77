@@ -8,26 +8,21 @@
 -- simulation/tb/06_dcf77_rx_replay_tb.vhd cannot do because it consumes
 -- already-mixed I/Q.
 --
--- Pipeline (matches dcf77_core topology with scaled R values):
+-- Pipeline (mirrors dcf77_core's post-mixer topology with scaled R values):
 --
 --   .if.s16 stream (real, int16 LE @ 12 kS/s)
---      ▼  sign-extend to iq_word_t (22 b)
---   dcf77_mixer  ◀── dcf77_nco (25 b acc, PHASE_INCR for IF / Fs)
---      ▼  I, Q @ 12 kS/s                              ▲
---      ├─────────────────────┐                        │
---      ▼                     ▼                        │
---   CIC₃_I R=4              CIC₃_Q R=4                │
---      ▼ 3 kS/s                ▼ 3 kS/s               │
---   CIC₄_I R=3              q_boxcar R=3              │
---      ▼ I @ 1 kS/s            ▼ Q @ 1 kS/s, 24 b      │
---   abs(I) -> env_word_t   dcf77_carrier_pll ─────────┘
---      ▼                       phase_inc_offset
---   CIC_ENV R=10
---      ▼ env @ 100 S/s
---   dcf77_bit_det -> dcf77_frame_dec
+--      |  sign-extend to iq_word_t
+--   dcf77_mixer  <-- dcf77_nco (25 b acc, PHASE_INCR for IF / Fs)
+--      |  I, Q                                              ^
+--   i_boxcar / q_boxcar  (dcf77_boxcar, R=POST_BOX_RATE)    | phase_inc_offset
+--      |  I, Q @ 2 kS/s                                     |
+--   i_iir (dcf77_iir_lpf)                                   |
+--      |                                                    |
+--      +-- |I| envelope -> dcf77_env_tracker -> dcf77_bit_det -> dcf77_frame_dec
+--      +-- phase_err tap -> dcf77_carrier_pll ---------------+
 --
 -- Two tests, matching 06_replay:
---   smoke         -- first 130 s; asserts bit / minute_mark counts.
+--   smoke         -- first ~130 s; asserts bit / minute_mark counts.
 --   full_decode   -- whole recording; validates decoded time fields.
 -- =========================================================================
 
