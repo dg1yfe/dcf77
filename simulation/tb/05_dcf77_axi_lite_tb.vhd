@@ -56,39 +56,55 @@ architecture tb of dcf77_axi_lite_tb is
 
     signal irq        : std_logic;
 
+    -- Record bundles for dcf77_axi_lite's record ports.  The flat BFM
+    -- signals above are aggregated into / split out of these, so the AXI
+    -- BFM and assertions below stay unchanged.
+    signal axi_in  : axi4lite_si_type;
+    signal axi_out : axi4lite_so_type;
+    signal dcf_in  : dcf77_in_type;
+
 begin
 
     aclk <= not aclk after CLK_PERIOD / 2;
+
+    -- Aggregate the flat BFM drive signals into the master->slave record.
+    axi_in.aw.valid <= awvalid;
+    axi_in.aw.addr  <= awaddr;
+    axi_in.aw.prot  <= awprot;
+    axi_in.w.valid  <= wvalid;
+    axi_in.w.data   <= wdata;
+    axi_in.w.strb   <= wstrb;
+    axi_in.b.ready  <= bready;
+    axi_in.ar.valid <= arvalid;
+    axi_in.ar.addr  <= araddr;
+    axi_in.ar.prot  <= arprot;
+    axi_in.r.ready  <= rready;
+
+    -- Split the slave->master record back out for the BFM to observe.
+    awready <= axi_out.aw.ready;
+    wready  <= axi_out.w.ready;
+    bvalid  <= axi_out.b.valid;
+    bresp   <= axi_out.b.resp;
+    arready <= axi_out.ar.ready;
+    rvalid  <= axi_out.r.valid;
+    rdata   <= axi_out.r.data;
+    rresp   <= axi_out.r.resp;
+
+    -- ADC stream into the input record (adc_sample is already sfixed).
+    dcf_in.sample       <= adc_sample;
+    dcf_in.sample_valid <= adc_valid;
 
     dut : entity dcf77.dcf77_axi_lite
         generic map (
             WITH_PM_DEBUG => true
         )
         port map (
-            s_axi_aclk    => aclk,
-            s_axi_aresetn => aresetn,
-            s_axi_awaddr  => awaddr,
-            s_axi_awprot  => awprot,
-            s_axi_awvalid => awvalid,
-            s_axi_awready => awready,
-            s_axi_wdata   => wdata,
-            s_axi_wstrb   => wstrb,
-            s_axi_wvalid  => wvalid,
-            s_axi_wready  => wready,
-            s_axi_bresp   => bresp,
-            s_axi_bvalid  => bvalid,
-            s_axi_bready  => bready,
-            s_axi_araddr  => araddr,
-            s_axi_arprot  => arprot,
-            s_axi_arvalid => arvalid,
-            s_axi_arready => arready,
-            s_axi_rdata   => rdata,
-            s_axi_rresp   => rresp,
-            s_axi_rvalid  => rvalid,
-            s_axi_rready  => rready,
-            adc_sample    => adc_sample,
-            adc_valid     => adc_valid,
-            irq           => irq
+            clk     => aclk,
+            rst_n   => aresetn,
+            axi_in  => axi_in,
+            axi_out => axi_out,
+            dcf_in  => dcf_in,
+            irq     => irq
         );
 
     test_runner : process
