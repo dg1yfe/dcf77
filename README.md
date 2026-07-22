@@ -86,7 +86,8 @@ src/dcf77/          RTL
   dcf77_core.vhd           top-level RTL wiring (no AXI here)
   axi_readmux.vhd          AXI4-Lite read-channel arbiter + register decode
   axi_writemux.vhd         AXI4-Lite write-channel arbiter + register decode
-  dcf77_axi_lite.vhd       top-level shell: core + muxes + irq_gen + AXI ports
+  dcf77_axi_lite.vhd       top-level shell: core + muxes + irq_gen; record-
+                            bundled AXI ports (canonical non-IP top)
 
 constraints/
   dcf77.xdc                set_multicycle_path for CIC1 (×2) / CIC2 (×20) /

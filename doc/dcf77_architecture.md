@@ -111,7 +111,7 @@ the CORDIC phase at 2 kS/s, where the matched filter still has its full
 | `dcf77_irq_gen`         | Interrupt generator: edge-detect, sticky flags, per-event mask latch, registered irq (§4.1) |
 | `axi_readmux`           | AXI4-Lite read decoder, generic-gated PM + PM_DEBUG blocks           |
 | `axi_writemux`          | AXI4-Lite write decoder, jam-pulse decoding for PLL_I_STATE / PLL_OFFSET |
-| `dcf77_axi_lite`        | Top-level shell: core + readmux + writemux + flat AXI ports          |
+| `dcf77_axi_lite`        | Top-level shell: core + readmux + writemux + irq_gen; record-bundled AXI ports (`axi4lite_si_type`/`so_type`) |
 
 `inc/`:
 
