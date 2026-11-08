@@ -178,10 +178,14 @@ Die Phasenmodulation ist ein **BPSK-Spreizspektrumsignal** (Binary Phase Shift K
 
 **Phasenzustände (nach der SIK-XOR-Verknüpfung):**
 ```
-Chip = 0 → Trägerphase +φ
-Chip = 1 → Trägerphase −φ
+Chip = 0 → Trägerphase −φ
+Chip = 1 → Trägerphase +φ
 ```
-Der Phasenhub φ betrug in der Veröffentlichung von 1988 **±10°**; im heutigen Betrieb sind bis zu **±15°** gebräuchlich (die Simulation dieses Repos verwendet 15,6°). Decoder sollten φ als Kalibrationsparameter behandeln; das Vorzeichen-Mapping (Chip 0 → +φ) ist maßgeblich, nicht der Betrag.
+Das Vorzeichen bezieht sich auf die HF-Phase des empfangenen Trägers (Phasenvoreilung positiv). Es ist an echten Aufnahmen verifiziert: eine unabhängige Python-Demodulation von `dcf_strong` und der RTL-Empfänger stimmen darin überein. Hetzel (1988) gibt „Ausgang low → φm + Δφ" an; der Unterschied liegt vermutlich in der Phasendefinition (Phasenzeit bzw. Verzögerung statt Phasenwinkel).
+
+Der RTL-Empfänger liefert die konjugierte Phase: Der Vorzeichen-Mischer bildet Q = x·sgn(sin ωt) statt −x·sgn(sin ωt), die CORDIC meldet daher −φ (`dcf77_core` kompensiert mit −cordic_phase für die PLL). Intern gilt deshalb Chip 0 → positiver Phasenfehler.
+
+Der Phasenhub φ betrug in der Veröffentlichung von 1988 **±10°**; im heutigen Betrieb sind bis zu **±15°** gebräuchlich (die Simulation dieses Repos verwendet 15,6°, an `dcf_strong` wurden ca. 17° gemessen). Decoder sollten φ als Kalibrationsparameter behandeln; das Vorzeichen-Mapping ist maßgeblich, nicht der Betrag.
 
 ### 2.3 Chip-Sequenz pro Sekunde
 
