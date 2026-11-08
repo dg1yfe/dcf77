@@ -5,8 +5,9 @@ simulation/derived/
 ## Real RX recordings (kept out-of-tree; large binaries)
 samples/
 
-## Rendered doc exports (the .md is the source of truth)
-doc/dcf77_implementation.pdf
+## Rendered doc exports (the .md is the source of truth) and third-party
+## reference PDFs (kept locally, not redistributed)
+doc/*.pdf
 
 ## Editor / tooling scratch
 .claude/

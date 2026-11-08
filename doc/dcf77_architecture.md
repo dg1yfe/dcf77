@@ -781,12 +781,12 @@ PM `pm_sync_state` (`PM_STATUS[7:6]`):
 
 - Hetzel, P. (1987). *Time dissemination via DCF77 using a pseudo-random
   phase noise modulation*. PhD dissertation, U. Stuttgart.
-  [`doc/Hetzel_1987_Dissertation.pdf`](Hetzel_1987_Dissertation.pdf).
+  [PTB-hosted PDF](https://www.ptb.de/cms/fileadmin/internet/fachabteilungen/abteilung_4/4.4_zeit_und_frequenz/pdf/Hetzel_1987_Dissertation.pdf).
 - Hetzel, P. (1988). Proc. EFTF 1988.
-  [`doc/5_1988_Hetzel_-_Proc_EFTF_88.pdf`](5_1988_Hetzel_-_Proc_EFTF_88.pdf).
-- Gaisler structured two-process VHDL coding style.
-  [`doc/structdes.pdf`](structdes.pdf) and
-  [`doc/vhdl2proc.pdf`](vhdl2proc.pdf).
+  [PTB-hosted PDF](https://www.ptb.de/cms/fileadmin/internet/fachabteilungen/abteilung_4/4.4_zeit_und_frequenz/pdf/5_1988_Hetzel_-_Proc_EFTF_88.pdf);
+  paraphrased summary in [`hetzel_1988_eftf_summary.md`](hetzel_1988_eftf_summary.md).
+- Gaisler, J., "A structured VHDL design method" (structured two-process
+  coding style); see also [vhdl2proc](https://www.gaisler.com/doc/vhdl2proc.pdf).
 - Format spec: [`doc/dcf77_format_spec.md`](dcf77_format_spec.md).
 - Integrator reference (per-bit tables):
   [`doc/dcf77_receiver_reference.md`](dcf77_receiver_reference.md).

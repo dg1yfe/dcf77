@@ -15,7 +15,7 @@ two-process entity.
 ## 1. Two-process coding style
 
 Every synchronous entity in `src/dcf77/` follows the Gaisler structured
-two-process method (`doc/structdes.pdf`, `doc/vhdl2proc.pdf`): **all** state
+two-process method (J. Gaisler, "A structured VHDL design method"; [vhdl2proc](https://www.gaisler.com/doc/vhdl2proc.pdf)): **all** state
 lives in one record `r`, a single combinational process computes the next-state
 variable `v` (published as `rin`), and a single sequential process clocks
 `rin → r`.

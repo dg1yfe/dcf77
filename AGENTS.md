@@ -11,7 +11,7 @@
 - List tests only: `python3 simulation/scripts/run.py --list`.
 
 ## Coding Style & Naming Conventions
-- VHDL-2008, structured two-process style (combinational + sequential) per `doc/structdes.pdf`.
+- VHDL-2008, structured two-process style (combinational + sequential) per J. Gaisler's "A structured VHDL design method" (see README, Coding style).
 - Indentation: 4 spaces; avoid tabs. Use descriptive record/enum names (e.g., `state_t`, `r_type`).
 - AXI-Stream ports use `s_axis_*` and `m_axis_*`.
 - AXI4-Lite slave structure & coding style: see `doc/axi4lite_interface.md`.

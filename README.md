@@ -106,8 +106,8 @@ doc/                       architecture + protocol spec + AXI interface + papers
 
 ## Coding style
 
-Follows the Gaisler structured two-process method (see `doc/structdes.pdf`
-and `doc/vhdl2proc.pdf`):
+Follows the Gaisler structured two-process method (J. Gaisler, "A structured VHDL
+design method"; see also [vhdl2proc](https://www.gaisler.com/doc/vhdl2proc.pdf)):
 
 * one combinational and one sequential process per entity;
 * one register record (`r`, `rin`) holding all flip-flops; ports use
@@ -368,3 +368,8 @@ constants package and a plain-text width / SNR report under
   (`lock → hold → search`); `enable` is sticky, `soft_reset` is a 1-clock pulse.
 * The PM stack assumes the AM carrier PLL has locked (it consumes the same
   CORDIC phase); PM decode does not run standalone without AM carrier lock.
+
+## License
+
+BSD 3-Clause, see [`LICENSE`](LICENSE). The reference PDFs that may sit in
+`doc/` locally are third-party works and are not part of this repository.
