@@ -469,43 +469,18 @@ The math (T=1, 12 non-edge bits):
 - Going to T=2 brings the false-positive rate above the natural
   inter-minute spacing — `T=1` is the practical maximum.
 
-The corpus (§8) empirically validates this: `dcf_3_5long`
+The replay corpus ([`dcf77_test_results.md`](dcf77_test_results.md)) empirically validates this: `dcf_3_5long`
 (26 min, SNR 20 dB) acquired its first valid PM minute mark after
 ~25 minutes of TRACK — consistent with the binomial prediction at the
 observed lock quality.
 
 ---
 
-## 8. Performance
+## 8. Resources and timing
 
-### 8.1 Corpus results
+Replay-corpus results live in [`dcf77_test_results.md`](dcf77_test_results.md).
 
-PM-correlator regression (`15_dcf77_pm_correlator_replay_tb`),
-PHASE_ERR_V_CLOCKS = 62500 (live HW rate), 11/11 pass:
-
-| Recording (site, duration)         | pm_lock_qual | pm_valid | pm_mm  | Notes                            |
-| ---------------------------------- | ------------ | -------- | ------ | -------------------------------- |
-| `dcf_strong` (synthetic, 60 s)     | 31992        | 57       | **1**  | reference: clean signal           |
-| `synth` (synthetic, 60 s)          | ~29000       | 58       | 0      | no SIK in synth source            |
-| `dcf_3_3` (ei2hh, 60 s)            | 15868        | 55       | **1**  | strong real signal                |
-| `dcf_3_6` (pallas-flydog, 60 s)    | 23483        | 57       | **1**  | strong real signal                |
-| `dcf_3_4` (185.227, 60 s)          | 2967         | 54       | 0      | marginal                          |
-| `dcf_3_5` (cyhams, 60 s)           | 4790         | 50       | 0      | marginal                          |
-| `dcf_3_7` (midskiwi, 60 s)         | 4066         | 47       | 0      | marginal                          |
-| `dcf_3_1` (synthetic noise, 60 s)  | 2187         | 56       | 0      | marginal                          |
-| `dcf_3_5long` (cyhams, **26 min**) | 4732         | 1552     | **1**  | marginal SNR 20 dB, T=1 fired     |
-| `dcf_3_7long` (midskiwi, **23 min**)| 4442        | 1401     | 0      | marginal SNR 28 dB, T=1 not yet   |
-
-The strong recordings clear pm_mm within their first available minute.
-The marginal recordings need many minutes to roll a binomially-clean
-SIK signature; `dcf_3_5long` rolled one in 26 min, confirming that
-edge-protected T=1 is the right operating point for real-world
-marginal reception.
-
-Total wall time for the 11-config corpus at live HW rate: **~118 sec**
-(2 min) using 8 parallel workers.
-
-### 8.2 Resource estimate
+### 8.1 Resource estimate
 
 | Resource | AM-only (`WITH_PM=false`) | AM + PM (`WITH_PM=true`) | + Debug (`WITH_PM_DEBUG=true`) |
 | -------- | ------------------------- | ------------------------ | ------------------------------ |
@@ -522,7 +497,7 @@ All figures are pre-synthesis estimates; the design has not yet been
 through full Vivado place-and-route. Re-validate when the first
 release build is taped.
 
-### 8.3 Timing
+### 8.2 Timing
 
 Only the 17-bit CIC₀ integrators sit on the unconstrained 125 MHz
 single-cycle path. All inner CIC stages and the bit_det / noise IIRs
