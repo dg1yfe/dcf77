@@ -62,7 +62,22 @@ entity dcf77_pm_correlator_replay_tb is
         -- signal-free spectrum slice): inverts the assertions to expect
         -- the correlator to STAY in FILL and emit no pm_valid pulses.
         -- A PASS here proves the receiver correctly rejects noise.
-        EXPECT_NOISE_REJECT : boolean := false
+        EXPECT_NOISE_REJECT : boolean := false;
+        -- Fixtures with known ground truth (the synth WAV + its .expect
+        -- sidecar): require the correlator to end in LOCK, the PM frame
+        -- decoder to see at least EXPECT_PM_MM_MIN SIK minute marks and,
+        -- with EXPECT_PM_TIME, the last decoded PM frame to match the
+        -- EXPECT_* fields.  Defaults keep the plain smoke behaviour.
+        EXPECT_PM_LOCK      : boolean := false;
+        EXPECT_PM_MM_MIN    : natural := 0;
+        EXPECT_PM_TIME      : boolean := false;
+        EXPECT_YEAR         : natural := 0;
+        EXPECT_MONTH        : natural := 0;
+        EXPECT_DAY          : natural := 0;
+        EXPECT_WEEKDAY      : natural := 0;
+        EXPECT_HOUR         : natural := 0;
+        EXPECT_MINUTE       : natural := 0;
+        EXPECT_DST          : natural := 0
     );
 end entity;
 
@@ -285,7 +300,8 @@ begin
     -- PM monitor (mirrors 14_pm).                                         --
     -- ------------------------------------------------------------------ --
     pm_monitor : process(clk)
-        variable bit_str : string(1 to 1);
+        variable bit_str     : string(1 to 1);
+        variable prev_time_v : std_logic := '0';
     begin
         if rising_edge(clk) then
             if rst = '1' then
@@ -293,6 +309,7 @@ begin
                 pm_mm_count        := 0;
                 pm_state_changes   := 0;
                 last_pm_sync_state := SYNC_FILL;
+                prev_time_v        := '0';
             else
                 if pm_valid_s = '1' then
                     pm_valid_count := pm_valid_count + 1;
@@ -310,7 +327,20 @@ begin
                 end if;
                 if pm_frame_mm = '1' then
                     pm_mm_count := pm_mm_count + 1;
+                    info("pm minute mark #" & integer'image(pm_mm_count)
+                         & " at " & time'image(now));
                 end if;
+                if pm_time_v_d = '1' and prev_time_v = '0' then
+                    info("pm time_valid: "
+                         & integer'image(to_integer(pm_time_d.year)) & "-"
+                         & integer'image(to_integer(pm_time_d.month)) & "-"
+                         & integer'image(to_integer(pm_time_d.day)) & " wd"
+                         & integer'image(to_integer(pm_time_d.weekday)) & " "
+                         & integer'image(to_integer(pm_time_d.hour)) & ":"
+                         & integer'image(to_integer(pm_time_d.minute))
+                         & " dst=" & std_logic'image(pm_time_d.dst_active));
+                end if;
+                prev_time_v := pm_time_v_d;
                 if pm_sync_state_s /= last_pm_sync_state then
                     pm_state_changes := pm_state_changes + 1;
                     info("pm_sync_state " & pm_state_str(last_pm_sync_state)
@@ -449,6 +479,39 @@ begin
                               & integer'image(EXPECT_PM_VALID_MIN)
                               & " pm_valid pulses (got "
                               & integer'image(pm_valid_count) & ")");
+                        if EXPECT_PM_LOCK then
+                            check(pm_sync_state_s = SYNC_LOCK,
+                                  "correlator ends in LOCK (state = "
+                                  & pm_state_str(pm_sync_state_s) & ")");
+                        end if;
+                        check(pm_mm_count >= EXPECT_PM_MM_MIN,
+                              "at least "
+                              & integer'image(EXPECT_PM_MM_MIN)
+                              & " PM minute marks (got "
+                              & integer'image(pm_mm_count) & ")");
+                        if EXPECT_PM_TIME then
+                            check_equal(pm_time_v_d, '1',
+                                        "PM time_valid asserted");
+                            check_equal(to_integer(pm_time_d.year),
+                                        EXPECT_YEAR, "PM year");
+                            check_equal(to_integer(pm_time_d.month),
+                                        EXPECT_MONTH, "PM month");
+                            check_equal(to_integer(pm_time_d.day),
+                                        EXPECT_DAY, "PM day");
+                            check_equal(to_integer(pm_time_d.weekday),
+                                        EXPECT_WEEKDAY, "PM weekday");
+                            check_equal(to_integer(pm_time_d.hour),
+                                        EXPECT_HOUR, "PM hour");
+                            check_equal(to_integer(pm_time_d.minute),
+                                        EXPECT_MINUTE, "PM minute");
+                            if EXPECT_DST = 1 then
+                                check_equal(pm_time_d.dst_active, '1',
+                                            "PM MESZ active");
+                            else
+                                check_equal(pm_time_d.dst_active, '0',
+                                            "PM MEZ active");
+                            end if;
+                        end if;
                     end if;
                 end if;
             end if;

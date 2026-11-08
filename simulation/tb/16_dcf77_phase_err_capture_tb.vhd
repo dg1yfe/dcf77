@@ -61,7 +61,11 @@ entity dcf77_phase_err_capture_tb is
         -- atan2 output has the opposite sign to the legacy
         -- sin(I)·q_box detector the PI loop was designed for, so the
         -- correct sign for negative feedback is the negated phase.
-        PLL_INVERT_PHASE   : boolean  := true
+        PLL_INVERT_PHASE   : boolean  := true;
+        -- Require pll_lock (dcf77_phase_quality) to be asserted at the end
+        -- of the capture.  run.py enables it for fixtures with a known
+        -- clean carrier (synth).
+        EXPECT_PLL_LOCK    : boolean  := false
     );
 end entity;
 
@@ -402,7 +406,14 @@ begin
                 else
                     wait until stim_done = '1';
                     wait for 100 us;
-                    info("capture complete");
+                    info("capture complete, pll_lock = "
+                         & std_logic'image(pll_lock)
+                         & "  pq_lock_counter = "
+                         & integer'image(to_integer(pq_lock_counter)));
+                    if EXPECT_PLL_LOCK then
+                        check_equal(pll_lock, '1',
+                            "phase_quality lock asserted at end of capture");
+                    end if;
                 end if;
             end if;
         end loop;

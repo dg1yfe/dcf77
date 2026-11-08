@@ -494,6 +494,10 @@ def _configure_phase_err_capture_testbench(lib) -> None:
             IF_HZ          = if_hz,
             NCO_PHASE_INCR_OVERRIDE = _nco_phase_incr(kv, rate),
         )
+        # Fixtures with a ground-truth sidecar (synth) have a clean
+        # carrier: the phase_quality lock must be up at the end.
+        if _read_expect(stem) is not None:
+            base["EXPECT_PLL_LOCK"] = True
         # DCF77_CAPTURE_CPT overrides CLOCKS_PER_TICK (default 8).
         cpt = os.environ.get("DCF77_CAPTURE_CPT")
         if cpt:
@@ -626,7 +630,12 @@ def _configure_pm_corr_replay_testbench(lib) -> None:
             continue
         size_b  = pe_bin.stat().st_size
         n_samp  = size_b // 2
-        if sample_limit and sample_limit < n_samp:
+        # Ground-truth fixture (samples/<stem>.expect, i.e. synth): replay
+        # the whole capture so the SIK signature of the second minute
+        # (broadcast t = 59..75 s) and the following PM frame (decoded at
+        # t ~ 119 s) are inside the window, and check them.
+        expect = _read_expect(stem)
+        if sample_limit and sample_limit < n_samp and expect is None:
             n_samp = sample_limit
 
         # Noise references (de-tuned-spectrum captures) carry "noise"
@@ -642,6 +651,19 @@ def _configure_pm_corr_replay_testbench(lib) -> None:
                     "DCF77_PM_EXPECT_VALID_MIN", "30")),
                 EXPECT_NOISE_REJECT = is_noise,
             )
+            if expect is not None:
+                cfg.update(
+                    EXPECT_PM_LOCK   = True,
+                    EXPECT_PM_MM_MIN = 1,
+                    EXPECT_PM_TIME   = True,
+                    EXPECT_YEAR      = int(expect["year"]),
+                    EXPECT_MONTH     = int(expect["month"]),
+                    EXPECT_DAY       = int(expect["day"]),
+                    EXPECT_WEEKDAY   = int(expect["weekday"]),
+                    EXPECT_HOUR      = int(expect["hour"]),
+                    EXPECT_MINUTE    = int(expect["minute"]),
+                    EXPECT_DST       = int(expect["dst_active"]),
+                )
             tag = stem if len(period_list) == 1 else f"{stem}.p{period}"
             if os.environ.get("DCF77_PM_ACQUIRE_LOG") == "1":
                 cfg["ACQUIRE_LOG_CSV"] = str(
@@ -650,6 +672,13 @@ def _configure_pm_corr_replay_testbench(lib) -> None:
                 cfg["TRACK_LOG_CSV"] = str(
                     DERIVED_DIR / f"{tag}.track.csv")
             tb.test("pm_smoke").add_config(name=tag, generics=cfg)
+
+
+def _read_expect(stem: str) -> dict | None:
+    """Ground-truth sidecar samples/<stem>.expect (written by the synth
+    generator), or None when the recording has none."""
+    path = SAMPLES_DIR / f"{stem}.expect"
+    return _read_meta(path) if path.is_file() else None
 
 
 def _read_meta(path) -> dict:

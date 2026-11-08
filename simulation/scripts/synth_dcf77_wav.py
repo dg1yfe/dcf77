@@ -116,6 +116,15 @@ PRBS_DURATION_S    = PRBS_CHIPS / CHIP_RATE_HZ   # ≈ 0.7928 s
 DELTA_PHI_RAD      = math.radians(15.6)          # ±15.6° per current PTB spec
 LFSR_TAPS          = (4, 8)                      # 0-indexed = stages 5 & 9
 LFSR_INIT          = 0b000010001                 # 0x011, as in dcf77_pm_correlator.vhd
+# Sign of the RF (= WAV) phase step for chip +1.  The receiver's sign-LO
+# mixer forms I + jQ ~ x * exp(+j w t), so the CORDIC reports -phi for an
+# RF phase step of +phi.  dcf77_pm_decode.py and the RTL correlator expect
+# phase_err = +delta for chip '0' / SIK '0', and the real recordings
+# (dcf_strong, dcf_3_3, dcf_3_6) decode the SIK minute-mark signature with
+# exactly that convention -- so the RF step for chip '0' is -delta.  With
+# +delta the RTL decodes the synth fixture bit-inverted (128/128 bits) and
+# never sees a minute mark.
+RF_PHASE_SIGN      = -1.0
 
 
 def make_prbs() -> np.ndarray:
@@ -125,7 +134,8 @@ def make_prbs() -> np.ndarray:
     stage 9 before shifting) so the sequence is DC-balanced: 256 zeros and
     256 ones.  Confirmed on a real recording (dcf_strong.wav).
 
-    +1 for chip='0' (PNS, phase = +Δφ), -1 for chip='1' (PNS̄, phase = -Δφ).
+    +1 for chip='0' (PNS), -1 for chip='1' (PNS̄).  The receiver-side
+    phase_err is +Δφ for +1; the RF phase is RF_PHASE_SIGN times that.
     """
     state = LFSR_INIT
     chips = np.empty(PRBS_CHIPS, dtype=np.float64)
@@ -159,7 +169,8 @@ def build_psk_phase(frames: list[list[int]],
     """Construct φ(t) -- the SIK PSK modulation -- at `fs` samples/sec.
 
     φ is 0 outside the PRBS windows (= [200..993] ms within each second)
-    and ±Δφ × prbs_chip × sik_polarity inside.  The whole array is added
+    and RF_PHASE_SIGN × Δφ × prbs_chip × sik_polarity inside.  The whole
+    array is added
     to the carrier argument so the modulated signal is
         amp(t) · cos(2π·f_c·t + φ(t)).
     """
@@ -183,7 +194,7 @@ def build_psk_phase(frames: list[list[int]],
             )
             polarity = sik_polarity(sec, frame)
             phi[sample_start:sample_end] = \
-                DELTA_PHI_RAD * prbs[chip_idx] * polarity
+                RF_PHASE_SIGN * DELTA_PHI_RAD * prbs[chip_idx] * polarity
     return phi
 
 
