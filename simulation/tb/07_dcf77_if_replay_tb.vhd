@@ -19,11 +19,34 @@
 --   i_iir (dcf77_iir_lpf)                                   |
 --      |                                                    |
 --      +-- |I| envelope -> dcf77_env_tracker -> dcf77_bit_det -> dcf77_frame_dec
---      +-- phase_err tap -> dcf77_carrier_pll ---------------+
+--      +-- q_box -> q_iir (same 20 Hz LPF; Q term of the envelope)
+--      +-- dcf77_cordic_atan2 (top 18 b of I/Q) -> phase[12b]
+--             +-> registered (-phase << 11) -> dcf77_carrier_pll (KP=10/KI=23)
+--             |        -> phase_inc_offset -> (x 250 kS/s / Fs) -> NCO
+--             +-> dcf77_phase_quality -> pll_lock
 --
--- Two tests, matching 06_replay:
---   smoke         -- first ~130 s; asserts bit / minute_mark counts.
---   full_decode   -- whole recording; validates decoded time fields.
+-- The carrier loop is the production one (dcf77_core): CORDIC phase,
+-- negated (the mixer yields the conjugate, so the CORDIC reports -phi) and
+-- shifted left by 11 bits, into dcf77_carrier_pll with KP_SHIFT=10 /
+-- KI_SHIFT=23.  pll_lock is the production lock indicator
+-- (dcf77_phase_quality, same generics as the core); the `acquire` test
+-- requires it to be asserted at the end of the recording.
+--
+-- Rate adaptation (the only deviation from the core): the post-mixer rate
+-- is 2 kS/s in both, so the PI loop sees identical sample timing.  The NCO,
+-- however, ticks at SAMPLE_RATE_HZ (12 kS/s) here but at 250 kS/s in the
+-- core, so one phase_inc_offset LSB is 250000/12000 = 20.8x fewer Hz.  The
+-- offset is therefore multiplied by 250000/SAMPLE_RATE_HZ (8 fractional
+-- bits) before it reaches the NCO, which restores the core's loop gain in
+-- Hz per radian.  POST_W is 25 b instead of 29 b (boxcar R=6 instead of
+-- 125); the CORDIC only sees the top 18 b and the shifted phase (23 b)
+-- still fits, so no further change is needed.
+--
+-- Two tests:
+--   acquire -- whole recording from a clean NCO; asserts pll_lock at the
+--              end and writes the converged NCO offset to LOCK_FILE_OUT.
+--   decode  -- whole recording seeded from LOCK_FILE_IN; validates the
+--              decoded time fields (opt-in, DCF77_FULL_REPLAY=1).
 -- =========================================================================
 
 library vunit_lib;
@@ -57,9 +80,6 @@ entity dcf77_if_replay_tb is
         ENV_DUMP_FILE        : string  := "";
         -- 0 = abs(I), 1 = |I| + 3/8|Q| (magnitude approximation).
         ENV_MODE             : std_logic := '1';
-        -- false = PLL sees raw Q_box (classic loop).
-        -- true  = PLL sees phase_err = sign(I_iir)*Q_box.
-        PE_LOOP              : boolean := false;
         EXPECT_YEAR    : natural := 0;
         EXPECT_MONTH   : natural := 0;
         EXPECT_DAY     : natural := 0;
@@ -112,6 +132,15 @@ architecture tb of dcf77_if_replay_tb is
     constant NCO_PHASE_INCR_VAL : natural :=
         natural(real(2 ** NCO_PHASE_W) * real(IF_HZ) / real(SAMPLE_RATE_HZ));
 
+    -- NCO tick rate of dcf77_core (CIC chain output).  phase_inc_offset is
+    -- scaled by CORE_NCO_RATE_HZ / SAMPLE_RATE_HZ so one PLL offset LSB
+    -- moves the carrier by the same number of Hz as in the core.
+    constant CORE_NCO_RATE_HZ  : positive := 250_000;
+    constant OFFSET_SCALE_FRAC : natural := 8;
+    constant OFFSET_SCALE : natural :=
+        natural(real(CORE_NCO_RATE_HZ) * real(2 ** OFFSET_SCALE_FRAC)
+                / real(SAMPLE_RATE_HZ));
+
     -- Single-stage boxcar matching dcf77_core: R = SAMPLE_RATE_HZ / 2000
     -- to land at 2 kS/s post-mixer (= 6 at the default 12 kS/s).
     -- OUT_WIDTH = IN_WIDTH + ceil(log2(RATE)).  For R=6 that's 22+3=25.
@@ -131,6 +160,7 @@ architecture tb of dcf77_if_replay_tb is
     signal sin_sign      : std_logic;
     signal nco_phase_acc : unsigned(NCO_PHASE_W - 1 downto 0);
     signal nco_offset    : signed(NCO_OFFSET_W - 1 downto 0);
+    signal nco_sum       : signed(NCO_OFFSET_W downto 0);
     signal pll_offset    : signed(NCO_OFFSET_W - 1 downto 0);
     signal seed_offset   : signed(NCO_OFFSET_W - 1 downto 0)
                          := (others => '0');
@@ -147,22 +177,36 @@ architecture tb of dcf77_if_replay_tb is
     signal i_iir   : signed(POST_W - 1 downto 0);
     signal i_iir_v : std_logic;
 
-    -- Phase-error: sign(I_iir) * Q_box, mirrors dcf77_core's path.
-    signal phase_err   : signed(POST_W - 1 downto 0);
-    signal phase_err_v : std_logic;
+    -- Q-channel 20 Hz LPF (Q term of the envelope magnitude).
+    signal q_iir   : signed(POST_W - 1 downto 0);
+    signal q_iir_v : std_logic;
 
-    -- Multiplexed PLL input: q_box (classic) or phase_err (PE_LOOP).
-    signal pll_pe_in   : signed(POST_W - 1 downto 0);
-    signal pll_pe_in_v : std_logic;
+    -- CORDIC phase detector + carrier-PLL adapter + phase_quality lock
+    -- indicator, wired as in dcf77_core (CORDIC on the top 18 b of the
+    -- post-boxcar I/Q, 12-b phase).
+    constant CORDIC_IQ_W    : positive := 18;
+    constant CORDIC_PHASE_W : positive := 12;
+    constant PQ_COUNTER_W   : positive := 12;
+    constant PLL_PHASE_ADAPTER_SHIFT : natural := 11;
 
-    -- Carrier PLL diagnostics.  pll_lock / pq_lock_counter are stubbed
-    -- in this TB (no CORDIC chain available -- 07_tb runs the legacy
-    -- AM detector and doesn't test phase_quality).  Telemetry columns
-    -- stay for CSV compat; phase_quality unit-level coverage lives in
-    -- the 14/16 TBs which have the CORDIC chain.
-    signal pll_lock        : std_logic                          := '0';
+    signal cordic_phase : signed(CORDIC_PHASE_W - 1 downto 0);
+    signal cordic_v     : std_logic;
+
+    -- Registered adapter output (-cordic_phase << 11) into carrier_pll.
+    type reg_type is record
+        phase_for_pll   : signed(POST_W - 1 downto 0);
+        phase_for_pll_v : std_logic;
+    end record;
+    constant R_RESET : reg_type := (
+        phase_for_pll   => (others => '0'),
+        phase_for_pll_v => '0'
+    );
+    signal r, rin : reg_type := R_RESET;
+
+    -- Carrier PLL diagnostics.
+    signal pll_lock        : std_logic;
     signal pll_phase_filt  : signed(POST_W - 1 downto 0);
-    signal pq_lock_counter : signed(POST_W - 1 downto 0)        := (others => '0');
+    signal pq_lock_counter : signed(PQ_COUNTER_W - 1 downto 0);
 
     -- Synchronously-detected envelope @ 2 kS/s -> bit_det.
     signal env_pwr : env_word_t;
@@ -295,34 +339,47 @@ begin
             out_valid  => i_iir_v
         );
 
-    phase_err_proc : process(clk)
+    u_q_iir : entity dcf77.dcf77_iir_lpf
+        generic map (
+            WIDTH => POST_W,
+            SHIFT => LOOP_IIR_SHIFT
+        )
+        port map (
+            clk        => clk,
+            rst        => rst,
+            in_sample  => q_box,
+            in_valid   => q_box_v,
+            out_sample => q_iir,
+            out_valid  => q_iir_v
+        );
+
+    -- Carrier-PLL phase adapter, identical to dcf77_core: negated (the
+    -- mixer outputs the conjugate, so the CORDIC reports -phi) and scaled
+    -- by 2^11 into the range the PI gains were calibrated for.
+    adapter_comb : process (all)
+        variable v : reg_type;
+    begin
+        v := r;
+        v.phase_for_pll   := shift_left(resize(-cordic_phase, POST_W),
+                                        PLL_PHASE_ADAPTER_SHIFT);
+        v.phase_for_pll_v := cordic_v;
+        if rst = '1' then
+            v := R_RESET;
+        end if;
+        rin <= v;
+    end process;
+
+    adapter_seq : process (clk)
     begin
         if rising_edge(clk) then
-            if rst = '1' then
-                phase_err   <= (others => '0');
-                phase_err_v <= '0';
-            else
-                phase_err_v <= '0';
-                if i_iir_v = '1' then
-                    if i_iir(POST_W - 1) = '1' then
-                        phase_err <= -q_box;
-                    else
-                        phase_err <=  q_box;
-                    end if;
-                    phase_err_v <= '1';
-                end if;
-            end if;
+            r <= rin;
         end if;
     end process;
 
-    -- PLL input mux: classic raw-Q path or sign(I)*Q phase-err path.
-    pll_pe_in   <= phase_err   when PE_LOOP else q_box;
-    pll_pe_in_v <= phase_err_v when PE_LOOP else q_box_v;
-
     -- ENV_MODE='0' -> abs(I_iir); ENV_MODE='1' -> |I_iir| + 3/8 * |Q_iir|
-    -- (alpha-max+beta-min magnitude approximation).  Q_iir is the same
-    -- 20 Hz LPF the carrier_pll applies to its phase_err (pll_phase_filt).
-    env_proc : process (i_iir, pll_phase_filt)
+    -- (alpha-max+beta-min magnitude approximation).  Q_iir is the 20 Hz LPF
+    -- of q_box (same LOOP_IIR_SHIFT as the carrier loop).
+    env_proc : process (i_iir, q_iir)
         variable i_ext, q_ext : signed(POST_W downto 0);
         variable i_abs, q_abs : unsigned(POST_W - 1 downto 0);
         variable a_max, a_min : unsigned(POST_W - 1 downto 0);
@@ -334,7 +391,7 @@ begin
         if i_ext(POST_W) = '1' then i_ext := -i_ext; end if;
         i_abs := unsigned(i_ext(POST_W - 1 downto 0));
 
-        q_ext := resize(pll_phase_filt, POST_W + 1);
+        q_ext := resize(q_iir, POST_W + 1);
         if q_ext(POST_W) = '1' then q_ext := -q_ext; end if;
         q_abs := unsigned(q_ext(POST_W - 1 downto 0));
 
@@ -392,9 +449,9 @@ begin
                 write(lbuf, string'(" "));
                 write(lbuf, to_integer(i_iir));
                 write(lbuf, string'(" "));
-                write(lbuf, to_integer(pll_phase_filt));
+                write(lbuf, to_integer(q_iir));
                 write(lbuf, string'(" "));
-                write(lbuf, to_integer(phase_err));
+                write(lbuf, to_integer(cordic_phase));
                 writeline(f, lbuf);
             end if;
         end loop;
@@ -404,39 +461,86 @@ begin
         generic map (
             PHASE_ERR_WIDTH => POST_W,
             OFFSET_WIDTH    => NCO_OFFSET_W,
-            KP_SHIFT        => 7,
-            KI_SHIFT        => 20,
+            KP_SHIFT        => 10,
+            KI_SHIFT        => 23,
             LOOP_IIR_SHIFT  => LOOP_IIR_SHIFT
         )
         port map (
             clk              => clk,
             rst              => rst,
-            phase_err        => pll_pe_in,
-            phase_err_valid  => pll_pe_in_v,
+            phase_err        => r.phase_for_pll,
+            phase_err_valid  => r.phase_for_pll_v,
             phase_inc_offset => pll_offset,
             phase_filt_out   => pll_phase_filt
+        );
+
+    -- ------------------------------------------------------------------ --
+    -- Lock indicator: CORDIC atan2 on the post-boxcar I/Q feeding         --
+    -- dcf77_phase_quality, identical to dcf77_core's u_cordic +           --
+    -- u_phase_quality.  The CORDIC is an observer only: it does not feed  --
+    -- the PLL or the AM detector.                                         --
+    -- ------------------------------------------------------------------ --
+    u_cordic : entity dcf77.dcf77_cordic_atan2
+        generic map (
+            IQ_WIDTH    => CORDIC_IQ_W,
+            PHASE_WIDTH => CORDIC_PHASE_W,
+            ITERATIONS  => 10
+        )
+        port map (
+            clk       => clk,
+            rst       => rst,
+            in_i      => i_box(POST_W - 1 downto POST_W - CORDIC_IQ_W),
+            in_q      => q_box(POST_W - 1 downto POST_W - CORDIC_IQ_W),
+            in_valid  => i_box_v,
+            out_mag   => open,
+            out_phase => cordic_phase,
+            out_valid => cordic_v
+        );
+
+    u_phase_quality : entity dcf77.dcf77_phase_quality
+        generic map (
+            PHASE_WIDTH     => CORDIC_PHASE_W,
+            COUNTER_W       => PQ_COUNTER_W,
+            LOCK_IN_THR     => 1024,
+            LOCK_OUT_THR    => -512,
+            LOCK_HOLD_TICKS => 256
+        )
+        port map (
+            clk              => clk,
+            rst              => rst,
+            cordic_phase     => cordic_phase,
+            cordic_valid     => cordic_v,
+            lock_state       => pll_lock,
+            lock_counter_out => pq_lock_counter
         );
 
     -- The NCO sees the live PLL output plus a one-shot seed loaded
     -- from LOCK_FILE at startup (when present).  Saturating add: if
     -- pll_offset and seed_offset push the same direction they could
     -- exceed the NCO_OFFSET_W signed range; clip to the limits.
-    nco_offset <=
-        to_signed(2 ** (NCO_OFFSET_W - 1) - 1, NCO_OFFSET_W)
-            when resize(pll_offset, NCO_OFFSET_W + 1)
-               + resize(seed_offset, NCO_OFFSET_W + 1)
-               > to_signed(2 ** (NCO_OFFSET_W - 1) - 1,
-                           NCO_OFFSET_W + 1)
+    nco_sum <= resize(pll_offset, NCO_OFFSET_W + 1)
+             + resize(seed_offset, NCO_OFFSET_W + 1);
+
+    -- Rate scaling (see header): x CORE_NCO_RATE_HZ / SAMPLE_RATE_HZ with
+    -- OFFSET_SCALE_FRAC fractional bits, saturated to the NCO offset range.
+    scale_proc : process (nco_sum)
+        constant MAXV : signed(NCO_OFFSET_W - 1 downto 0) :=
+            to_signed(2 ** (NCO_OFFSET_W - 1) - 1, NCO_OFFSET_W);
+        constant MINV : signed(NCO_OFFSET_W - 1 downto 0) :=
+            to_signed(-(2 ** (NCO_OFFSET_W - 1)), NCO_OFFSET_W);
+        variable prod : signed(NCO_OFFSET_W + 24 downto 0);
+        variable sc   : signed(NCO_OFFSET_W + 24 downto 0);
+    begin
+        prod := nco_sum * to_signed(OFFSET_SCALE, 24);
+        sc   := shift_right(prod, OFFSET_SCALE_FRAC);
+        if sc > resize(MAXV, sc'length) then
+            nco_offset <= MAXV;
+        elsif sc < resize(MINV, sc'length) then
+            nco_offset <= MINV;
         else
-        to_signed(-(2 ** (NCO_OFFSET_W - 1)), NCO_OFFSET_W)
-            when resize(pll_offset, NCO_OFFSET_W + 1)
-               + resize(seed_offset, NCO_OFFSET_W + 1)
-               < to_signed(-(2 ** (NCO_OFFSET_W - 1)),
-                           NCO_OFFSET_W + 1)
-        else
-        resize(resize(pll_offset, NCO_OFFSET_W + 1)
-             + resize(seed_offset, NCO_OFFSET_W + 1),
-               NCO_OFFSET_W);
+            nco_offset <= resize(sc, NCO_OFFSET_W);
+        end if;
+    end process;
 
     -- ------------------------------------------------------------------ --
     -- env_tracker + bit_det at 2 kS/s.  Mirrors dcf77_core.                --
@@ -719,7 +823,7 @@ begin
             write(lbuf, ',');
             write(lbuf, integer'image(lock_int));
             write(lbuf, ',');
-            write(lbuf, integer'image(to_integer(phase_err)));
+            write(lbuf, integer'image(to_integer(cordic_phase)));
             write(lbuf, ',');
             write(lbuf, integer'image(to_integer(env_pwr)));
             writeline(fh, lbuf);

@@ -276,7 +276,6 @@ def _configure_if_replay_testbench(lib) -> None:
             SAMPLE_COUNT   = samples,
             SAMPLE_RATE_HZ = rate,
             IF_HZ          = if_hz,
-            PE_LOOP        = os.environ.get("DCF77_PE_LOOP") == "1",
             EXPECT_YEAR    = int(kv.get("year",    0)),
             EXPECT_MONTH   = int(kv.get("month",   0)),
             EXPECT_DAY     = int(kv.get("day",     0)),
