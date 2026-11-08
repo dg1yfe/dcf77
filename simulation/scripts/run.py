@@ -524,18 +524,13 @@ def _configure_phase_err_capture_testbench(lib) -> None:
                 if inv:
                     suffix += "_inv"
                     extra["PLL_INVERT_PHASE"] = True
-                cfg = dict(base,
-                           PLL_KP_SHIFT  = kp,
-                           PLL_KI_SHIFT  = ki,
-                           PHASE_ERR_DUMP = str(
-                               DERIVED_DIR / f"{stem}.{suffix}.pe.bin"),
-                           **extra)
-                tb.test("capture").add_config(
-                    name=f"{stem}.{suffix}", generics=cfg)
+                _add_capture_config(
+                    tb, f"{stem}.{suffix}",
+                    dict(base, PLL_KP_SHIFT=kp, PLL_KI_SHIFT=ki, **extra),
+                    DERIVED_DIR / f"{stem}.{suffix}.pe.bin")
         else:
-            cfg = dict(base,
-                       PHASE_ERR_DUMP = str(DERIVED_DIR / f"{stem}.pe.bin"))
-            tb.test("capture").add_config(name=stem, generics=cfg)
+            _add_capture_config(tb, stem, dict(base),
+                                DERIVED_DIR / f"{stem}.pe.bin")
 
         # DCF77_CAPTURE_NOISE_REF=1 registers a noise-reference capture
         # using this recording but with the NCO de-tuned to a signal-
@@ -544,21 +539,51 @@ def _configure_phase_err_capture_testbench(lib) -> None:
         if os.environ.get("DCF77_CAPTURE_NOISE_REF") and stem.startswith("dcf_3_5"):
             noise_hz = int(os.environ.get("DCF77_CAPTURE_NOISE_HZ", "1750"))
             noise_npi = int(round(noise_hz * (1 << 25) / rate))
-            ncfg = dict(base,
-                        NCO_PHASE_INCR_OVERRIDE = noise_npi,
-                        PHASE_ERR_DUMP = str(
-                            DERIVED_DIR / f"{stem}.noise{noise_hz}.pe.bin"))
-            tb.test("capture").add_config(
-                name=f"{stem}.noise{noise_hz}", generics=ncfg)
+            _add_capture_config(
+                tb, f"{stem}.noise{noise_hz}",
+                dict(base, NCO_PHASE_INCR_OVERRIDE=noise_npi),
+                DERIVED_DIR / f"{stem}.noise{noise_hz}.pe.bin")
+
+
+def _add_capture_config(tb, name: str, generics: dict, pe_bin: Path) -> None:
+    """Register one 16_ capture config that publishes `pe_bin` atomically.
+
+    15_dcf77_pm_correlator_replay_tb reads every derived/*.pe.bin, and with
+    `-p N` it runs concurrently with the 16_ capture that writes the same
+    file.  So the capture never writes `pe_bin` directly: GHDL writes
+    `<pe_bin>.partial` (which the *.pe.bin glob does not match), and the
+    post_check hook -- called only after the simulation has exited and
+    the test passed -- renames it into place with os.replace().  A reader
+    therefore sees either the previous complete capture or the new
+    complete one, never a truncated file; a failed capture leaves the
+    previous file untouched.
+    """
+    partial = pe_bin.with_name(pe_bin.name + ".partial")
+
+    def publish(output_path):
+        if not partial.exists():
+            print(f"[capture] {name}: {partial.name} missing, not published")
+            return False
+        os.replace(partial, pe_bin)
+        return True
+
+    tb.test("capture").add_config(
+        name=name,
+        generics=dict(generics, PHASE_ERR_DUMP=str(partial)),
+        post_check=publish)
 
 
 def _configure_pm_corr_replay_testbench(lib) -> None:
     """Register PM-correlator standalone replay configurations.
 
-    For each `<stem>.pe.bin` in derived/ (produced by 14_pm with
-    PHASE_ERR_DUMP=1), register one `pm_smoke` configuration on
-    dcf77_pm_correlator_replay_tb.  Sweepable PHASE_ERR_V_CLOCKS via
-    DCF77_PM_PERIOD_SWEEP="N1,N2,..." (default 48 = current TB rate).
+    For each `<stem>.pe.bin` in derived/ (published by a passing
+    16_phase_err_capture run, see _add_capture_config), register one
+    `pm_smoke` configuration on dcf77_pm_correlator_replay_tb.  Configs
+    are registered from the .pe.bin files present when run.py starts, so
+    a fresh tree needs one capture pass first; a capture running in the
+    same `-p N` invocation replaces the file atomically, never under a
+    reader.  Sweepable PHASE_ERR_V_CLOCKS via
+    DCF77_PM_PERIOD_SWEEP="N1,N2,..." (default 62500 = live HW rate).
     """
     try:
         tb = lib.test_bench("dcf77_pm_correlator_replay_tb")

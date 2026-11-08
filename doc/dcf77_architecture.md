@@ -684,7 +684,10 @@ python3 simulation/scripts/wav_to_if.py --in samples/dcf_xx.wav \
 # 3. Refine the IF offset via FFT peak measurement.
 python3 simulation/scripts/measure_if_hz.py dcf_xx
 
-# 4. Capture phase_err to a .pe.bin via 14_phase_err_capture_tb.
+# 4. Capture phase_err to a .pe.bin via 16_phase_err_capture_tb.  The
+#    capture writes <stem>.pe.bin.partial and run.py renames it to
+#    <stem>.pe.bin only after the test passed, so a 15_ replay running
+#    in parallel never reads a half-written file.
 python3 simulation/scripts/run.py "*phase_err_capture*dcf_xx*"
 
 # 5. Replay through the PM correlator (default 60 s of input;
