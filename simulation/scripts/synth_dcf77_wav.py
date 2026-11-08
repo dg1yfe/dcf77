@@ -14,7 +14,8 @@ The amplitude modulation matches doc/dcf77_format_spec.md:
 * no absenkung at second 59 (minute marker)
 
 The PSK / SIK modulation (Hetzel 1988, EFTF) is layered on top of the AM:
-* PRBS-9 (taps 5 & 9, init "000000001"), period 512 chips with force-1,
+* PRBS-9 (taps 5 & 9, init "000010001"), 511-chip m-sequence with a
+  prepended '0' chip (512 chips, zero phase sum),
   chip rate = 77500/120 Hz ≈ 645.83 Hz
 * Phase deviation ±15.6° relative to nominal carrier
 * PRBS active from second N + 200 ms to second N + 200 ms + 793 ms
@@ -114,23 +115,26 @@ CHIP0_OFFSET_S     = 0.200                       # PRBS starts 200 ms into each 
 PRBS_DURATION_S    = PRBS_CHIPS / CHIP_RATE_HZ   # ≈ 0.7928 s
 DELTA_PHI_RAD      = math.radians(15.6)          # ±15.6° per current PTB spec
 LFSR_TAPS          = (4, 8)                      # 0-indexed = stages 5 & 9
-LFSR_INIT          = 0b1                         # stage 1 = '1', others '0'
+LFSR_INIT          = 0b000010001                 # 0x011, as in dcf77_pm_correlator.vhd
 
 
 def make_prbs() -> np.ndarray:
-    """512-chip PRBS-9 with Hetzel force-1, returned as ±1 float array.
+    """512-chip PRBS-9, returned as ±1 float array.
+
+    A '0' chip is PREPENDED to the 511-chip m-sequence (taps 5 & 9, output =
+    stage 9 before shifting) so the sequence is DC-balanced: 256 zeros and
+    256 ones.  Confirmed on a real recording (dcf_strong.wav).
 
     +1 for chip='0' (PNS, phase = +Δφ), -1 for chip='1' (PNS̄, phase = -Δφ).
     """
     state = LFSR_INIT
     chips = np.empty(PRBS_CHIPS, dtype=np.float64)
-    for n in range(PRBS_CHIPS - 1):
-        bit = state & 1
+    chips[0] = +1.0
+    for n in range(1, PRBS_CHIPS):
+        bit = (state >> 8) & 1
         chips[n] = 1.0 - 2.0 * bit
         new_bit = ((state >> LFSR_TAPS[0]) & 1) ^ ((state >> LFSR_TAPS[1]) & 1)
         state = ((state << 1) | new_bit) & 0x1FF
-    # Hetzel force-1: chip 511 is forced to '0' (+1 in our mapping).
-    chips[PRBS_CHIPS - 1] = +1.0
     return chips
 
 

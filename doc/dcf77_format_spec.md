@@ -8,7 +8,7 @@
 | Standort | Mainflingen, Deutschland (50°01′N 9°00′E) |
 | Reichweite | ~2000 km (Tagsignal), ~3500 km (Nachtsignal) |
 | Zeitbasis | UTC + Offset (CET/CEST), ausgestrahlt von der PTB |
-| Modulationsarten | Amplitudenmodulation (AM) + Phasenmodulation (PM, seit ~2012) |
+| Modulationsarten | Amplitudenmodulation (AM) + Phasenmodulation (PM, seit den 1980er Jahren) |
 
 ---
 
@@ -166,102 +166,85 @@ Die übertragene Zeit ist die **lokale Zeit Mitteleuropas** (MEZ/MESZ), nicht UT
 
 ## Teil 2: Phasenmodulation (PM)
 
-> ⚠️ **Hinweis zur Quelllage:** Die PTB hat die PM-Spezifikation nicht vollständig öffentlich dokumentiert. Die folgenden Angaben basieren auf veröffentlichten Forschungsarbeiten (insbesondere Hetzel et al., PTB) und rekonstruiertem Wissen. Wo Unsicherheit besteht, ist dies gekennzeichnet.
+> ℹ️ **Hinweis zur Quelllage:** Die PM ist in Hetzel (1988, EFTF) beschrieben; eine Zusammenfassung steht in [`hetzel_1988_eftf_summary.md`](hetzel_1988_eftf_summary.md). Die dort beschriebenen Parameter sind die Referenz für diese Spezifikation und stimmen mit RTL und Python-Modellen dieses Repos überein. Das aktuelle Betriebsverhalten des Senders (Phasenhub) ist nicht normativ veröffentlicht und ist als Kalibrationsparameter zu behandeln.
 
 ### 2.1 Einführung und Motivation
 
-Die Phasenmodulation wurde ab **ca. 2012/2013** eingeführt. Sie überträgt dieselbe Zeitinformation wie die AM, ist aber robuster gegenüber Amplitudenstörungen (Impulsnoise, Einstrahlungen). Insbesondere für Softwareempfänger (SDR) bietet das PM-Signal bessere Dekodierbarkeit bei schwachem Signal.
+Die Phasenmodulation wird seit den **1980er Jahren** ausgesendet (Hetzel 1987/1988; Messungen bereits 1987). Sie ist eine pseudozufällige Phasenumtastung (PRPSK) des Trägers und überträgt dieselbe Zeitinformation wie die AM, ist aber robuster gegenüber Amplitudenstörungen (Impulsnoise, Einstrahlungen). Der Phasenhub ist klein und im Mittel null, sodass der Träger weiterhin als Frequenznormal nutzbar bleibt. Für Softwareempfänger (SDR) bietet das PM-Signal bessere Dekodierbarkeit bei schwachem Signal und eine deutlich schärfere Zeitmarke als die AM-Flanke.
 
 ### 2.2 Physikalisches Modulationsprinzip
 
-Die Phasenmodulation ist ein **BPSK-Spreizspektrumsignal** (Binary Phase Shift Keying), das auf den 77,5-kHz-Träger aufgeprägt wird. Die AM-Absenkungen bleiben erhalten und überlagern sich mit dem PM-Signal.
+Die Phasenmodulation ist ein **BPSK-Spreizspektrumsignal** (Binary Phase Shift Keying), das auf den 77,5-kHz-Träger aufgeprägt wird. Die AM-Absenkungen bleiben erhalten und überlagern sich mit dem PM-Signal. Alle Phasensprünge und AM-Flanken liegen auf positiven Nulldurchgängen des Trägers.
 
-**Phasenzustände:**
+**Phasenzustände (nach der SIK-XOR-Verknüpfung):**
 ```
-Chip = 0 → Trägerphase +φ  (ca. +11° bis +13°, PTB-Quelle nicht eindeutig)
+Chip = 0 → Trägerphase +φ
 Chip = 1 → Trägerphase −φ
 ```
-Der genaue Phasenwinkel φ ist in der öffentlichen Literatur nicht einheitlich angegeben.
-⚠️ *Wahrscheinlichster Wert: φ ≈ 11,3° (entspricht einem Pegel-Seitenband von −15 dB). Decoder sollten φ als Kalibrationsparameter behandeln.*
+Der Phasenhub φ betrug in der Veröffentlichung von 1988 **±10°**; im heutigen Betrieb sind bis zu **±15°** gebräuchlich (die Simulation dieses Repos verwendet 15,6°). Decoder sollten φ als Kalibrationsparameter behandeln; das Vorzeichen-Mapping (Chip 0 → +φ) ist maßgeblich, nicht der Betrag.
 
 ### 2.3 Chip-Sequenz pro Sekunde
 
-Jede Sekunde enthält eine **512-Chip-Pseudozufallssequenz** (PRBS = Pseudo-Random Binary Sequence).
+Jede Sekunde trägt **eine 512-Chip-Pseudozufallssequenz** (PRBS), die zugleich **genau ein Datenbit** (Sequence Inversion Keying, SIK) überträgt: Das Bit ist über alle 512 Chips verteilt.
 
 ```
-Chip-Rate:     512 Chips/s  → Chipdauer = ~1,953 ms pro Chip
-Sequenzlänge:  512 Chips pro Sekunde
+Chip-Rate:     77 500 / 120 = 645,83 Chips/s  (120 Trägerperioden je Chip)
+Chipdauer:     ≈ 1,548 ms
+Sequenzlänge:  512 Chips  → ≈ 793 ms
+Startzeit:     200 ms nach Sekundenbeginn (AM-Flanke)
+Ende:          ≈ 7 ms vor der nächsten Sekundenmarke
 ```
 
-⚠️ *Die Chip-Rate 512 Chips/s ist in mehreren unabhängigen Quellen angegeben, aber die PTB hat keine normative Spezifikation veröffentlicht. Alternative Angaben (z. B. 1000 Chips/s) sind in der Literatur vorhanden.*
+Die Sequenz belegt nur den Teil der Sekunde, in dem die Trägeramplitude **nicht** abgesenkt ist (nach dem bis zu 200 ms langen AM-Puls); daher ist die Chipdauer 1,548 ms und nicht 1 s / 512.
 
 ### 2.4 Sequenzgenerierung (LFSR-Basissequenz)
 
-Die Basissequenz ist eine **m-Sequenz** (maximale Länge), erzeugt durch ein lineares rückgekoppeltes Schieberegister (LFSR).
+Die Basissequenz ist eine **m-Sequenz** maximaler Länge, erzeugt durch ein 9-stufiges Fibonacci-LFSR:
 
 ```
-LFSR-Länge:  9 Bit  → Sequenzlänge = 2⁹ − 1 = 511 Chips
+LFSR-Länge:  9 Bit  → Periode 2⁹ − 1 = 511 Chips
+Rückkopplung: XOR der Stufen 5 und 9  → p(x) = x⁹ + x⁵ + 1
+Startwert:   "000010001" (0x011), Ausgabe der Stufe 9 vor dem Schieben
 ```
 
-Das Generatorpolynom ist laut publizierten Implementierungen:
-```
-p(x) = x⁹ + x⁴ + 1
-```
+Das reziproke Polynom x⁹ + x⁴ + 1 erzeugt die **zeitlich umgekehrte** Sequenz; sie korreliert mit der gesendeten Sequenz nur schwach (verifiziert: max. |Kreuzkorrelation| 45 von 511) und ist daher **nicht austauschbar**.
 
-⚠️ *Dieses Polynom ist aus rekonstruierten Implementierungen (Open-Source-Decodern) entnommen, nicht aus einer offiziellen PTB-Quelle.*
+**Erweiterung auf 512 Chips:** Der Sender stellt der 511-Chip-m-Sequenz **ein Chip „0" voran** (keine Wiederholung eines Chips). Dadurch hat die Sequenz genau 256 Nullen und 256 Einsen, die Phasensumme über die Sequenz ist **null** (wichtig: kein DC-Anteil, der Träger bleibt phasenrein).
 
-**LFSR-Pseudocode:**
 ```python
-def lfsr_step(state: int) -> tuple[int, int]:
-    """9-Bit LFSR, Taps an Position 9 und 4 (1-indiziert)."""
-    bit = ((state >> 8) ^ (state >> 3)) & 1   # XOR Bit 9, Bit 4
-    state = ((state << 1) | bit) & 0x1FF      # 9-Bit maske
-    return state, bit
-
-def generate_m_sequence(seed: int = 1) -> list[int]:
-    chips = []
-    state = seed
+def make_prbs512() -> list[int]:
+    state = 0b000010001
+    chips = [0]                              # vorangestelltes Null-Chip
     for _ in range(511):
-        state, chip = lfsr_step(state)
-        chips.append(chip)
-    return chips  # 511 Chips, letzter Chip wird wiederholt → 512
+        chips.append((state >> 8) & 1)       # Stufe 9, vor dem Schieben
+        fb = ((state >> 4) ^ (state >> 8)) & 1   # Stufen 5 XOR 9
+        state = ((state << 1) | fb) & 0x1FF
+    return chips                             # 256 Nullen, 256 Einsen
 ```
 
-### 2.5 Zeitcodierung in der PM-Sequenz
+### 2.5 Datencodierung (Sequence Inversion Keying)
 
-Die gesendete Chip-Sequenz pro Sekunde ist nicht die rohe m-Sequenz, sondern das Ergebnis einer **XOR-Verknüpfung** der m-Sequenz mit einem zeitabhängigen Code-Wort.
-
-```
-TX_Sequenz[s] = m_Sequenz XOR Code_Wort[s]
-```
-
-Das Code-Wort `Code_Wort[s]` kodiert die Sekunde `s` innerhalb der Minute sowie die vollständige AM-Zeitinformation (dieselben Bits wie im AM-Rahmen).
-
-⚠️ *Die genaue Konstruktion des Code-Worts (welche Bits an welchen Chip-Positionen, Faltungscode vs. direkte Abbildung) ist aus öffentlichen Quellen **nicht eindeutig rekonstruierbar**. Folgende Struktur ist in der Gemeinschaft bekannt, aber nicht normativ bestätigt:*
+Pro Sekunde wird **ein Bit** übertragen: Bit = 0 sendet die Sequenz unverändert, Bit = 1 sendet die invertierte Sequenz.
 
 ```
-Für Sekunde s (0–58) der Minute:
-  - Chips 0–8:   kodieren den Sekundenindex s (9 Bit binär)
-  - Chips 9–N:   kodieren die AM-Zeitbits (s. Teil 1) in noch
-                  nicht vollständig öffentlich belegter Reihenfolge
+TX_Sequenz[s] = PRBS512 XOR bit[s]
 ```
 
-**Empfehlung für Implementierung:** Für einen funktionsfähigen PM-Decoder existieren Open-Source-Referenzimplementierungen (z. B. `dcf77_metronome` von Udo Klein, `thijzert/dcf77` auf GitHub), die als Referenz dienen sollten, bis eine offizielle PTB-Spezifikation vorliegt.
+Die Datenbits entsprechen den AM-Bits (Teil 1). Zur Minutenmarkierung tragen die **Sekunden 0–9** die invertierte Sequenz; Sekunde 59 wird – anders als bei der AM – nicht ausgelassen. Eine zusätzliche Chip-weise Zeit- oder Sekundenindex-Codierung gibt es nicht.
 
 ### 2.6 PM-Dekodierungsstrategie
 
 ```
 1. Quadraturdemodulation des 77,5-kHz-Trägers (I/Q)
-2. Carrier-Phase-Recovery (PLL oder Hilbert-Transform)
-3. Chip-Synchronisation: Korrelation mit bekannter m-Sequenz
-   → Liefert Timing-Offset und Chip-Grenze
-4. BPSK-Entscheidung: sign(Re(chip_correlator)) → 0 oder 1
-5. XOR der empfangenen Sequenz mit der lokalen m-Sequenz
-   → Ergibt das gesendete Code-Wort
-6. Code-Wort dekodieren → Zeitinformation
+2. Carrier-Phase-Recovery (PLL), Phasenfehler als Eingang
+3. Synchronisation: Korrelation mit der bekannten 512-Chip-Sequenz
+   → Liefert Chip-Phase / Sekundenanfang (Korrelationsspitze ≈ 2 Chips breit)
+4. Bit-Entscheidung: Vorzeichen der Gesamtkorrelation pro Sekunde
+   → positiv = Bit 0, negativ = Bit 1
+5. Bits der Sekunden 0..58 wie im AM-Rahmen dekodieren (Teil 1)
 ```
 
-**Vorteil für Decoder:** Schritt 3 (Korrelation mit m-Sequenz) ermöglicht Zeitstempel-Genauigkeit im Sub-Millisekunden-Bereich, unabhängig von der AM.
+**Vorteil für Decoder:** Schritt 3 (Korrelation mit der Sequenz) ermöglicht Zeitstempel-Genauigkeit im Sub-Millisekunden-Bereich, unabhängig von der AM.
 
 ---
 
@@ -286,9 +269,8 @@ Rohsignal (77,5 kHz)
 Rohsignal (77,5 kHz)
   → I/Q-Demodulation (PLL)
   → Chip-Synchronisation (m-Sequenz-Korrelation)
-  → BPSK-Entscheidung je Chip
-  → XOR mit m-Sequenz → Code-Wort
-  → Code-Wort → Zeitstempel dekodieren
+  → Bit-Entscheidung per Vorzeichen der Sequenz-Korrelation (SIK)
+  → Bits wie im AM-Rahmen zum Zeitstempel dekodieren
   → Zeitstempel ausgeben (höhere Präzision als AM)
 ```
 
@@ -309,7 +291,7 @@ Ein robuster Decoder kombiniert beide:
 | Sommerzeit-Umschaltung | In der Umschaltstunde sind Bits 17 & 16 gesetzt | Bit 16 prüfen, Umschaltung explizit behandeln |
 | Schaltsekunden | Sekunde 60 existiert, kein Puls an Sekunde 59 entfällt | Bit 19 im Voraus prüfen |
 | Jahrtausend | Nur 2-stelliges Jahr übertragen | Fahrzeugbereich: 2000–2099 annehmen |
-| PM-Code unbekannt | Code-Wort-Konstruktion nicht normativ | Open-Source-Referenzen verwenden |
+| Falsche Sequenzrichtung | x⁹+x⁴+1 erzeugt die zeitlich umgekehrte Sequenz | Taps 5 & 9 (x⁹+x⁵+1), vorangestelltes Null-Chip |
 
 ---
 
@@ -319,4 +301,5 @@ Ein robuster Decoder kombiniert beide:
 - **Wikipedia DCF77 (EN):** https://en.wikipedia.org/wiki/DCF77  (AM-Rahmenstruktur gut dokumentiert)
 - **Udo Klein (dcf77.de):** Detaillierte PM-Analyse und Open-Source-Arduino-Decoder
 - **GitHub: thijzert/dcf77:** Referenz-PM-Decoder mit m-Sequenz-Implementierung
-- **Hetzel et al. (PTB-Bericht):** Veröffentlichungen zur Phasenmodulations-Einführung (Metrologia)
+- **Hetzel, P. (1988):** Proc. 2nd EFTF, S. 351–364; [PDF bei PTB](https://www.ptb.de/cms/fileadmin/internet/fachabteilungen/abteilung_4/4.4_zeit_und_frequenz/pdf/5_1988_Hetzel_-_Proc_EFTF_88.pdf), Zusammenfassung: [`hetzel_1988_eftf_summary.md`](hetzel_1988_eftf_summary.md)
+- **Hetzel, P. (1987):** Dissertation, Univ. Stuttgart; [PDF bei PTB](https://www.ptb.de/cms/fileadmin/internet/fachabteilungen/abteilung_4/4.4_zeit_und_frequenz/pdf/Hetzel_1987_Dissertation.pdf)

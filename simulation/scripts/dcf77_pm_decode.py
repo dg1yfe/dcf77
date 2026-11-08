@@ -2,7 +2,7 @@
 """Software DCF77 PM (PSK / SIK) reference decoder.
 
 Matches the FPGA PM-correlator chain: PRBS-9 with taps 5 & 9 initialised
-to "000000001" (post-force-1 state), chip rate f_T = 77500/120 ≈ 645.83 Hz
+to "000010001", chip rate f_T = 77500/120 ≈ 645.83 Hz
 = 31/96 of the 2 kS/s sample rate (exact rational), 1586 samples per
 1-second integration window starting 200 ms after each second boundary.
 
