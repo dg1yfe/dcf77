@@ -1,3 +1,5 @@
+<p align="center"><img src="doc/logo.svg" alt="DCF77 receiver/decoder" width="480"></p>
+
 # DCF77 Receiver/Decoder
 
 VHDL-2008 implementation of a DCF77 (77.5 kHz longwave time-signal) receiver
