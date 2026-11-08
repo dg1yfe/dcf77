@@ -224,7 +224,8 @@ preprocessor, run the regression:
 # Download the reference recordings into samples/ (see samples/PROVENANCE.md).
 python3 simulation/scripts/fetch_samples.py
 
-# Drop in your own WAV (mono real-valued, ≥ 12 kHz, DCF77 at 5 kHz IF).
+# Drop in your own WAV (mono real-valued, ≥ 12 kHz, DCF77 at 5 kHz IF;
+# pass --if-hz to the preprocessors for any other carrier position).
 cp my_dcf77_recording.wav samples/
 
 # (Optional) synthetic recording for self-testing.
@@ -240,8 +241,11 @@ python3 simulation/scripts/run.py "*rx_replay*"
 
 The preprocessor:
 
-1. Mixes the WAV down with a complex LO at `--if-hz` (default 5000 Hz)
-   so the DCF77 carrier lands at DC.
+1. Mixes the WAV down with a complex LO at the recording's IF so the
+   DCF77 carrier lands at DC. The IF comes from `--if-hz`, else from the
+   `CORPUS_IF_HZ` table in `wav_to_iq.py` (3 kHz for the `dcf_3_*`
+   recordings, 5 kHz for `dcf_strong` and `synth`), else 5000 Hz. A
+   cached `.meta` made at a different IF is regenerated.
 2. Low-passes (60 Hz) and decimates to **1 kS/s**.
 3. Writes interleaved little-endian int16 I/Q pairs to `*.s16`.
 4. Runs its **own software DCF77 decoder** (`dcf77_soft_decode.py`,

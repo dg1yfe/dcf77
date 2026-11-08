@@ -2,7 +2,8 @@
 """Convert a real-valued WAV recording to complex baseband I/Q at 1 kS/s.
 
 Input  : mono 16-b PCM WAV with the DCF77 signal at a known IF
-         (default 5 kHz; matches typical USB-baseband recordings).
+         (per-recording table CORPUS_IF_HZ below, default 5 kHz;
+         --if-hz overrides).
 Output : little-endian interleaved int16 I,Q pairs at 1 kS/s, in a .s16
          file consumed by simulation/tb/06_dcf77_rx_replay_tb.vhd, plus a
          .meta sidecar carrying stream parameters and (when the decoder
@@ -53,6 +54,34 @@ F_IF_DEFAULT_HZ = 5_000.0        # carrier position in the input baseband
 LPF_CUTOFF_HZ   = 60.0           # post-mix lowpass, well below f_if image
 LPF_NUMTAPS     = 201
 INT16_PEAK      = 16_384
+
+# Nominal carrier IF of the published replay corpus (fetch_samples.py).
+# The dcf_3_* KiwiSDR captures were taken with a 74.5 kHz USB dial, so the
+# 77.5 kHz carrier sits at 3 kHz; in dcf_strong and the synth fixture it
+# sits at 5 kHz.  A wrong IF puts the carrier outside the 60 Hz
+# LPF and the soft decoder sees only noise.  The IF cannot be found
+# reliably from the spectrum alone: dcf_3_5 carries an interference comb
+# near 5 kHz that is 12 dB above its 3 kHz carrier.  WAVs not listed here
+# fall back to F_IF_DEFAULT_HZ; --if-hz overrides both.
+CORPUS_IF_HZ = {
+    "dcf_3_1":     3_000.0,
+    "dcf_3_3":     3_000.0,
+    "dcf_3_4":     3_000.0,
+    "dcf_3_5":     3_000.0,
+    "dcf_3_5long": 3_000.0,
+    "dcf_3_6":     3_000.0,
+    "dcf_3_7":     3_000.0,
+    "dcf_3_7long": 3_000.0,
+    "dcf_strong":  5_000.0,
+    "synth":       5_000.0,
+}
+
+
+def if_hz_for(wav: Path, override: float | None = None) -> float:
+    """Carrier IF for `wav`: --if-hz override, else corpus table, else 5 kHz."""
+    if override is not None:
+        return override
+    return CORPUS_IF_HZ.get(wav.stem, F_IF_DEFAULT_HZ)
 
 
 def read_wav_mono(path: Path) -> tuple[np.ndarray, int]:
@@ -162,8 +191,18 @@ def maybe_warn_mismatch(decoded: dict, expect_sidecar: Path | None) -> None:
                   f"{key}: decoded={decoded[key]} expected={expect.get(key)}")
 
 
-def up_to_date(wav: Path, s16: Path, meta: Path) -> bool:
+def meta_if_matches(meta: Path, if_hz: float) -> bool:
+    """True if `meta` was produced at `if_hz` (stale-IF cache detection)."""
+    try:
+        return float(read_expect(meta).get("if_hz", "nan")) == float(if_hz)
+    except (OSError, ValueError):
+        return False
+
+
+def up_to_date(wav: Path, s16: Path, meta: Path, if_hz: float) -> bool:
     if not (s16.exists() and meta.exists()):
+        return False
+    if not meta_if_matches(meta, if_hz):
         return False
     return min(s16.stat().st_mtime, meta.stat().st_mtime) >= wav.stat().st_mtime
 
@@ -192,7 +231,7 @@ def process_wav(wav: Path, s16: Path, meta: Path, *,
 
 
 def process_all(samples_dir: Path, derived_dir: Path, *,
-                if_hz: float, force: bool) -> None:
+                if_hz: float | None, force: bool) -> None:
     derived_dir.mkdir(parents=True, exist_ok=True)
     wavs = sorted(samples_dir.glob("*.wav"))
     if not wavs:
@@ -201,11 +240,11 @@ def process_all(samples_dir: Path, derived_dir: Path, *,
     for wav in wavs:
         s16  = derived_dir / f"{wav.stem}.s16"
         meta = derived_dir / f"{wav.stem}.meta"
-        if not force and up_to_date(wav, s16, meta):
+        if not force and up_to_date(wav, s16, meta, if_hz_for(wav, if_hz)):
             print(f"[wav_to_iq] {wav.name}: up-to-date, skipping")
             continue
         expect = samples_dir / f"{wav.stem}.expect"
-        process_wav(wav, s16, meta, if_hz=if_hz,
+        process_wav(wav, s16, meta, if_hz=if_hz_for(wav, if_hz),
                     expect_sidecar=expect if expect.exists() else None)
 
 
@@ -231,8 +270,9 @@ def main() -> int:
                     default=Path(__file__).resolve().parent.parent
                     / "derived")
 
-    p.add_argument("--if-hz", type=float, default=F_IF_DEFAULT_HZ,
-                   help=f"IF position in the input WAV (default {F_IF_DEFAULT_HZ:g})")
+    p.add_argument("--if-hz", type=float, default=None,
+                   help="IF position in the input WAV (default: per-recording "
+                        f"CORPUS_IF_HZ entry, else {F_IF_DEFAULT_HZ:g})")
     p.add_argument("--force", action="store_true",
                    help="re-process even if outputs are up-to-date")
     args = p.parse_args()
@@ -245,13 +285,15 @@ def main() -> int:
     if not (args.wav_in and args.out and args.meta):
         p.error("single-file mode requires --in/--out/--meta")
 
-    if not args.force and up_to_date(args.wav_in, args.out, args.meta):
+    if not args.force and up_to_date(args.wav_in, args.out, args.meta,
+                                     if_hz_for(args.wav_in, args.if_hz)):
         print(f"[wav_to_iq] {args.wav_in.name}: up-to-date, skipping "
               f"(use --force to override)")
         return 0
 
     process_wav(args.wav_in, args.out, args.meta,
-                if_hz=args.if_hz, expect_sidecar=args.expect)
+                if_hz=if_hz_for(args.wav_in, args.if_hz),
+                expect_sidecar=args.expect)
     return 0
 
 

@@ -42,6 +42,8 @@ from dcf77_soft_decode import decode_iq, summarize
 from wav_to_iq import (
     INT16_PEAK,
     F_IF_DEFAULT_HZ,
+    if_hz_for,
+    meta_if_matches,
     read_wav_mono,
     downconvert,
     lpf,
@@ -115,8 +117,10 @@ def write_if_meta(path: Path, *,
     path.write_text("\n".join(lines) + "\n")
 
 
-def up_to_date(wav: Path, if_s16: Path, if_meta: Path) -> bool:
+def up_to_date(wav: Path, if_s16: Path, if_meta: Path, if_hz: float) -> bool:
     if not (if_s16.exists() and if_meta.exists()):
+        return False
+    if not meta_if_matches(if_meta, if_hz):
         return False
     return min(if_s16.stat().st_mtime,
                if_meta.stat().st_mtime) >= wav.stat().st_mtime
@@ -168,7 +172,7 @@ def _wrap_for_pool(args):
 
 
 def process_all(samples_dir: Path, derived_dir: Path, *,
-                if_hz: float, force: bool, jobs: int = 8) -> None:
+                if_hz: float | None, force: bool, jobs: int = 8) -> None:
     derived_dir.mkdir(parents=True, exist_ok=True)
     wavs = sorted(samples_dir.glob("*.wav"))
     if not wavs:
@@ -178,11 +182,12 @@ def process_all(samples_dir: Path, derived_dir: Path, *,
     for wav in wavs:
         if_s16  = derived_dir / f"{wav.stem}.if.s16"
         if_meta = derived_dir / f"{wav.stem}.if.meta"
-        if not force and up_to_date(wav, if_s16, if_meta):
+        if not force and up_to_date(wav, if_s16, if_meta,
+                                    if_hz_for(wav, if_hz)):
             print(f"[wav_to_if] {wav.name}: up-to-date, skipping")
             continue
         expect = samples_dir / f"{wav.stem}.expect"
-        jobs_pending.append((wav, if_s16, if_meta, if_hz,
+        jobs_pending.append((wav, if_s16, if_meta, if_hz_for(wav, if_hz),
                              expect if expect.exists() else None))
     if not jobs_pending:
         return
@@ -223,8 +228,10 @@ def main() -> int:
                     default=Path(__file__).resolve().parent.parent
                     / "derived")
 
-    p.add_argument("--if-hz", type=float, default=F_IF_DEFAULT_HZ,
-                   help=f"IF position in the input WAV (default {F_IF_DEFAULT_HZ:g})")
+    p.add_argument("--if-hz", type=float, default=None,
+                   help="IF position in the input WAV (default: per-recording "
+                        "wav_to_iq.CORPUS_IF_HZ entry, else "
+                        f"{F_IF_DEFAULT_HZ:g})")
     p.add_argument("--force", action="store_true",
                    help="re-process even if outputs are up-to-date")
     p.add_argument("--jobs", "-j", type=int, default=8,
@@ -239,13 +246,15 @@ def main() -> int:
     if not (args.wav_in and args.out and args.meta):
         p.error("single-file mode requires --in/--out/--meta")
 
-    if not args.force and up_to_date(args.wav_in, args.out, args.meta):
+    if not args.force and up_to_date(args.wav_in, args.out, args.meta,
+                                     if_hz_for(args.wav_in, args.if_hz)):
         print(f"[wav_to_if] {args.wav_in.name}: up-to-date, skipping "
               f"(use --force to override)")
         return 0
 
     process_wav(args.wav_in, args.out, args.meta,
-                if_hz=args.if_hz, expect_sidecar=args.expect)
+                if_hz=if_hz_for(args.wav_in, args.if_hz),
+                expect_sidecar=args.expect)
     return 0
 
 

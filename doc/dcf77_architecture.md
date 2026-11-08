@@ -674,7 +674,8 @@ cp dcf_xx.wav samples/
 
 # 2. Preprocess into derived/<stem>.if.s16 + .if.meta.
 #    --if-hz must match the actual DCF77 carrier position in the WAV
-#    (default 5000 Hz; pass 3000 for the typical USB-74.5 kHz dial).
+#    (default: the CORPUS_IF_HZ entry in wav_to_iq.py, else 5000 Hz;
+#    pass 3000 for the typical USB-74.5 kHz dial).
 python3 simulation/scripts/wav_to_if.py --in samples/dcf_xx.wav \
     --out simulation/derived/dcf_xx.if.s16 \
     --meta simulation/derived/dcf_xx.if.meta \
