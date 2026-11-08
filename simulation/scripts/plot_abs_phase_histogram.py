@@ -84,15 +84,15 @@ def main(argv: list[str]) -> int:
             "dcf_strong",
             "synth",
             "dcf_3_1",
-            "dcf_3_6.pallas-flydog.ddns.net_2026-05-31T22_21_43Z_74.50_usb",
-            "dcf_3_4.185.227.100.85_2026-05-31T22_05_56Z_74.50_usb",
-            "dcf_3_3.ei2hh.proxy.kiwisdr.com_2026-05-31T22_04_46Z_74.50_usb",
-            "dcf_3_7.midskiwi.ddns.net_2026-05-31T22_23_12Z_74.50_usb",
-            "dcf_3_5.sdr.cyhams.org_2026-05-31T22_14_44Z_74.50_usb",
+            "dcf_3_6",
+            "dcf_3_4",
+            "dcf_3_3",
+            "dcf_3_7",
+            "dcf_3_5",
             # Noise reference: dcf_3_5 mixed against 1750 Hz NCO (signal-
             # free part of the IF spectrum).  Distribution should be
             # essentially uniform on [0, 2048].
-            "dcf_3_5.sdr.cyhams.org_2026-05-31T22_14_44Z_74.50_usb.noise1750",
+            "dcf_3_5.noise1750",
         ]
     out = DERIVED / f"abs_phase_histogram_n{args.nbins}.png"
     plot_corpus(stems, out, args.nbins)

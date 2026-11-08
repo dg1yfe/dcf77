@@ -216,9 +216,14 @@ benches (`15_…pm_correlator_replay`, `16_…phase_err_capture`).
 
 ![Replay pipeline](doc/dcf77-replay-pipeline.drawio.svg)
 
-Drop a WAV into `samples/`, run the preprocessor, run the regression:
+The recordings are too large for this repository and are published as a
+tarball with a pinned SHA-256. Fetch them, drop in a WAV of your own, run the
+preprocessor, run the regression:
 
 ```sh
+# Download the reference recordings into samples/ (see samples/PROVENANCE.md).
+python3 simulation/scripts/fetch_samples.py
+
 # Drop in your own WAV (mono real-valued, ≥ 12 kHz, DCF77 at 5 kHz IF).
 cp my_dcf77_recording.wav samples/
 
